@@ -124,6 +124,12 @@ tc_libstdcxx() {
     make
     make DESTDIR="$ROOTFS" install
     rm -v "$ROOTFS"/usr/lib/lib{stdc++{,exp,fs},supc++}.la 2>/dev/null || true
+    # The pass-1 cross g++ searches for C++ headers under its *tool* include dir,
+    # $TOOLS/$LFS_TGT/include/c++/$ver — NOT the sysroot where DESTDIR put them.
+    # Without this bridge, later C++ cross-builds (gcc pass 2's libcody) fail with
+    # "fatal error: memory: No such file or directory". Mirror the headers there.
+    mkdir -p "$TOOLS_DIR/$LFS_TGT/include"
+    cp -a "$ROOTFS/usr/$LFS_TGT/include/c++" "$TOOLS_DIR/$LFS_TGT/include/"
 }
 
 run_stage "toolchain-binutils1" tc_binutils_pass1
