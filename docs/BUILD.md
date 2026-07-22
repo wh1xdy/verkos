@@ -28,6 +28,28 @@ You also need a host **`pip`** (`pip3`): `make fetch` uses it to download the
 sdists for systemd's build tools (meson, jinja2, markupsafe) into
 `sources/pip/`, so the chroot can install them offline. See decision D-008.
 
+### Building on macOS (Colima / Docker) — read this
+
+You cannot build VerkOS *on* macOS (no Linux kernel to chroot into, no
+`binfmt_misc`, Darwin's clang/ld aren't the GNU/ELF toolchain). Run the build
+inside a Linux VM. On Apple Silicon, Colima gives you a native `arm64` Linux VM,
+so `ARCH=aarch64` builds with no emulation:
+
+```sh
+colima start --arch aarch64 --cpu 12 --memory 16 --disk 80
+docker run -d --privileged --name verk -v "$PWD":/os -w /os \
+    -v verkwork:/os/work debian:bookworm sleep infinity   # NOTE the volume ↓
+```
+
+> ⚠️ **`work/` MUST live on a case-sensitive Linux filesystem.** macOS's APFS is
+> case-*insensitive*, and the Linux kernel source contains files that differ
+> only in case (e.g. `xt_CONNMARK.h` vs `xt_connmark.h`) — extracting it onto a
+> macOS-backed bind mount fails with `tar: Cannot open: Permission denied` and
+> `Documentation/Kbuild: Is a directory`. Mount a Docker **volume** at
+> `/os/work` (as above) so the build's scratch/extract tree is on the VM's ext4,
+> not the bind-mounted host path. The repo itself can stay bind-mounted; only
+> `work/` is sensitive.
+
 ## 2. Fetch sources
 
 ```sh
