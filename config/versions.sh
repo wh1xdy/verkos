@@ -56,9 +56,19 @@ EXPAT_VERSION="2.6.4";       EXPAT_SHA256=""
 ZLIB_VERSION="1.3.1";        ZLIB_SHA256=""
 LIBCAP_VERSION="2.70";       LIBCAP_SHA256=""
 
+# --- Python + systemd build tooling ----------------------------------------
+# systemd is built with meson/ninja and needs python3 + jinja2. We build libffi,
+# Python and ninja from source in the chroot; meson/jinja2/markupsafe come from
+# sdists fetched up front (see 10-fetch-sources.sh) and pip-installed offline.
+PYTHON_VERSION="3.12.7";     PYTHON_SHA256=""
+LIBFFI_VERSION="3.4.6";      LIBFFI_SHA256=""
+
 # --- Build-only helpers ----------------------------------------------------
 MESON_VERSION="1.6.0";       MESON_SHA256=""
 NINJA_VERSION="1.12.1";      NINJA_SHA256=""
+JINJA2_VERSION="3.1.4"
+MARKUPSAFE_VERSION="2.1.5"
+FLIT_CORE_VERSION="3.9.0"
 
 # ---------------------------------------------------------------------------
 # Download URL templates. %V = version. Grouped by upstream host.
@@ -76,3 +86,6 @@ URL_UTILLINUX="https://mirrors.edge.kernel.org/pub/linux/utils/util-linux"
 URL_LIBCAP="https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2"
 URL_EXPAT="https://github.com/libexpat/libexpat/releases/download"
 URL_ZLIB="https://zlib.net"
+URL_PYTHON="https://www.python.org/ftp/python"
+URL_LIBFFI="https://github.com/libffi/libffi/releases/download"
+URL_NINJA="https://github.com/ninja-build/ninja/archive/refs/tags"

@@ -109,3 +109,25 @@ The `OS` suffix disambiguates from those products. Short, distinct, brandable.
 
 **Note:** We may spin off differently-named variants later (e.g. a musl-based
 embedded build). VerkOS is the flagship glibc+systemd desktop-track distro.
+
+---
+
+## D-008 — systemd's Python build tools, staged offline
+
+**Decision:** systemd is built with meson/ninja and needs python3 + jinja2. We
+build **libffi, Python, and ninja from source** inside the chroot, and install
+**meson, jinja2, markupsafe** with `pip --no-index --no-build-isolation` from
+**sdists fetched up front** (`make fetch` downloads them into `sources/pip/` on
+the host, which has network + TLS).
+
+**Why:** It keeps the chroot build **fully offline** and avoids dragging in the
+classic LFS dependency avalanche just to satisfy a build tool — no OpenSSL (so
+Python needs no TLS for pip) and no Perl. All sources are still fetched and
+present before the build starts, matching how the rest of VerkOS is built.
+
+**Cost we accept:** `make fetch` needs a host `pip`. If it's absent, the tools
+aren't staged and the systemd step stops with a clear message rather than
+failing deep in the build.
+
+**Rejected:** Building OpenSSL + Perl so Python can pip-install over the network
+mid-chroot (larger, network-dependent build); hand-vendoring meson (brittle).
