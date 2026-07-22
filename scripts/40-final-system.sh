@@ -153,15 +153,14 @@ JOBS=$(nproc 2>/dev/null || echo 2); export MAKEFLAGS="-j$JOBS"
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
 
-# 1. glibc (native rebuild — clean, final libc)
-say "glibc ${GLIBC_VERSION}"
-d=$(unpack glibc-${GLIBC_VERSION}.tar.xz); cd "$d"
-mkdir -p build && cd build
-echo "rootsbindir=/usr/sbin" > configparms
-../configure --prefix=/usr --disable-werror --enable-kernel=4.19 \
-    --enable-stack-protector=strong --disable-nscd libc_cv_slibdir=/usr/lib
-make && make install
-sed '/RTLDLIST=/s@/usr@@g' -i /usr/bin/ldd || true
+# 1. glibc — SKIPPED. The cross-toolchain (stage 20) already installed a working
+# glibc ${GLIBC_VERSION} into the rootfs from the same source. A native rebuild
+# here is LFS hygiene (removes cross-build artifacts) but is NOT required to
+# boot, and doing it first would need bison + python built as chroot temporary
+# tools (LFS chapter 7) which we don't build yet. Getting to first boot takes
+# priority; a proper ch7-temp-tools + ch8-glibc rebuild is a later improvement.
+say "glibc ${GLIBC_VERSION} (using cross-installed libc; native rebuild skipped)"
+test -f /usr/lib/libc.so.6 || { echo "!! no libc in rootfs — stage 20 incomplete" >&2; exit 1; }
 cd /sources
 
 # 2. ncurses (native)
@@ -188,6 +187,12 @@ make && make install
 cd /sources
 
 # 4b. Core userland (LFS ch.8 subset) --------------------------------------
+# This rebuilds the full compiler + GNU userland into the final system. None of
+# it is needed to BOOT (temp-tools from stage 30 already put sed/grep/gawk/tar/
+# coreutils/bash/etc. in the rootfs; a compiler isn't needed at runtime), and it
+# is by far the slowest, most failure-prone part. Skip it by default to reach
+# first boot fast; set VERK_FULL_USERLAND=1 to build the complete userland.
+if [ "${VERK_FULL_USERLAND:-0}" = "1" ]; then
 # bzip2 (LFS recipe: shared lib + binaries)
 say "bzip2 ${BZIP2_VERSION}"
 d=$(unpack bzip2-${BZIP2_VERSION}.tar.gz); cd "$d"
@@ -267,6 +272,7 @@ for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
     make && make install
     cd /sources
 done
+fi   # end VERK_FULL_USERLAND
 
 # 5. util-linux (systemd needs libmount/libblkid/libuuid)
 say "util-linux ${UTIL_LINUX_VERSION}"
