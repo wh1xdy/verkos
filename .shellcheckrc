@@ -1,0 +1,10 @@
+# ShellCheck configuration for VerkOS.
+# The build scripts intentionally source sibling files and rely on variables
+# defined in config/*.sh, so a few checks are noise here.
+external-sources=true
+
+# SC1090/SC1091: "can't follow non-constant / not-included source" — our scripts
+#   source config files by computed path on purpose.
+disable=SC1090,SC1091
+# SC2086: intentional word-splitting on $QEMU_EXTRA / $GCC_CONFIG_FLAGS (flag lists).
+disable=SC2086
