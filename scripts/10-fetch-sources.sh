@@ -36,6 +36,7 @@ fetch_one "file-${FILE_VERSION}.tar.gz"               "$FILE_SHA256"
 fetch_one "bzip2-${BZIP2_VERSION}.tar.gz"             "$BZIP2_SHA256"
 fetch_one "zlib-${ZLIB_VERSION}.tar.gz"               "$ZLIB_SHA256"
 fetch_one "gperf-${GPERF_VERSION}.tar.gz"             "$GPERF_SHA256"
+fetch_one "pkgconf-${PKGCONF_VERSION}.tar.xz"         "$PKGCONF_SHA256"
 
 # System layer (built natively in the chroot; downloaded here).
 fetch_one "expat-${EXPAT_VERSION}.tar.xz"             "$EXPAT_SHA256"

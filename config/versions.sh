@@ -46,6 +46,7 @@ DIFFUTILS_VERSION="3.10";    DIFFUTILS_SHA256="90e5e93cc724e4ebe12ede80df1634063
 PATCH_VERSION="2.7.6";       PATCH_SHA256="ac610bda97abe0d9f6b7c963255a11dcb196c25e337c61f94e4778d632f1d8fd"
 BZIP2_VERSION="1.0.8";       BZIP2_SHA256="ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269"
 GPERF_VERSION="3.1";         GPERF_SHA256="588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2"
+PKGCONF_VERSION="2.3.0";     PKGCONF_SHA256="3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
 
 # --- Init / system layer ---------------------------------------------------
 SYSTEMD_VERSION="256.7";     SYSTEMD_SHA256="896d76ff65c88f5fd9e42f90d152b0579049158a163431dd77cdc57748b1d7b0"
@@ -96,3 +97,4 @@ URL_FLEX="https://github.com/westes/flex/releases/download"
 URL_PYTHON="https://www.python.org/ftp/python"
 URL_LIBFFI="https://github.com/libffi/libffi/releases/download"
 URL_NINJA="https://github.com/ninja-build/ninja/archive/refs/tags"
+URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
