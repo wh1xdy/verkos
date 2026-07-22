@@ -313,7 +313,8 @@ d=$(unpack libcap-${LIBCAP_VERSION}.tar.xz); cd "$d"
 make prefix=/usr lib=lib && make prefix=/usr lib=lib install; cd /sources
 say "kmod ${KMOD_VERSION}"
 d=$(unpack kmod-${KMOD_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --sysconfdir=/etc --with-openssl=no --with-xz --with-zstd=no
+./configure --prefix=/usr --sysconfdir=/etc --with-openssl=no --with-xz \
+    --with-zstd=no --disable-manpages
 make && make install; cd /sources
 
 # 7. gperf — systemd build dep
