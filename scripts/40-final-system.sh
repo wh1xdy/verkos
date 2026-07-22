@@ -276,7 +276,7 @@ make && make install
 cd /sources
 
 # 6. zlib, xz, expat, libcap, kmod — systemd link deps
-for pkg in "zlib-${ZLIB_VERSION}.tar.xz" "xz-${XZ_VERSION}.tar.xz"; do
+for pkg in "zlib-${ZLIB_VERSION}.tar.gz" "xz-${XZ_VERSION}.tar.xz"; do
     say "$pkg"; d=$(unpack "$pkg"); cd "$d"
     ./configure --prefix=/usr; make && make install; cd /sources
 done
