@@ -132,6 +132,10 @@ tc_libstdcxx() {
     cp -a "$ROOTFS/usr/$LFS_TGT/include/c++" "$TOOLS_DIR/$LFS_TGT/include/"
 }
 
+# The merged-/usr symlinks must exist before glibc installs (see common.sh), so
+# the dynamic linker is reachable via /lib and chroot works later.
+create_usr_layout
+
 run_stage "toolchain-binutils1" tc_binutils_pass1
 run_stage "toolchain-gcc1"      tc_gcc_pass1
 run_stage "toolchain-headers"   tc_linux_headers

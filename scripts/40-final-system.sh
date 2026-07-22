@@ -20,9 +20,13 @@ require_ready() {
 # --- LFS 7.x: directory tree, essential files, users -----------------------
 prepare_tree() {
     step "Creating the directory layout + essential files"
+    # Ensure the merged-/usr symlinks (/bin /lib /sbin -> usr/*) are in place and
+    # NOT clobbered by a real dir — creating e.g. /lib/firmware directly would
+    # turn /lib into a real directory and break the dynamic linker path.
+    create_usr_layout
     sudo mkdir -p "$ROOTFS"/{boot,home,mnt,opt,srv}
     sudo mkdir -p "$ROOTFS"/etc/{opt,sysconfig}
-    sudo mkdir -p "$ROOTFS"/lib/firmware
+    sudo mkdir -p "$ROOTFS"/usr/lib/firmware
     sudo mkdir -p "$ROOTFS"/media/{floppy,cdrom}
     sudo mkdir -p "$ROOTFS"/usr/{,local/}{include,src}
     sudo mkdir -p "$ROOTFS"/usr/lib/locale
