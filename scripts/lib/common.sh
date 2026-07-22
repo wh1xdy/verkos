@@ -93,6 +93,7 @@ source_url() {
                       echo "$URL_GNU/${pkg%%-*}/$pkg" ;;
         linux-*)      echo "$URL_KERNEL/v${LINUX_VERSION%%.*}.x/$pkg" ;;
         ncurses-*)    echo "$URL_NCURSES/$pkg" ;;
+        flex-*)       echo "$URL_FLEX/v${FLEX_VERSION}/$pkg" ;;
         xz-*)         echo "$URL_XZ/v${XZ_VERSION}/$pkg" ;;
         systemd-*)    echo "$URL_SYSTEMD/v${SYSTEMD_VERSION}.tar.gz" ;;
         bzip2-*)      echo "$URL_SOURCEWARE/bzip2/$pkg" ;;
@@ -102,6 +103,7 @@ source_url() {
         libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
         expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;
         zlib-*)       echo "$URL_ZLIB/$pkg" ;;
+        file-*)       echo "$URL_FILE/$pkg" ;;
         Python-*)     echo "$URL_PYTHON/${PYTHON_VERSION}/$pkg" ;;
         libffi-*)     echo "$URL_LIBFFI/v${LIBFFI_VERSION}/$pkg" ;;
         ninja-*)      echo "$URL_NINJA/v${NINJA_VERSION}.tar.gz" ;;
