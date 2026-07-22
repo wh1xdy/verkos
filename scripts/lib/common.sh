@@ -53,6 +53,26 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 2)}"
 
 mkdirs() { mkdir -p "$SRC_DIR" "$TOOLS_DIR" "$ROOTFS" "$BUILD_DIR" "$OUT_DIR" "$STAMP_DIR"; }
 
+# Create the merged-/usr layout in the rootfs: /bin, /lib, /sbin (and /lib64)
+# as symlinks into /usr. This MUST exist before glibc installs, so the dynamic
+# linker lands at a path the ELF interpreter (/lib/ld-linux-*.so) resolves to;
+# otherwise `chroot` later fails with "failed to run /usr/bin/env: No such file
+# or directory" (a missing-interpreter error in disguise). Idempotent.
+create_usr_layout() {
+    mkdir -p "$ROOTFS"/usr/{bin,lib,sbin}
+    local d
+    for d in bin lib sbin lib64; do
+        if [ ! -L "$ROOTFS/$d" ]; then
+            # If a real dir snuck in, fold its contents into /usr and replace it.
+            if [ -d "$ROOTFS/$d" ]; then
+                cp -a "$ROOTFS/$d/." "$ROOTFS/usr/${d/lib64/lib}/" 2>/dev/null || true
+                rm -rf "$ROOTFS/$d"
+            fi
+            ln -sfn "usr/${d/lib64/lib}" "$ROOTFS/$d"
+        fi
+    done
+}
+
 # --- Host vs target architecture -------------------------------------------
 HOST_ARCH="$(uname -m)"
 # The host's own target triple (for configure --build=...). gcc -dumpmachine is
