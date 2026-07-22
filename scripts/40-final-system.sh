@@ -155,6 +155,13 @@ export FORCE_UNSAFE_CONFIGURE=1
 # Where pkgconf (built below) should look for .pc files installed by our packages.
 export PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
 JOBS=$(nproc 2>/dev/null || echo 2); export MAKEFLAGS="-j$JOBS"
+
+# Per-package stamps so a re-run (after fixing a later package) skips the ones
+# already installed instead of rebuilding the whole chain. Wrap a block as:
+#   if need X; then ...build...; mark X; fi
+NST=/sources/.nst; mkdir -p "$NST"
+need(){ [ -f "$NST/$1" ] && { echo ":: $1 already built, skipping"; return 1; } || return 0; }
+mark(){ touch "$NST/$1"; }
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
 
@@ -177,7 +184,8 @@ make && make install
 ln -sfv pkgconf /usr/bin/pkg-config
 cd /sources
 
-# 2. ncurses (native)
+# 2-4. ncurses + bash + coreutils (native)
+if need core-userland; then
 say "ncurses ${NCURSES_VERSION}"
 d=$(unpack ncurses-${NCURSES_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --mandir=/usr/share/man --with-shared \
@@ -199,6 +207,8 @@ d=$(unpack coreutils-${COREUTILS_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-no-install-program=kill,uptime
 make && make install
 cd /sources
+mark core-userland
+fi
 
 # 4b. Core userland (LFS ch.8 subset) --------------------------------------
 # This rebuilds the full compiler + GNU userland into the final system. None of
@@ -289,6 +299,7 @@ done
 fi   # end VERK_FULL_USERLAND
 
 # 5. util-linux (systemd needs libmount/libblkid/libuuid)
+if need util-linux; then
 say "util-linux ${UTIL_LINUX_VERSION}"
 d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
 ./configure --libdir=/usr/lib --runstatedir=/run --disable-chfn-chsh \
@@ -299,6 +310,8 @@ d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
     ADJTIME_PATH=/var/lib/hwclock/adjtime
 make && make install
 cd /sources
+mark util-linux
+fi
 
 # 6. zlib, xz, expat, libcap, kmod — systemd link deps
 for pkg in "zlib-${ZLIB_VERSION}.tar.gz" "xz-${XZ_VERSION}.tar.xz"; do
@@ -324,17 +337,26 @@ d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
 
 # 7b. Python build toolchain for systemd (meson/ninja/jinja2) ---------------
 # libffi → Python → ninja (all from source), then meson/jinja2 via offline pip.
+# --libdir=/usr/lib: libffi otherwise installs to /usr/lib64, which is off the
+# linker path in our merged-/usr (lib, not lib64) layout, so Python's _ctypes
+# fails to import (libffi.so.8 not found). Refresh the linker cache after.
 say "libffi ${LIBFFI_VERSION}"
 d=$(unpack libffi-${LIBFFI_VERSION}.tar.gz); cd "$d"
-./configure --prefix=/usr --disable-static
-make && make install; cd /sources
+./configure --prefix=/usr --libdir=/usr/lib --disable-static
+make && make install
+printf '/usr/lib\n/usr/local/lib\n' > /etc/ld.so.conf
+ldconfig
+cd /sources
 
+if need python; then
 say "Python ${PYTHON_VERSION}"
 d=$(unpack Python-${PYTHON_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-shared --with-system-expat \
     --with-ensurepip=yes --without-static-libpython
 make && make install
 cd /sources
+mark python
+fi
 
 say "ninja ${NINJA_VERSION}"
 d=$(unpack ninja-${NINJA_VERSION}.tar.gz); cd "$d"
