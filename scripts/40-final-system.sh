@@ -296,6 +296,41 @@ say "gperf ${GPERF_VERSION}"
 d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr; make && make install; cd /sources
 
+# 7b. Python build toolchain for systemd (meson/ninja/jinja2) ---------------
+# libffi → Python → ninja (all from source), then meson/jinja2 via offline pip.
+say "libffi ${LIBFFI_VERSION}"
+d=$(unpack libffi-${LIBFFI_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --disable-static
+make && make install; cd /sources
+
+say "Python ${PYTHON_VERSION}"
+d=$(unpack Python-${PYTHON_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --enable-shared --with-system-expat \
+    --with-ensurepip=yes --without-static-libpython
+make && make install
+cd /sources
+
+say "ninja ${NINJA_VERSION}"
+d=$(unpack ninja-${NINJA_VERSION}.tar.gz); cd "$d"
+python3 configure.py --bootstrap
+install -vm755 ninja /usr/bin/
+cd /sources
+
+say "meson + jinja2 (offline pip from /sources/pip)"
+if [ -d /sources/pip ]; then
+    # --no-build-isolation reuses the setuptools/wheel that ensurepip installed;
+    # flit_core must land first (it's jinja2's build backend).
+    pip3 install --no-index --no-build-isolation --find-links /sources/pip flit_core
+    pip3 install --no-index --no-build-isolation --find-links /sources/pip \
+        markupsafe jinja2 meson
+else
+    echo "!! /sources/pip missing — run 'make fetch' on a host with pip first" >&2
+    exit 1
+fi
+command -v meson >/dev/null && command -v ninja >/dev/null \
+    || { echo "!! meson/ninja not available after install" >&2; exit 1; }
+cd /sources
+
 # 8. D-Bus (systemd's IPC bus)
 say "dbus ${DBUS_VERSION}"
 d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
@@ -389,11 +424,13 @@ else
     log "foreign chroot via ${QEMU_USER}-static"
 fi
 
-# Meson/ninja/jinja2 are build-only deps for systemd; ensure they're reachable.
-# On a host-assisted build they can be provided via the host pip into the chroot,
-# or built earlier. We check and warn rather than fail silently.
-enter_rootfs 'command -v meson >/dev/null && command -v ninja >/dev/null' \
-    || warn "meson/ninja not found in chroot — systemd step will need them (pip install meson ninja jinja2, or build them first)"
+# systemd's build tools (meson/ninja/jinja2) are built inside the chroot by the
+# native script: libffi+Python+ninja from source, meson/jinja2 via offline pip
+# from the sdists that 'make fetch' staged under sources/pip/. Verify they exist.
+if [ ! -d "$SRC_DIR/pip" ]; then
+    warn "sources/pip/ is missing — the systemd build tools weren't staged."
+    warn "Run 'make fetch' on a host with pip before the final-system build."
+fi
 
 if enter_rootfs '/root/build-native.sh'; then
     stamp_set "final-system-complete"

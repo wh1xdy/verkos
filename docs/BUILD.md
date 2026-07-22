@@ -24,6 +24,10 @@ For **foreign-architecture** builds (aarch64/i686 on an x86_64 host) you also
 need `qemu-user-static` and `binfmt_misc` support (most distros ship this as the
 `qemu-user-static` package).
 
+You also need a host **`pip`** (`pip3`): `make fetch` uses it to download the
+sdists for systemd's build tools (meson, jinja2, markupsafe) into
+`sources/pip/`, so the chroot can install them offline. See decision D-008.
+
 ## 2. Fetch sources
 
 ```sh
