@@ -72,4 +72,9 @@ fi
 
 echo
 ok "All sources present in $SRC_DIR"
-[ -f "$LOCKFILE" ] && warn "Some packages had no pinned hash — see $LOCKFILE and paste values into config/versions.sh"
+# NB: a bare `[ -f X ] && warn` as the final line makes the script exit 1 when the
+# test is false (the all-pinned success case), which fails `make fetch`. Guard it.
+if [ -f "$LOCKFILE" ]; then
+    warn "Some packages had no pinned hash — see $LOCKFILE and paste values into config/versions.sh"
+fi
+exit 0
