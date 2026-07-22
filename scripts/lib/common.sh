@@ -93,6 +93,7 @@ source_url() {
                       echo "$URL_GNU/${pkg%%-*}/$pkg" ;;
         linux-*)      echo "$URL_KERNEL/v${LINUX_VERSION%%.*}.x/$pkg" ;;
         ncurses-*)    echo "$URL_NCURSES/$pkg" ;;
+        flex-*)       echo "$URL_FLEX/v${FLEX_VERSION}/$pkg" ;;
         xz-*)         echo "$URL_XZ/v${XZ_VERSION}/$pkg" ;;
         systemd-*)    echo "$URL_SYSTEMD/v${SYSTEMD_VERSION}.tar.gz" ;;
         bzip2-*)      echo "$URL_SOURCEWARE/bzip2/$pkg" ;;

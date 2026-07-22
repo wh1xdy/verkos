@@ -87,8 +87,32 @@ make distclean              # remove everything under work/ (including sources)
 - **Checksum mismatch on fetch** — upstream re-rolled a tarball or a mirror is
   bad. Verify the new hash manually, then update `config/versions.sh`.
 
+## Pinning checksums
+
+`config/versions.sh` records a SHA-256 for every source tarball. When one is
+empty, `make fetch` downloads the file, records the computed hash into
+`config/versions.lock`, and warns; a pinned hash makes the build *refuse* any
+tarball that doesn't match.
+
+To fill in (or refresh) the hashes automatically:
+
+```sh
+scripts/pin-hashes.sh            # download each source, compute + write its hash
+scripts/pin-hashes.sh --dry-run  # show hashes without editing versions.sh
+scripts/pin-hashes.sh --force    # re-pin even already-set hashes
+```
+
+The tool doubles as a version/URL validator — a failed download means the
+version or URL in `versions.sh` is wrong.
+
+> **Note:** 29 of the 36 hashes are already pinned. The remaining 7 are
+> github-hosted (xz, flex, expat, libffi, ninja, systemd) plus zlib; they
+> couldn't be fetched from the sandboxed build container that scaffolded this
+> repo (its egress policy blocks github). Run `scripts/pin-hashes.sh` once on
+> your laptop — which has normal network — to fill them in, then commit.
+
 ## Bumping a package version
 
 All versions live in one place: `config/versions.sh`. To bump one, change its
-version and SHA-256 there, then `make fetch` again. Nothing else references
-version numbers directly.
+version and SHA-256 there (or clear the SHA and re-run `pin-hashes.sh`), then
+`make fetch` again. Nothing else references version numbers directly.
