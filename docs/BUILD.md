@@ -97,19 +97,19 @@ tarball that doesn't match.
 To fill in (or refresh) the hashes automatically:
 
 ```sh
-scripts/pin-hashes.sh            # download each source, compute + write its hash
-scripts/pin-hashes.sh --dry-run  # show hashes without editing versions.sh
-scripts/pin-hashes.sh --force    # re-pin even already-set hashes
+scripts/pin-hashes.sh                 # download each source, compute + write its hash
+scripts/pin-hashes.sh --dry-run       # show hashes without editing versions.sh
+scripts/pin-hashes.sh --only gcc,zlib # re-pin just these packages
 ```
 
 The tool doubles as a version/URL validator — a failed download means the
-version or URL in `versions.sh` is wrong.
+version or URL in `versions.sh` is wrong. It runs on Linux or macOS and retries
+with backoff to ride out mirror rate limiting.
 
-> **Note:** 29 of the 36 hashes are already pinned. The remaining 7 are
-> github-hosted (xz, flex, expat, libffi, ninja, systemd) plus zlib; they
-> couldn't be fetched from the sandboxed build container that scaffolded this
-> repo (its egress policy blocks github). Run `scripts/pin-hashes.sh` once on
-> your laptop — which has normal network — to fill them in, then commit.
+> **Status:** all 35 source tarballs are pinned with verified SHA-256 checksums.
+> `MESON` is intentionally unpinned — it's installed as a pip sdist, not fetched
+> as a tarball. To bump a package, change its version and clear its `*_SHA256`,
+> then re-run `pin-hashes.sh --only <pkg>`.
 
 ## Bumping a package version
 
