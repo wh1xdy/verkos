@@ -283,6 +283,7 @@ d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
 ./configure --libdir=/usr/lib --runstatedir=/run --disable-chfn-chsh \
     --disable-login --disable-nologin --disable-su --disable-setpriv \
     --disable-runuser --disable-pylibmount --disable-static \
+    --disable-liblastlog2 \
     --without-python --without-systemd --without-systemdsystemunitdir \
     ADJTIME_PATH=/var/lib/hwclock/adjtime
 make && make install
