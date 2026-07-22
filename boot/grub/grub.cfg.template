@@ -1,0 +1,20 @@
+# VerkOS GRUB configuration template (Phase 3 — booting real hardware / disk images).
+#
+# Not used by the QEMU direct-kernel dev workflow. This is the starting point for
+# when we build GRUB disk images. Placeholders (@VAR@) are filled in by the
+# image-builder when we get there.
+#
+# Install target: /boot/grub/grub.cfg
+
+set default=0
+set timeout=5
+
+menuentry "VerkOS @VERSION@ (@ARCH@)" {
+    linux   /boot/vmlinuz-@KERNEL_VERSION@ root=@ROOT_DEV@ ro console=tty0
+    initrd  /boot/initramfs-@ARCH@.cpio.gz
+}
+
+menuentry "VerkOS @VERSION@ (@ARCH@) — recovery / single user" {
+    linux   /boot/vmlinuz-@KERNEL_VERSION@ root=@ROOT_DEV@ ro single console=tty0
+    initrd  /boot/initramfs-@ARCH@.cpio.gz
+}
