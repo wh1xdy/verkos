@@ -10,6 +10,10 @@ Where we are and where we're going. Checkboxes track real progress.
 - [x] Branding (`config/os-release`)
 - [x] Build orchestration skeleton (`Makefile`, `scripts/build.sh`, `common.sh`)
 - [x] QEMU boot launchers + GRUB template
+- [x] Checksum-pinning tool (`scripts/pin-hashes.sh`) + 29/36 real SHA-256 pinned
+- [ ] Pin the last 7 (github-hosted: xz, flex, expat, libffi, ninja, systemd, +
+      zlib) — blocked by this build container's egress policy; run
+      `scripts/pin-hashes.sh` once on a normal-network machine to fill them
 
 ## Phase 1 — First boot (x86_64)
 
@@ -60,6 +64,14 @@ The long game — replace stack components with our own:
 - [ ] Our own coreutils-equivalents where it's instructive
 - [ ] Eventually: **a custom kernel** (the original dream), starting as a bootable
       toy kernel on x86_64 and growing from there
+
+## Parked ideas
+
+Things we want to do but not yet:
+
+- [ ] **Integrate Alex's own software** into VerkOS in some fun way — e.g.
+      preinstall his apps in the image, ship them as systemd services, or write
+      package recipes for them. (Details TBD — Alex to describe the software.)
 
 ---
 
