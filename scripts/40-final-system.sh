@@ -183,6 +183,87 @@ d=$(unpack coreutils-${COREUTILS_VERSION}.tar.xz); cd "$d"
 make && make install
 cd /sources
 
+# 4b. Core userland (LFS ch.8 subset) --------------------------------------
+# bzip2 (LFS recipe: shared lib + binaries)
+say "bzip2 ${BZIP2_VERSION}"
+d=$(unpack bzip2-${BZIP2_VERSION}.tar.gz); cd "$d"
+make -f Makefile-libbz2_so
+make clean
+make
+make PREFIX=/usr install
+cp -av libbz2.so.* /usr/lib
+ln -sfv libbz2.so.${BZIP2_VERSION} /usr/lib/libbz2.so
+cp -v bzip2-shared /usr/bin/bzip2
+ln -sfv bzip2 /usr/bin/bzcat
+ln -sfv bzip2 /usr/bin/bunzip2
+rm -f /usr/lib/libbz2.a
+cd /sources
+
+# file (native)
+say "file ${FILE_VERSION}"
+d=$(unpack file-${FILE_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr; make && make install; cd /sources
+
+# m4 (native)
+say "m4 ${M4_VERSION}"
+d=$(unpack m4-${M4_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr; make && make install; cd /sources
+
+# binutils (final, native)
+say "binutils ${BINUTILS_VERSION} (final)"
+d=$(unpack binutils-${BINUTILS_VERSION}.tar.xz); cd "$d"
+mkdir -p build && cd build
+../configure --prefix=/usr --sysconfdir=/etc --enable-ld=default \
+    --enable-plugins --enable-shared --disable-werror --enable-64-bit-bfd \
+    --enable-new-dtags --with-system-zlib --enable-default-hash-style=gnu \
+    --enable-gprofng=no
+make tooldir=/usr && make tooldir=/usr install
+rm -fv /usr/lib/lib{bfd,ctf,ctf-nobfd,opcodes,sframe}.a
+cd /sources
+
+# gcc (final, native) — gmp/mpfr/mpc bundled in-tree
+say "gcc ${GCC_VERSION} (final)"
+d=$(unpack gcc-${GCC_VERSION}.tar.xz); cd "$d"
+tar -xf ../gmp-${GMP_VERSION}.tar.xz  && mv gmp-${GMP_VERSION}  gmp
+tar -xf ../mpfr-${MPFR_VERSION}.tar.xz && mv mpfr-${MPFR_VERSION} mpfr
+tar -xf ../mpc-${MPC_VERSION}.tar.gz  && mv mpc-${MPC_VERSION}  mpc
+case $(uname -m) in
+    x86_64) sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64 ;;
+esac
+mkdir -p build && cd build
+../configure --prefix=/usr LD=ld --enable-languages=c,c++ \
+    --enable-default-pie --enable-default-ssp \
+    --disable-multilib --disable-bootstrap --disable-fixincludes \
+    --with-system-zlib
+make && make install
+ln -sfv gcc /usr/bin/cc
+cd /sources
+
+# bison then flex (flex uses bison), then the GNU text/file tools
+say "bison ${BISON_VERSION}"
+d=$(unpack bison-${BISON_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr; make && make install; cd /sources
+say "flex ${FLEX_VERSION}"
+d=$(unpack flex-${FLEX_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --disable-static
+make && make install
+ln -sfv flex /usr/bin/lex
+cd /sources
+
+# sed grep gawk diffutils findutils tar gzip make patch (all: configure/make/install)
+for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
+            "gawk:${GAWK_VERSION}:xz" "diffutils:${DIFFUTILS_VERSION}:xz" \
+            "findutils:${FINDUTILS_VERSION}:xz" "tar:${TAR_VERSION}:xz" \
+            "gzip:${GZIP_VERSION}:xz" "make:${MAKE_VERSION}:gz" \
+            "patch:${PATCH_VERSION}:xz"; do
+    name=${spec%%:*}; rest=${spec#*:}; ver=${rest%:*}; ext=${rest##*:}
+    say "$name $ver"
+    d=$(unpack ${name}-${ver}.tar.${ext}); cd "$d"
+    ./configure --prefix=/usr
+    make && make install
+    cd /sources
+done
+
 # 5. util-linux (systemd needs libmount/libblkid/libuuid)
 say "util-linux ${UTIL_LINUX_VERSION}"
 d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
@@ -238,8 +319,49 @@ ninja && ninja install
 ln -sfv /usr/lib/systemd/systemd /usr/sbin/init
 cd /sources
 
+# --- System configuration (LFS ch.9 essentials) ---------------------------
+say "System configuration files"
+cat > /etc/fstab <<'FSTAB'
+# file-system   mount-point   type    options              dump  fsck
+tmpfs           /run          tmpfs   defaults             0     0
+proc            /proc         proc    nosuid,noexec,nodev  0     0
+sysfs           /sys          sysfs   nosuid,noexec,nodev  0     0
+devpts          /dev/pts      devpts  gid=5,mode=620       0     0
+FSTAB
+
+cat > /etc/resolv.conf <<'RC'
+nameserver 1.1.1.1
+nameserver 9.9.9.9
+RC
+
+ln -sfv /usr/share/zoneinfo/UTC /etc/localtime
+
+cat > /etc/ld.so.conf <<'LD'
+/usr/local/lib
+/opt/lib
+LD
+ldconfig || true
+
+# Minimal shell environment.
+cat > /etc/profile <<'PROF'
+export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+export PS1='\u@\h:\w\$ '
+export LANG=C.UTF-8
+PROF
+
+# Machine id (systemd needs one).
+systemd-machine-id-setup 2>/dev/null || echo uninitialized > /etc/machine-id
+
+# Text login by default; systemd auto-starts serial-getty on console=.
+systemctl set-default multi-user.target 2>/dev/null \
+  || ln -sfv /usr/lib/systemd/system/multi-user.target \
+             /etc/systemd/system/default.target
+
+# Empty root password for early development. CHANGE BEFORE ANY REAL USE.
+sed -i 's|^root:x:|root::|' /etc/passwd
+
 echo
-echo "==> Native build reached: systemd installed as /usr/sbin/init"
+echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"
 NATIVE
     sudo chmod +x "$ROOTFS/root/build-native.sh"
 }

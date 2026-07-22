@@ -20,7 +20,9 @@ The milestone: `make run ARCH=x86_64` drops us at a VerkOS shell.
 - [x] Stage 2: temporary tools cross-built into the rootfs — *full LFS ch.6 sequence written*
 - [x] Stage 3: chroot entry (native + qemu-user foreign) — *script done*
 - [x] Stage 4: final system driver — glibc→util-linux→dbus→**systemd** critical path *written*
-- [ ] Stage 4b: extend final-system with the remaining userland (see FINAL_SYSTEM_SEQUENCE)
+- [x] Stage 4b: full core userland (bzip2, file, m4, final binutils+gcc, bison,
+      flex, sed, grep, gawk, diffutils, findutils, tar, gzip, make, patch) +
+      system config (fstab, resolv.conf, machine-id, default target) *written*
 - [x] Stage 5: Linux kernel build — *script done*
 - [x] Stage 6: initramfs assembly — *script done*
 - [ ] ▶ **Actually compile it** on real hardware and fix what breaks
