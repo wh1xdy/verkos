@@ -30,8 +30,19 @@ fetch_one "xz-${XZ_VERSION}.tar.xz"                   "$XZ_SHA256"
 fetch_one "make-${MAKE_VERSION}.tar.gz"               "$MAKE_SHA256"
 fetch_one "findutils-${FINDUTILS_VERSION}.tar.xz"     "$FINDUTILS_SHA256"
 fetch_one "diffutils-${DIFFUTILS_VERSION}.tar.xz"     "$DIFFUTILS_SHA256"
+fetch_one "patch-${PATCH_VERSION}.tar.xz"             "$PATCH_SHA256"
+fetch_one "flex-${FLEX_VERSION}.tar.gz"               "$FLEX_SHA256"
+fetch_one "file-${FILE_VERSION}.tar.gz"               "$FILE_SHA256"
+fetch_one "bzip2-${BZIP2_VERSION}.tar.gz"             "$BZIP2_SHA256"
+fetch_one "zlib-${ZLIB_VERSION}.tar.xz"               "$ZLIB_SHA256"
+fetch_one "gperf-${GPERF_VERSION}.tar.gz"             "$GPERF_SHA256"
 
-# System layer (built in the chroot; downloaded here).
+# System layer (built natively in the chroot; downloaded here).
+fetch_one "expat-${EXPAT_VERSION}.tar.xz"             "$EXPAT_SHA256"
+fetch_one "libcap-${LIBCAP_VERSION}.tar.xz"           "$LIBCAP_SHA256"
+fetch_one "kmod-${KMOD_VERSION}.tar.xz"               "$KMOD_SHA256"
+fetch_one "util-linux-${UTIL_LINUX_VERSION}.tar.xz"   "$UTIL_LINUX_SHA256"
+fetch_one "dbus-${DBUS_VERSION}.tar.xz"               "$DBUS_SHA256"
 fetch_one "systemd-${SYSTEMD_VERSION}.tar.gz"         "$SYSTEMD_SHA256"
 
 echo

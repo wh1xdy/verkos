@@ -55,6 +55,9 @@ mkdirs() { mkdir -p "$SRC_DIR" "$TOOLS_DIR" "$ROOTFS" "$BUILD_DIR" "$OUT_DIR" "$
 
 # --- Host vs target architecture -------------------------------------------
 HOST_ARCH="$(uname -m)"
+# The host's own target triple (for configure --build=...). gcc -dumpmachine is
+# the same value LFS derives from config.guess, without needing each package's copy.
+HOST_TRIPLE="$(cc -dumpmachine 2>/dev/null || gcc -dumpmachine 2>/dev/null || echo "$HOST_ARCH-pc-linux-gnu")"
 is_native() {
     case "$ARCH:$HOST_ARCH" in
         x86_64:x86_64|i686:x86_64|i686:i686|aarch64:aarch64) return 0 ;;
@@ -86,12 +89,19 @@ source_url() {
         gmp-*)        echo "$URL_GNU/gmp/$pkg" ;;
         mpfr-*)       echo "$URL_GNU/mpfr/$pkg" ;;
         mpc-*)        echo "$URL_GNU/mpc/$pkg" ;;
-        bash-*|coreutils-*|m4-*|bison-*|gawk-*|grep-*|sed-*|tar-*|gzip-*|make-*|findutils-*|diffutils-*)
+        bash-*|coreutils-*|m4-*|bison-*|gawk-*|grep-*|sed-*|tar-*|gzip-*|make-*|findutils-*|diffutils-*|patch-*|gperf-*)
                       echo "$URL_GNU/${pkg%%-*}/$pkg" ;;
         linux-*)      echo "$URL_KERNEL/v${LINUX_VERSION%%.*}.x/$pkg" ;;
         ncurses-*)    echo "$URL_NCURSES/$pkg" ;;
         xz-*)         echo "$URL_XZ/v${XZ_VERSION}/$pkg" ;;
         systemd-*)    echo "$URL_SYSTEMD/v${SYSTEMD_VERSION}.tar.gz" ;;
+        bzip2-*)      echo "$URL_SOURCEWARE/bzip2/$pkg" ;;
+        dbus-*)       echo "$URL_DBUS/$pkg" ;;
+        kmod-*)       echo "$URL_KMOD/$pkg" ;;
+        util-linux-*) echo "$URL_UTILLINUX/v${UTIL_LINUX_VERSION%.*}/$pkg" ;;
+        libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
+        expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;
+        zlib-*)       echo "$URL_ZLIB/$pkg" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }

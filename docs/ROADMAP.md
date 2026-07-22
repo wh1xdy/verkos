@@ -15,15 +15,20 @@ Where we are and where we're going. Checkboxes track real progress.
 
 The milestone: `make run ARCH=x86_64` drops us at a VerkOS shell.
 
-- [ ] Stage 0: source fetch + SHA-256 verification working end to end
-- [ ] Stage 1: cross-toolchain (binutils, gcc, glibc) builds clean
-- [ ] Stage 2: temporary tools cross-built into the rootfs
-- [ ] Stage 3: chroot entry (native)
-- [ ] Stage 4: final system — glibc, coreutils, bash, util-linux
-- [ ] Stage 4b: **systemd** as PID 1
-- [ ] Stage 5: Linux kernel builds and boots
-- [ ] Stage 6: initramfs assembly
+- [x] Stage 0: source fetch + SHA-256 verify — *script done* (needs real hashes pinned)
+- [x] Stage 1: cross-toolchain (binutils, gcc, glibc, libstdc++) — *script done*
+- [x] Stage 2: temporary tools cross-built into the rootfs — *full LFS ch.6 sequence written*
+- [x] Stage 3: chroot entry (native + qemu-user foreign) — *script done*
+- [x] Stage 4: final system driver — glibc→util-linux→dbus→**systemd** critical path *written*
+- [ ] Stage 4b: extend final-system with the remaining userland (see FINAL_SYSTEM_SEQUENCE)
+- [x] Stage 5: Linux kernel build — *script done*
+- [x] Stage 6: initramfs assembly — *script done*
+- [ ] ▶ **Actually compile it** on real hardware and fix what breaks
 - [ ] 🎯 **Boots to a login prompt in QEMU**
+
+> Legend: *script done* = the build logic is written and syntax-clean, but the
+> heavy compile hasn't been run/validated on real hardware yet. The remaining
+> unchecked boxes are about *running* the build and fixing real-world breakage.
 
 ## Phase 2 — Multi-arch
 
