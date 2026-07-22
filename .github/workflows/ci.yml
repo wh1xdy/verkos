@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell-syntax:
+    name: Shell syntax (hard gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n on every script
+        run: |
+          set -e
+          fail=0
+          for f in scripts/*.sh scripts/lib/*.sh boot/*.sh; do
+            if bash -n "$f"; then echo "ok: $f"; else echo "FAIL: $f"; fail=1; fi
+          done
+          exit $fail
+
+      - name: bash -n on the embedded in-chroot native builder
+        run: |
+          set -e
+          sed -n "/<<'NATIVE'/,/^NATIVE$/p" scripts/40-final-system.sh \
+            | sed "1d;\$d" > /tmp/native.sh
+          echo "extracted $(wc -l < /tmp/native.sh) lines"
+          bash -n /tmp/native.sh && echo "ok: native builder"
+
+  config-sanity:
+    name: Config sanity (hard gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: versions.sh parses and defines URL templates
+        run: |
+          set -e
+          source config/versions.sh
+          test -n "$GCC_VERSION" && test -n "$GLIBC_VERSION" && test -n "$LINUX_VERSION"
+          test -n "$URL_GNU" && test -n "$URL_KERNEL"
+          echo "versions.sh OK"
+
+      - name: every target defines the required variables
+        run: |
+          set -e
+          for t in config/targets/*.sh; do
+            ( source "$t"
+              for v in VERK_ARCH VERK_TARGET LINUX_ARCH KERNEL_IMAGE QEMU_BIN QEMU_USER QEMU_CONSOLE; do
+                eval "val=\${$v:-}"
+                if [ -z "$val" ]; then echo "FAIL: $t missing $v"; exit 1; fi
+              done
+              echo "ok: $t ($VERK_TARGET)" )
+          done
+
+  shellcheck:
+    name: ShellCheck (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # style feedback, not a merge blocker (yet)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        run: shellcheck scripts/*.sh scripts/lib/*.sh boot/*.sh || true
