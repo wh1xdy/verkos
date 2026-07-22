@@ -74,8 +74,11 @@ tc_gcc_pass1() {
 tc_linux_headers() {
     local d; d="$(extract "linux-${LINUX_VERSION}.tar.xz")"
     cd "$d"
-    make mrproper
-    make headers
+    # The kernel needs its OWN arch name (arm64, not aarch64; x86, not x86_64).
+    # Without ARCH= it guesses from `uname -m`, which is fatal on arm64 hosts
+    # (there is no arch/aarch64). LINUX_ARCH comes from config/targets/<arch>.sh.
+    make ARCH="$LINUX_ARCH" mrproper
+    make ARCH="$LINUX_ARCH" headers
     find usr/include -type f ! -name '*.h' -delete
     mkdir -p "$ROOTFS/usr"
     cp -rv usr/include "$ROOTFS/usr"
