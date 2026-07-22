@@ -149,6 +149,9 @@ set -euo pipefail
 source /sources/versions.sh
 cd /sources
 export PATH=/usr/bin:/usr/sbin
+# The chroot build runs as root; coreutils (and a few others) refuse to configure
+# as root unless this is set. Safe here — the whole final system is built as root.
+export FORCE_UNSAFE_CONFIGURE=1
 JOBS=$(nproc 2>/dev/null || echo 2); export MAKEFLAGS="-j$JOBS"
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
