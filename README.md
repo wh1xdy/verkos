@@ -1,5 +1,7 @@
 # VerkOS
 
+[![CI](https://github.com/wh1xdy/os/actions/workflows/ci.yml/badge.svg)](https://github.com/wh1xdy/os/actions/workflows/ci.yml)
+
 > A from-scratch, multi-architecture Linux distribution — built the hard way, on purpose.
 
 **VerkOS** ("verk" = Swedish for *work / creation*) is a Linux From Scratch–style
