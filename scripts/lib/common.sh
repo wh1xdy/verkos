@@ -102,6 +102,8 @@ source_url() {
         libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
         expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;
         zlib-*)       echo "$URL_ZLIB/$pkg" ;;
+        file-*)       echo "$URL_FILE/$pkg" ;;
+        flex-*)       echo "$URL_FLEX/v${FLEX_VERSION}/$pkg" ;;
         Python-*)     echo "$URL_PYTHON/${PYTHON_VERSION}/$pkg" ;;
         libffi-*)     echo "$URL_LIBFFI/v${LIBFFI_VERSION}/$pkg" ;;
         ninja-*)      echo "$URL_NINJA/v${NINJA_VERSION}.tar.gz" ;;

@@ -34,7 +34,7 @@ fetch_one "patch-${PATCH_VERSION}.tar.xz"             "$PATCH_SHA256"
 fetch_one "flex-${FLEX_VERSION}.tar.gz"               "$FLEX_SHA256"
 fetch_one "file-${FILE_VERSION}.tar.gz"               "$FILE_SHA256"
 fetch_one "bzip2-${BZIP2_VERSION}.tar.gz"             "$BZIP2_SHA256"
-fetch_one "zlib-${ZLIB_VERSION}.tar.xz"               "$ZLIB_SHA256"
+fetch_one "zlib-${ZLIB_VERSION}.tar.gz"               "$ZLIB_SHA256"
 fetch_one "gperf-${GPERF_VERSION}.tar.gz"             "$GPERF_SHA256"
 
 # System layer (built natively in the chroot; downloaded here).

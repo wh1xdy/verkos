@@ -2,6 +2,7 @@
 # The real logic lives in scripts/; this is a thin, discoverable wrapper.
 #
 #   make check   ARCH=x86_64     verify host prerequisites
+#   make pin                     download every source, pin real SHA-256s
 #   make fetch                   download + verify all sources
 #   make toolchain ARCH=aarch64  build the cross-toolchain
 #   make temp    ARCH=x86_64     temporary tools
@@ -17,10 +18,11 @@ ARCH   ?= x86_64
 SHELL  := /bin/bash
 BUILD  := scripts/build.sh
 
-.PHONY: all check fetch toolchain temp system kernel image run clean distclean help
+.PHONY: all check pin fetch toolchain temp system kernel image run clean distclean help
 
 all:        ; @bash $(BUILD) all       $(ARCH)
 check:      ; @bash $(BUILD) check     $(ARCH)
+pin:        ; @bash scripts/pin-hashes.sh
 fetch:      ; @bash $(BUILD) fetch     $(ARCH)
 toolchain:  ; @bash $(BUILD) toolchain $(ARCH)
 temp:       ; @bash $(BUILD) temp      $(ARCH)
