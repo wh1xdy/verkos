@@ -1,0 +1,11 @@
+# Build output — everything the build produces lives under work/ and is
+# reproducible from sources, so it never gets committed.
+/work/
+
+# Recorded-but-unverified source hashes (until promoted into config/versions.sh)
+/config/versions.lock
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
