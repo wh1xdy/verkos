@@ -127,6 +127,7 @@ source_url() {
         Python-*)     echo "$URL_PYTHON/${PYTHON_VERSION}/$pkg" ;;
         libffi-*)     echo "$URL_LIBFFI/v${LIBFFI_VERSION}/$pkg" ;;
         ninja-*)      echo "$URL_NINJA/v${NINJA_VERSION}.tar.gz" ;;
+        pkgconf-*)    echo "$URL_PKGCONF/$pkg" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }

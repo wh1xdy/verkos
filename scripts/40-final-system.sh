@@ -152,6 +152,8 @@ export PATH=/usr/bin:/usr/sbin
 # The chroot build runs as root; coreutils (and a few others) refuse to configure
 # as root unless this is set. Safe here — the whole final system is built as root.
 export FORCE_UNSAFE_CONFIGURE=1
+# Where pkgconf (built below) should look for .pc files installed by our packages.
+export PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
 JOBS=$(nproc 2>/dev/null || echo 2); export MAKEFLAGS="-j$JOBS"
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
@@ -164,6 +166,15 @@ unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
 # priority; a proper ch7-temp-tools + ch8-glibc rebuild is a later improvement.
 say "glibc ${GLIBC_VERSION} (using cross-installed libc; native rebuild skipped)"
 test -f /usr/lib/libc.so.6 || { echo "!! no libc in rootfs — stage 20 incomplete" >&2; exit 1; }
+cd /sources
+
+# pkgconf — provides pkg-config, needed by kmod, dbus, systemd. Built early so
+# it's on PATH for everything after. Zero dependencies beyond a C compiler.
+say "pkgconf ${PKGCONF_VERSION}"
+d=$(unpack pkgconf-${PKGCONF_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --disable-static
+make && make install
+ln -sfv pkgconf /usr/bin/pkg-config
 cd /sources
 
 # 2. ncurses (native)
