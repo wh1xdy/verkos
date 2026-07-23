@@ -142,6 +142,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vpk/vpk.c" "$ROOTFS/sources/vpk.c" 2>/dev/null || true
     sudo rm -rf "$ROOTFS/sources/vpk-recipes"
     sudo cp -a "$VERK_ROOT/pkg/recipes" "$ROOTFS/sources/vpk-recipes" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/verkbox/verkbox.c" "$ROOTFS/sources/verkbox.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -629,6 +630,17 @@ cd /sources
 mark vpk
 fi
 
+# 12b. verkbox — VerkOS' own multi-call core utilities (BusyBox-style). Our first
+# native userland tool. Build the binary here; its applets take over from the GNU
+# coreutils names at the very end of this script (so the build itself keeps using
+# GNU's tools, and only the shipped image runs ours).
+if need verkbox; then
+say "verkbox (VerkOS core utilities)"
+gcc -O2 -o /usr/bin/verkbox /sources/verkbox.c
+cd /sources
+mark verkbox
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -855,6 +867,16 @@ reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
 reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
 reg procps-ng "$PROCPS_VERSION";   reg less "$LESS_VERSION"
 reg nano "$NANO_VERSION"
+
+# verkbox applets take over from GNU coreutils for these tool names. Done last, so
+# the build above used GNU's tools while the shipped image runs VerkOS' own.
+if [ -x /usr/bin/verkbox ]; then
+    say "verkbox applets take over from GNU coreutils"
+    for a in true false echo cat pwd whoami nproc yes basename dirname head wc seq; do
+        ln -sf verkbox /usr/bin/"$a"
+    done
+    reg verkbox 0.1
+fi
 
 echo
 echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"
