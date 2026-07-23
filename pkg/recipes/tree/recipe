@@ -1,0 +1,11 @@
+name=tree
+version=2.2.1
+source=https://gitlab.com/OldManProgrammer/unix-tree/-/archive/2.2.1/unix-tree-2.2.1.tar.gz
+sha256=70d9c6fc7c5f4cb1f7560b43e2785194594b9b8f6855ab53376f6bd88667ee04
+depends=
+build() {
+    # unix-tree's Makefile misuses DESTDIR as the bin dir, so install by hand.
+    make
+    install -Dm755 tree "$DESTDIR/usr/bin/tree"
+    install -Dm644 doc/tree.1 "$DESTDIR/usr/share/man/man1/tree.1"
+}
