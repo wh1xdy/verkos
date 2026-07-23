@@ -180,7 +180,7 @@ cd /sources
 say "pkgconf ${PKGCONF_VERSION}"
 d=$(unpack pkgconf-${PKGCONF_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --disable-static
-make && make install
+make; make install
 ln -sfv pkgconf /usr/bin/pkg-config
 cd /sources
 
@@ -190,14 +190,14 @@ say "ncurses ${NCURSES_VERSION}"
 d=$(unpack ncurses-${NCURSES_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --mandir=/usr/share/man --with-shared \
     --without-debug --without-normal --with-cxx-shared --enable-pc-files
-make && make install
+make; make install
 cd /sources
 
 # 3. bash (native)
 say "bash ${BASH_VERSION_PKG}"
 d=$(unpack bash-${BASH_VERSION_PKG}.tar.gz); cd "$d"
 ./configure --prefix=/usr --without-bash-malloc --with-installed-readline=no
-make && make install
+make; make install
 ln -sfv bash /usr/bin/sh
 cd /sources
 
@@ -205,7 +205,7 @@ cd /sources
 say "coreutils ${COREUTILS_VERSION}"
 d=$(unpack coreutils-${COREUTILS_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-no-install-program=kill,uptime
-make && make install
+make; make install
 cd /sources
 mark core-userland
 fi
@@ -235,12 +235,12 @@ cd /sources
 # file (native)
 say "file ${FILE_VERSION}"
 d=$(unpack file-${FILE_VERSION}.tar.gz); cd "$d"
-./configure --prefix=/usr; make && make install; cd /sources
+./configure --prefix=/usr; make; make install; cd /sources
 
 # m4 (native)
 say "m4 ${M4_VERSION}"
 d=$(unpack m4-${M4_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr; make && make install; cd /sources
+./configure --prefix=/usr; make; make install; cd /sources
 
 # binutils (final, native)
 say "binutils ${BINUTILS_VERSION} (final)"
@@ -250,7 +250,7 @@ mkdir -p build && cd build
     --enable-plugins --enable-shared --disable-werror --enable-64-bit-bfd \
     --enable-new-dtags --with-system-zlib --enable-default-hash-style=gnu \
     --enable-gprofng=no
-make tooldir=/usr && make tooldir=/usr install
+make tooldir=/usr; make tooldir=/usr install
 rm -fv /usr/lib/lib{bfd,ctf,ctf-nobfd,opcodes,sframe}.a
 cd /sources
 
@@ -268,18 +268,18 @@ mkdir -p build && cd build
     --enable-default-pie --enable-default-ssp \
     --disable-multilib --disable-bootstrap --disable-fixincludes \
     --with-system-zlib
-make && make install
+make; make install
 ln -sfv gcc /usr/bin/cc
 cd /sources
 
 # bison then flex (flex uses bison), then the GNU text/file tools
 say "bison ${BISON_VERSION}"
 d=$(unpack bison-${BISON_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr; make && make install; cd /sources
+./configure --prefix=/usr; make; make install; cd /sources
 say "flex ${FLEX_VERSION}"
 d=$(unpack flex-${FLEX_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --disable-static
-make && make install
+make; make install
 ln -sfv flex /usr/bin/lex
 cd /sources
 
@@ -293,7 +293,7 @@ for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
     say "$name $ver"
     d=$(unpack ${name}-${ver}.tar.${ext}); cd "$d"
     ./configure --prefix=/usr
-    make && make install
+    make; make install
     cd /sources
 done
 fi   # end VERK_FULL_USERLAND
@@ -308,7 +308,7 @@ d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
     --disable-liblastlog2 \
     --without-python --without-systemd --without-systemdsystemunitdir \
     ADJTIME_PATH=/var/lib/hwclock/adjtime
-make && make install
+make; make install
 cd /sources
 mark util-linux
 fi
@@ -316,24 +316,24 @@ fi
 # 6. zlib, xz, expat, libcap, kmod — systemd link deps
 for pkg in "zlib-${ZLIB_VERSION}.tar.gz" "xz-${XZ_VERSION}.tar.xz"; do
     say "$pkg"; d=$(unpack "$pkg"); cd "$d"
-    ./configure --prefix=/usr; make && make install; cd /sources
+    ./configure --prefix=/usr; make; make install; cd /sources
 done
 say "expat ${EXPAT_VERSION}"
 d=$(unpack expat-${EXPAT_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --disable-static; make && make install; cd /sources
+./configure --prefix=/usr --disable-static; make; make install; cd /sources
 say "libcap ${LIBCAP_VERSION}"
 d=$(unpack libcap-${LIBCAP_VERSION}.tar.xz); cd "$d"
-make prefix=/usr lib=lib && make prefix=/usr lib=lib install; cd /sources
+make prefix=/usr lib=lib; make prefix=/usr lib=lib install; cd /sources
 say "kmod ${KMOD_VERSION}"
 d=$(unpack kmod-${KMOD_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --sysconfdir=/etc --with-openssl=no --with-xz \
     --with-zstd=no --disable-manpages
-make && make install; cd /sources
+make; make install; cd /sources
 
 # 7. gperf — systemd build dep
 say "gperf ${GPERF_VERSION}"
 d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
-./configure --prefix=/usr; make && make install; cd /sources
+./configure --prefix=/usr; make; make install; cd /sources
 
 # 7b. Python build toolchain for systemd (meson/ninja/jinja2) ---------------
 # libffi → Python → ninja (all from source), then meson/jinja2 via offline pip.
@@ -343,7 +343,7 @@ d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
 say "libffi ${LIBFFI_VERSION}"
 d=$(unpack libffi-${LIBFFI_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --libdir=/usr/lib --disable-static
-make && make install
+make; make install
 printf '/usr/lib\n/usr/local/lib\n' > /etc/ld.so.conf
 ldconfig
 cd /sources
@@ -353,7 +353,7 @@ say "Python ${PYTHON_VERSION}"
 d=$(unpack Python-${PYTHON_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-shared --with-system-expat \
     --with-ensurepip=yes --without-static-libpython
-make && make install
+make; make install
 cd /sources
 mark python
 fi
@@ -385,14 +385,14 @@ d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
 meson setup build --prefix=/usr --buildtype=release \
     --sysconfdir=/etc --localstatedir=/var \
     -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
-ninja -C build && ninja -C build install; cd /sources
+ninja -C build; ninja -C build install; cd /sources
 
 # 8.4 perl — needed by libxcrypt's configure (and generally). Stamped: slow.
 if need perl; then
 say "perl ${PERL_VERSION}"
 d=$(unpack perl-${PERL_VERSION}.tar.xz); cd "$d"
 sh Configure -des -Dprefix=/usr -Dusethreads
-make && make install
+make; make install
 cd /sources
 mark perl
 fi
@@ -403,7 +403,7 @@ say "libxcrypt ${LIBXCRYPT_VERSION}"
 d=$(unpack libxcrypt-${LIBXCRYPT_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-hashes=strong,glibc \
     --enable-obsolete-api=no --disable-static --disable-failure-tokens
-make && make install
+make; make install
 ldconfig
 cd /sources
 
@@ -418,7 +418,8 @@ meson setup .. \
     -Drpmmacrosdir=no -Dhomed=disabled -Duserdb=false \
     -Dman=disabled -Dmode=release -Dpamconfdir=no \
     -Ddev-kvm-mode=0660 -Dnobody-group=nogroup
-ninja && ninja install
+ninja
+ninja install
 # Point /sbin/init at systemd.
 ln -sfv /usr/lib/systemd/systemd /usr/sbin/init
 cd /sources
