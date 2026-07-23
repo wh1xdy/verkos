@@ -22,6 +22,7 @@ need bash;  need patch; need tar;   need xz;   need gzip
 log "Build helpers:"
 need bison; need flex;  need gawk;  need m4;   need perl
 need python3; need makeinfo "texinfo"; need pkg-config
+need bc "bc";   need cpio "cpio"   # bc: kernel timeconst; cpio: initramfs
 log "Fetch + hashing:"
 { command -v curl >/dev/null || command -v wget >/dev/null; } \
     && ok "curl/wget" || { warn "MISSING: curl or wget"; missing=1; }
