@@ -508,6 +508,10 @@ sysfs           /sys          sysfs   nosuid,noexec,nodev  0     0
 devpts          /dev/pts      devpts  gid=5,mode=620       0     0
 FSTAB
 
+# Initial DNS fallback (dhcpcd overwrites this at runtime with DHCP-provided
+# servers). rm -f first: /etc/resolv.conf may be a dangling symlink from a
+# previous networkd config, which would make the redirect fail.
+rm -f /etc/resolv.conf
 cat > /etc/resolv.conf <<'RC'
 nameserver 1.1.1.1
 nameserver 9.9.9.9
@@ -572,7 +576,7 @@ Name=en* eth*
 [Network]
 DHCP=yes
 NET
-rm -f /etc/resolv.conf; : > /etc/resolv.conf     # dhcpcd writes this directly
+# (/etc/resolv.conf already created above; dhcpcd overwrites it at runtime.)
 
 cat > /etc/systemd/system/dhcpcd.service <<'DH'
 [Unit]
