@@ -1,0 +1,9 @@
+name=git
+version=2.47.1
+source=https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.47.1.tar.xz
+sha256=f3d8f9bb23ae392374e91cd9d395970dabc5b9c5ee72f39884613cd84a6ed310
+depends="curl openssl zlib expat"
+build() {
+    make prefix=/usr NO_TCLTK=1 NO_GETTEXT=1 all
+    make prefix=/usr NO_TCLTK=1 NO_GETTEXT=1 DESTDIR="$DESTDIR" install
+}
