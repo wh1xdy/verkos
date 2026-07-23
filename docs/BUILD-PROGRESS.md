@@ -90,7 +90,39 @@ make run ARCH=aarch64
       systemd-logind runs, no loop, `/run/dbus/system_bus_socket` exists.
 - [x] **Linux-PAM 1.6.1** built; systemd rebuilt with `-Dpam=enabled`
       (pam_systemd.so at /usr/lib/security); /etc/pam.d stack shipped.
-Then multi-arch (x86_64) and GRUB/real-hardware boot.
+## Multi-arch (x86_64) — build-system ready; final build needs real x86 hardware
+
+The build system is genuinely multi-arch. For x86_64 we built, at native speed
+on the arm64 host (cross-compilation, no emulation):
+
+- [x] `make check/fetch ARCH=x86_64`
+- [x] `make toolchain ARCH=x86_64` — cross binutils/gcc/glibc/libstdc++
+- [x] `make temp ARCH=x86_64` — full LFS ch.6 temporary tools
+- [x] `make kernel ARCH=x86_64` — Linux 6.12.9 bzImage
+- [ ] `make system ARCH=x86_64` — the in-chroot native build runs **x86_64**
+      binaries, which on this **Apple Silicon** host means emulation. Both fast
+      options fail for a full from-source build:
+        * **qemu-user** (binfmt): gcc/cc1 **segfaults** intermittently.
+        * **VZ + Rosetta** amd64 VM: builds **hang** (configure spawns zombie
+          gcc processes — Rosetta translation incompatibility).
+      **QEMU full-system** emulation (`colima start --vm-type qemu --arch
+      x86_64`) would be compatible but ~5–15× slower (many hours).
+
+**Decision:** VerkOS is **x86_64-ready** — run the final build on real x86_64
+hardware (a cheap cloud VM or any x86 Linux box), where it builds natively and
+reliably:
+
+```sh
+# on an x86_64 Linux host with build tools + a case-sensitive fs:
+make ARCH=x86_64        # check -> fetch -> toolchain -> temp -> system -> kernel -> image
+make run ARCH=x86_64    # boot in QEMU
+```
+
+Bug fixed along the way: per-package native-build stamps were shared across
+arches (`/sources/.nst`); moved into each rootfs (`/var/lib/vpk-build-stamps`)
+so an x86_64 build can't skip packages an aarch64 build already stamped.
+
+Then GRUB/real-hardware boot.
 
 VerkOS is now a self-hosting distro: it builds software from source and manages
 its own packages (base system included), on itself, with working login sessions.
