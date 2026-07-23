@@ -387,6 +387,16 @@ meson setup build --prefix=/usr --buildtype=release \
     -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
 ninja -C build && ninja -C build install; cd /sources
 
+# 8.4 perl — needed by libxcrypt's configure (and generally). Stamped: slow.
+if need perl; then
+say "perl ${PERL_VERSION}"
+d=$(unpack perl-${PERL_VERSION}.tar.xz); cd "$d"
+sh Configure -des -Dprefix=/usr -Dusethreads
+make && make install
+cd /sources
+mark perl
+fi
+
 # 8.5 libxcrypt — provides libcrypt/crypt.h. Modern glibc (2.38+) builds without
 # the crypt add-on, and systemd needs the 'crypt' library. LFS uses libxcrypt.
 say "libxcrypt ${LIBXCRYPT_VERSION}"
