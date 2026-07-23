@@ -379,12 +379,13 @@ command -v meson >/dev/null && command -v ninja >/dev/null \
     || { echo "!! meson/ninja not available after install" >&2; exit 1; }
 cd /sources
 
-# 8. D-Bus (systemd's IPC bus)
+# 8. D-Bus (systemd's IPC bus) — dbus 1.16 uses meson, not autotools.
 say "dbus ${DBUS_VERSION}"
 d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
-    --runstatedir=/run --disable-static --disable-doxygen-docs --disable-xml-docs
-make && make install; cd /sources
+meson setup build --prefix=/usr --buildtype=release \
+    --sysconfdir=/etc --localstatedir=/var \
+    -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
+ninja -C build && ninja -C build install; cd /sources
 
 # 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot)
 say "systemd ${SYSTEMD_VERSION}"
