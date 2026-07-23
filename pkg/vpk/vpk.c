@@ -144,20 +144,28 @@ static size_t wr_cb(void *p, size_t sz, size_t nm, void *fp) {
     return fwrite(p, sz, nm, (FILE*)fp);
 }
 static int download(const char *url, const char *dest) {
-    FILE *f=fopen(dest,"wb"); if(!f) return -1;
-    CURL *c=curl_easy_init(); if(!c){ fclose(f); return -1; }
+    /* Download to a .part file and rename on success, so an interrupted transfer
+     * never leaves a truncated file that a later run reuses from cache. */
+    char tmp[1200]; snprintf(tmp,sizeof tmp,"%s.part",dest);
+    FILE *f=fopen(tmp,"wb"); if(!f) return -1;
+    CURL *c=curl_easy_init(); if(!c){ fclose(f); unlink(tmp); return -1; }
     curl_easy_setopt(c,CURLOPT_URL,url);
     curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,wr_cb);
     curl_easy_setopt(c,CURLOPT_WRITEDATA,f);
     curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,1L);
     curl_easy_setopt(c,CURLOPT_FAILONERROR,1L);
+    /* Only http/https — a hostile recipe source= must not reach file://, scp://,
+     * gopher://, etc. (both on the initial request and on any redirect). */
+    curl_easy_setopt(c,CURLOPT_PROTOCOLS,(long)(CURLPROTO_HTTP|CURLPROTO_HTTPS));
+    curl_easy_setopt(c,CURLOPT_REDIR_PROTOCOLS,(long)(CURLPROTO_HTTP|CURLPROTO_HTTPS));
     curl_easy_setopt(c,CURLOPT_USERAGENT,"vpk/" VPK_VERSION);
     /* Use VerkOS' CA bundle for HTTPS verification when present. */
     if (access("/etc/ssl/certs/ca-certificates.crt",R_OK)==0)
         curl_easy_setopt(c,CURLOPT_CAINFO,"/etc/ssl/certs/ca-certificates.crt");
     CURLcode rc=curl_easy_perform(c);
     curl_easy_cleanup(c); fclose(f);
-    if (rc!=CURLE_OK){ fprintf(stderr,"vpk: download failed: %s\n",curl_easy_strerror(rc)); unlink(dest); return -1; }
+    if (rc!=CURLE_OK){ fprintf(stderr,"vpk: download failed: %s\n",curl_easy_strerror(rc)); unlink(tmp); return -1; }
+    if (rename(tmp,dest)!=0){ unlink(tmp); return -1; }
     return 0;
 }
 
@@ -207,6 +215,29 @@ static int decompress_to_tar(const char *in, const char *out) {
 /* Minimal ustar extractor: regular files, directories, symlinks. Extracts
  * into `dest`, stripping the leading path component (like tar --strip 1). */
 static long octal(const char *p, int n) { long v=0; for(int i=0;i<n && p[i];i++){ if(p[i]<'0'||p[i]>'7')break; v=v*8+(p[i]-'0'); } return v; }
+/* Reject a destination-relative path that would escape `dest`: an absolute path,
+ * or one with any ".." component. vpk extracts as root, so a hostile archive
+ * member name is otherwise an arbitrary-file-write primitive. */
+static int unsafe_rel(const char *r) {
+    if (!r || !*r || r[0]=='/') return 1;
+    for (const char *p=r;*p;) {
+        if (p[0]=='.' && p[1]=='.' && (p[2]=='/'||p[2]=='\0')) return 1;
+        const char *sl=strchr(p,'/'); if(!sl) break; p=sl+1;
+    }
+    return 0;
+}
+/* Create every parent directory of `path`, refusing to descend THROUGH a symlink
+ * (a malicious archive can drop a symlink then write a file through it to escape
+ * `dest`). Any existing non-directory component is unlinked and replaced. */
+static void mkparents_nofollow(char *path) {
+    for (char *s=strchr(path+1,'/'); s; s=strchr(s+1,'/')) {
+        *s=0;
+        struct stat st;
+        if (lstat(path,&st)==0) { if (!S_ISDIR(st.st_mode)) { unlink(path); mkdir(path,0755); } }
+        else mkdir(path,0755);
+        *s='/';
+    }
+}
 static int untar(const char *tarfile, const char *dest, int strip) {
     FILE *f=fopen(tarfile,"rb"); if(!f) return -1;
     uint8_t hdr[512]; int ret=0;
@@ -222,32 +253,46 @@ static int untar(const char *tarfile, const char *dest, int strip) {
                                                   thinks autotools files are
                                                   stale and re-runs aclocal. */
         char type=hdr[156];
-        /* ustar prefix (long paths) */
-        char full[256]; if (hdr[345]) { char pre[156]; memcpy(pre,hdr+345,155); pre[155]=0;
+        /* ustar prefix (long paths). 155 prefix + '/' + 100 name needs 257 bytes. */
+        char full[512]; if (hdr[345]) { char pre[156]; memcpy(pre,hdr+345,155); pre[155]=0;
             snprintf(full,sizeof full,"%s/%s",pre,name); } else snprintf(full,sizeof full,"%s",name);
         /* strip leading components */
         char *rel=full; for (int s=0;s<strip;s++){ char *sl=strchr(rel,'/'); if(!sl){rel=NULL;break;} rel=sl+1; }
         long blocks=(size+511)/512;
-        if (!rel || !*rel) {                    /* skip data of stripped entry */
+        /* skip: stripped-to-nothing, OR an escaping (unsafe) member path */
+        if (!rel || !*rel || unsafe_rel(rel)) {
             for (long i=0;i<blocks;i++) if(fread(hdr,1,512,f)!=512){ret=-1;goto out;}
             continue;
         }
         char path[4096]; snprintf(path,sizeof path,"%s/%s",dest,rel);
         if (type=='5') {                        /* directory */
-            mkpath(path,0755);
+            mkparents_nofollow(path); mkdir(path,mode?(mode&0777):0755);
         } else if (type=='2') {                 /* symlink */
-            char *sl=strrchr(path,'/'); if(sl){*sl=0; mkpath(path,0755); *sl='/';}
-            unlink(path); if (symlink(linkname,path)) { /* ignore */ }
+            mkparents_nofollow(path); unlink(path);
+            if (symlink(linkname,path)) { /* ignore */ }
+        } else if (type=='1') {                 /* hardlink to an earlier member */
+            char *lrel=linkname; for(int s=0;s<strip;s++){ char *sl=strchr(lrel,'/'); if(!sl){lrel=NULL;break;} lrel=sl+1; }
+            if (lrel && *lrel && !unsafe_rel(lrel)) {
+                char tgt[4096]; snprintf(tgt,sizeof tgt,"%s/%s",dest,lrel);
+                mkparents_nofollow(path); unlink(path);
+                if (link(tgt,path)) {           /* cross-dir/link failure → copy */
+                    FILE *si=fopen(tgt,"rb"), *so=fopen(path,"wb");
+                    if(si&&so){ char b[4096]; size_t k; while((k=fread(b,1,sizeof b,si))>0) fwrite(b,1,k,so); }
+                    if(si)fclose(si); if(so)fclose(so);
+                }
+            }
         } else if (type=='0' || type=='\0') {   /* regular file */
-            char *sl=strrchr(path,'/'); if(sl){*sl=0; mkpath(path,0755); *sl='/';}
-            FILE *o=fopen(path,"wb");
-            if(!o){ ret=-1; goto out; }
+            mkparents_nofollow(path); unlink(path);   /* drop any pre-existing symlink */
+            int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,mode?(mode&0777):0644);
+            if(fd<0){ ret=-1; goto out; }
             long left=size; uint8_t b[512];
             for (long i=0;i<blocks;i++){
-                if(fread(b,1,512,f)!=512){ ret=-1; fclose(o); goto out; }
-                long w=left<512?left:512; if(w>0) fwrite(b,1,w,o); left-=w;
+                if(fread(b,1,512,f)!=512){ ret=-1; close(fd); goto out; }
+                long w=left<512?left:512;
+                if(w>0 && write(fd,b,w)!=w){ ret=-1; close(fd); goto out; }
+                left-=w;
             }
-            fclose(o); chmod(path,mode?mode:0644);
+            fchmod(fd,mode?(mode&0777):0644); close(fd);
             if (mtime){ struct utimbuf ut={mtime,mtime}; utime(path,&ut); }
         } else {                                /* skip other types' data */
             for (long i=0;i<blocks;i++) if(fread(hdr,1,512,f)!=512){ret=-1;goto out;}
@@ -330,7 +375,19 @@ static const char *repo_base(void) {
 /* Locate a recipe: prefer OS-shipped recipes, then the fetched cache; else
  * download it from the repo into the cache. Lets `vpk install <newapp>` work
  * without rebuilding the OS — just push a recipe to the repo. */
+/* Reject a package name that isn't a plain token — it flows into filesystem
+ * paths (recipe cache) and a repo URL, so '/' or ".." would be path traversal. */
+static int bad_name(const char *s) {
+    if (!s || !*s) return 1;
+    for (const char *p=s;*p;p++) {
+        char c=*p;
+        if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='.'||c=='-'||c=='_'||c=='+')) return 1;
+    }
+    if (s[0]=='.' && (s[1]==0 || s[1]=='.')) return 1;   /* "." or ".." */
+    return 0;
+}
 static int recipe_path(const char *name, char *out, size_t n) {
+    if (bad_name(name)) { fprintf(stderr,"vpk: refusing unsafe package name '%s'\n",name?name:"(null)"); return -1; }
     snprintf(out,n,"%s/%s/recipe",RECIPE_DIR,name); if (access(out,R_OK)==0) return 0;
     snprintf(out,n,"%s/%s/recipe",RCACHE_DIR,name); if (access(out,R_OK)==0) return 0;
     char dir[512]; snprintf(dir,sizeof dir,"%s/%s",RCACHE_DIR,name); mkpath(dir,0755);
@@ -397,7 +454,11 @@ static void resolve(const char *name, char order[][64], int *n, char seen[][64],
     if (recipe_load(name,&r)) die("no recipe for '%s'",name);
     /* visit deps first */
     char deps[1024]; snprintf(deps,sizeof deps,"%s",r.depends);
-    for (char *tok=strtok(deps," "); tok; tok=strtok(NULL," ")) {
+    /* strtok_r: resolve() recurses and each level tokenizes its own deps, so a
+     * shared non-reentrant strtok() would corrupt the outer walk and silently
+     * drop every package's 2nd+ dependency. */
+    char *save=NULL;
+    for (char *tok=strtok_r(deps," ",&save); tok; tok=strtok_r(NULL," ",&save)) {
         if (!*tok) continue;
         resolve(tok,order,n,seen,sn);
     }
@@ -486,6 +547,8 @@ static void build_into_dest(const recipe_t *r, char *destout, size_t dn) {
         char got[65]; if (sha256_file(tarball,got)) die("hash failed");
         if (strcmp(got,r->sha256)) die("sha256 mismatch for %s\n  want %s\n  got  %s",bn,r->sha256,got);
         info("verified sha256");
+    } else {
+        fprintf(stderr,"vpk: WARNING: no sha256 pinned for %s — integrity NOT verified\n",r->name);
     }
 
     char tar[1024]; snprintf(tar,sizeof tar,"%s/src.tar",work);
@@ -561,6 +624,7 @@ static void cmd_remove(int argc, char **argv) {
             /* collect then delete files first, dirs after (reverse) */
             char line[4096]; char dirs[4096][256]; int nd=0;
             while (fgets(line,sizeof line,f)) {
+                if (strlen(line)<2 || line[1]!=' ') continue;   /* need "T path" */
                 char t=line[0]; char *rel=line+2; size_t l=strlen(rel);
                 while(l&&(rel[l-1]=='\n'||rel[l-1]=='\r'))rel[--l]=0;
                 char p[4096]; snprintf(p,sizeof p,"/%s",rel);
