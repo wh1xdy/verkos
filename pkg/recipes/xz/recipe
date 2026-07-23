@@ -1,0 +1,10 @@
+name=xz
+version=5.6.3
+source=https://github.com/tukaani-project/xz/releases/download/v5.6.3/xz-5.6.3.tar.xz
+sha256=db0590629b6f0fa36e74aea5f9731dc6f8df068ce7b7bafa45301832a5eebc3a
+depends=""
+build() {
+    ./configure --prefix=/usr --disable-static
+    make
+    make DESTDIR="$DESTDIR" install
+}

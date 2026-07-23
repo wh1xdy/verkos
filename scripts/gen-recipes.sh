@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Generate vpk recipes from our build data.
+#
+# Each recipe's version/source/sha256 come straight from config/versions.sh +
+# common.sh::source_url (single source of truth), so recipes never drift from
+# what the base system was built with. The build() body + depends come from the
+# table below — a clean transcription of what scripts/40-final-system.sh does
+# for each package, with DESTDIR added so vpk can stage the install.
+#
+# Output: pkg/recipes/<name>/recipe. Run from the repo root:  scripts/gen-recipes.sh
+source "$(dirname "$0")/lib/common.sh"
+OUT="$VERK_ROOT/pkg/recipes"
+
+emit() {
+    # emit <name> <tarball> <sha-var> <depends> <build-body>
+    local name="$1" tarball="$2" shavar="$3" deps="$4" body="$5"
+    local url sha; url="$(source_url "$tarball")"; sha="${!shavar}"
+    local ver; ver="$(printf '%s' "$tarball" | sed -E 's/^[^0-9]*-?//; s/\.tar\..*$//')"
+    mkdir -p "$OUT/$name"
+    { echo "name=$name"
+      echo "version=$ver"
+      echo "source=$url"
+      echo "sha256=$sha"
+      echo "depends=\"$deps\""
+      echo "build() {"
+      printf '%s\n' "$body"
+      echo "}"
+    } > "$OUT/$name/recipe"
+    echo "  $name"
+}
+
+echo "Generating recipes into $OUT ..."
+
+emit ncurses "ncurses-${NCURSES_VERSION}.tar.gz" NCURSES_SHA256 "" \
+'    ./configure --prefix=/usr --mandir=/usr/share/man --with-shared \
+        --without-debug --without-normal --with-cxx-shared --enable-pc-files
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit zlib "zlib-${ZLIB_VERSION}.tar.gz" ZLIB_SHA256 "" \
+'    ./configure --prefix=/usr
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit xz "xz-${XZ_VERSION}.tar.xz" XZ_SHA256 "" \
+'    ./configure --prefix=/usr --disable-static
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit expat "expat-${EXPAT_VERSION}.tar.xz" EXPAT_SHA256 "" \
+'    ./configure --prefix=/usr --disable-static
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit openssl "openssl-${OPENSSL_VERSION}.tar.gz" OPENSSL_SHA256 "zlib" \
+'    ./config --prefix=/usr --openssldir=/etc/ssl --libdir=lib shared zlib-dynamic
+    make
+    make DESTDIR="$DESTDIR" install_sw install_ssldirs'
+
+emit less "less-${LESS_VERSION}.tar.gz" LESS_SHA256 "ncurses" \
+'    ./configure --prefix=/usr --sysconfdir=/etc
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit nano "nano-${NANO_VERSION}.tar.xz" NANO_SHA256 "ncurses" \
+'    ./configure --prefix=/usr --sysconfdir=/etc --enable-utf8
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit curl "curl-${CURL_VERSION}.tar.xz" CURL_SHA256 "openssl zlib" \
+'    ./configure --prefix=/usr --with-openssl --with-zlib --without-libpsl \
+        --with-ca-path=/etc/ssl/certs --disable-static --enable-optimize
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit procps-ng "procps-ng-${PROCPS_VERSION}.tar.xz" PROCPS_SHA256 "ncurses" \
+'    ./configure --prefix=/usr --disable-static --disable-kill
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit iproute2 "iproute2-${IPROUTE2_VERSION}.tar.xz" IPROUTE2_SHA256 "" \
+'    ./configure
+    make
+    make DESTDIR="$DESTDIR" install'
+
+emit dhcpcd "dhcpcd-${DHCPCD_VERSION}.tar.xz" DHCPCD_SHA256 "" \
+'    ./configure --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/lib/dhcpcd \
+        --dbdir=/var/lib/dhcpcd --rundir=/run --privsepuser=dhcpcd
+    make
+    make DESTDIR="$DESTDIR" install'
+
+echo "Done. Toolchain/glibc/systemd are registered as base packages but are not"
+echo "single-build ports, so they are intentionally not generated as recipes."

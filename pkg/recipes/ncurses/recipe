@@ -1,0 +1,11 @@
+name=ncurses
+version=6.5
+source=https://invisible-mirror.net/archives/ncurses/ncurses-6.5.tar.gz
+sha256=136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
+depends=""
+build() {
+    ./configure --prefix=/usr --mandir=/usr/share/man --with-shared \
+        --without-debug --without-normal --with-cxx-shared --enable-pc-files
+    make
+    make DESTDIR="$DESTDIR" install
+}
