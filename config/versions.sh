@@ -72,6 +72,7 @@ EXPAT_VERSION="2.6.4";       EXPAT_SHA256="a695629dae047055b37d50a0ff4776d1d45d0
 ZLIB_VERSION="1.3.2";        ZLIB_SHA256="bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
 LIBCAP_VERSION="2.70";       LIBCAP_SHA256="23a6ef8aadaf1e3e875f633bb2d116cfef8952dba7bc7c569b13458e1952b30f"
 LIBXCRYPT_VERSION="4.4.36";  LIBXCRYPT_SHA256="e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943"
+LINUXPAM_VERSION="1.6.1";    LINUXPAM_SHA256="f8923c740159052d719dbfc2a2f81942d68dd34fcaf61c706a02c9b80feeef8e"
 
 # --- Python + systemd build tooling ----------------------------------------
 # systemd is built with meson/ninja and needs python3 + jinja2. We build libffi,
@@ -115,6 +116,7 @@ URL_LIBFFI="https://github.com/libffi/libffi/releases/download"
 URL_NINJA="https://github.com/ninja-build/ninja/archive/refs/tags"
 URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
 URL_LIBXCRYPT="https://github.com/besser82/libxcrypt/releases/download"
+URL_LINUXPAM="https://github.com/linux-pam/linux-pam/releases/download"
 URL_PERL="https://www.cpan.org/src/5.0"
 URL_SHADOW="https://github.com/shadow-maint/shadow/releases/download"
 URL_DHCPCD="https://github.com/NetworkConfiguration/dhcpcd/releases/download"

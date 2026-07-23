@@ -129,6 +129,7 @@ source_url() {
         ninja-*)      echo "$URL_NINJA/v${NINJA_VERSION}.tar.gz" ;;
         pkgconf-*)    echo "$URL_PKGCONF/$pkg" ;;
         libxcrypt-*)  echo "$URL_LIBXCRYPT/v${LIBXCRYPT_VERSION}/$pkg" ;;
+        Linux-PAM-*)  echo "$URL_LINUXPAM/v${LINUXPAM_VERSION}/$pkg" ;;
         perl-*)       echo "$URL_PERL/$pkg" ;;
         shadow-*)     echo "$URL_SHADOW/${SHADOW_VERSION}/$pkg" ;;
         dhcpcd-*)     echo "$URL_DHCPCD/v${DHCPCD_VERSION}/$pkg" ;;

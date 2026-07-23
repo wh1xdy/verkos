@@ -443,7 +443,21 @@ cd /sources
 mark shadow
 fi
 
-# 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot)
+# 8.7 Linux-PAM — pluggable authentication (systemd-logind + login use it).
+if need linuxpam; then
+say "Linux-PAM ${LINUXPAM_VERSION}"
+d=$(unpack Linux-PAM-${LINUXPAM_VERSION}.tar.xz); cd "$d"
+meson setup build --prefix=/usr --sysconfdir=/etc --buildtype=release \
+    -Ddocs=disabled -Dexamples=false
+ninja -C build
+ninja -C build install
+ldconfig
+cd /sources
+mark linuxpam
+fi
+
+# 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot).
+#    Built with PAM (logind sessions) now that Linux-PAM is available.
 if need systemd; then
 say "systemd ${SYSTEMD_VERSION}"
 d=$(unpack systemd-${SYSTEMD_VERSION}.tar.gz); cd "$d"
@@ -453,7 +467,7 @@ meson setup .. \
     -Dmode=release -Ddefault-dnssec=no -Dfirstboot=false \
     -Dinstall-tests=false -Dldconfig=false -Dsysusers=false \
     -Drpmmacrosdir=no -Dhomed=disabled -Duserdb=false \
-    -Dman=disabled -Dmode=release -Dpamconfdir=no \
+    -Dman=disabled -Dmode=release -Dpam=enabled -Dpamconfdir=no \
     -Ddev-kvm-mode=0660 -Dnobody-group=nogroup
 ninja
 ninja install
@@ -644,6 +658,43 @@ cat > /etc/ld.so.conf <<'LD'
 /opt/lib
 LD
 ldconfig || true
+
+# PAM configuration (Linux-PAM). Minimal functional stack: pam_unix against
+# /etc/shadow, so login/logind sessions authenticate properly. Unknown services
+# fall through to 'other' which denies.
+mkdir -p /etc/pam.d
+cat > /etc/pam.d/system-auth     <<'P'
+auth      required    pam_unix.so
+P
+cat > /etc/pam.d/system-account  <<'P'
+account   required    pam_unix.so
+P
+cat > /etc/pam.d/system-session  <<'P'
+session   required    pam_unix.so
+P
+cat > /etc/pam.d/system-password <<'P'
+password  required    pam_unix.so sha512 shadow
+P
+cat > /etc/pam.d/login <<'P'
+auth      include     system-auth
+account   include     system-account
+session   include     system-session
+password  include     system-password
+P
+cat > /etc/pam.d/systemd-user <<'P'
+account   include     system-account
+session   include     system-session
+P
+cat > /etc/pam.d/other <<'P'
+auth      required    pam_warn.so
+auth      required    pam_deny.so
+account   required    pam_warn.so
+account   required    pam_deny.so
+password  required    pam_warn.so
+password  required    pam_deny.so
+session   required    pam_warn.so
+session   required    pam_deny.so
+P
 
 # Minimal shell environment.
 cat > /etc/profile <<'PROF'
