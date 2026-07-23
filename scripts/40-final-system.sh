@@ -872,7 +872,12 @@ reg nano "$NANO_VERSION"
 # the build above used GNU's tools while the shipped image runs VerkOS' own.
 if [ -x /usr/bin/verkbox ]; then
     say "verkbox applets take over from GNU coreutils"
-    for a in true false echo cat pwd whoami nproc yes basename dirname head wc seq; do
+    # Text/query tools take over now (byte-exact vs GNU in the differential tests).
+    # The file-MUTATING applets (rm cp mv ln mkdir rmdir touch) ship in verkbox and
+    # are callable as `verkbox rm ...`, but don't yet shadow GNU's — they have the
+    # widest edge-case surface, so we widen the takeover once it's boot-verified.
+    for a in true false echo cat pwd whoami nproc yes basename dirname head tail \
+             wc seq cut rev uniq ls; do
         ln -sf verkbox /usr/bin/"$a"
     done
     reg verkbox 0.1
