@@ -296,6 +296,18 @@ static int is_installed(const char *name) {
     char p[512]; snprintf(p,sizeof p,"%s/%s",DB_DIR,name); struct stat st;
     return stat(p,&st)==0;
 }
+/* read a "key=value" field from a package's db meta file (empty if absent) */
+static void db_meta(const char *name, const char *key, char *out, size_t n) {
+    out[0]=0;
+    char p[512]; snprintf(p,sizeof p,"%s/%s/meta",DB_DIR,name);
+    FILE *f=fopen(p,"r"); if(!f) return;
+    char l[256]; size_t kl=strlen(key);
+    while (fgets(l,sizeof l,f))
+        if (!strncmp(l,key,kl) && l[kl]=='=') {
+            snprintf(out,n,"%s",l+kl+1); out[strcspn(out,"\n")]=0; break; }
+    fclose(f);
+}
+static int is_base(const char *name){ char v[32]; db_meta(name,"base",v,sizeof v); return !strcmp(v,"yes"); }
 static void db_record(const recipe_t *r, const char *destdir);  /* fwd */
 
 /* ------------------------------------------------------- dep resolution --- */
@@ -430,6 +442,7 @@ static void cmd_install(int argc, char **argv) {
 static void cmd_remove(int argc, char **argv) {
     for (int i=0;i<argc;i++) {
         if (!is_installed(argv[i])) { fprintf(stderr,"vpk: %s not installed\n",argv[i]); continue; }
+        if (is_base(argv[i])) { fprintf(stderr,"vpk: %s is a base-system package, refusing to remove\n",argv[i]); continue; }
         char files[512]; snprintf(files,sizeof files,"%s/%s/files",DB_DIR,argv[i]);
         FILE *f=fopen(files,"r");
         if (f) {
@@ -460,7 +473,7 @@ static void cmd_list(void) {
         char meta[512]; snprintf(meta,sizeof meta,"%s/%s/meta",DB_DIR,e->d_name);
         char ver[64]="?"; FILE *m=fopen(meta,"r");
         if(m){ char l[128]; while(fgets(l,sizeof l,m)) if(!strncmp(l,"version=",8)){ snprintf(ver,sizeof ver,"%s",l+8); ver[strcspn(ver,"\n")]=0; } fclose(m); }
-        printf("%-20s %s\n", e->d_name, ver);
+        printf("%-20s %-12s %s\n", e->d_name, ver, is_base(e->d_name)?"[base]":"");
     }
     closedir(d);
 }

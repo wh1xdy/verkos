@@ -468,6 +468,7 @@ meson setup .. \
     -Dinstall-tests=false -Dldconfig=false -Dsysusers=false \
     -Drpmmacrosdir=no -Dhomed=disabled -Duserdb=false \
     -Dman=disabled -Dmode=release -Dpam=enabled -Dpamconfdir=no \
+    -Dpamlibdir=/usr/lib/security \
     -Ddev-kvm-mode=0660 -Dnobody-group=nogroup
 ninja
 ninja install
@@ -793,6 +794,35 @@ WantedBy=multi-user.target
 SS
 ln -sf /etc/systemd/system/sshd.service \
        /etc/systemd/system/multi-user.target.wants/sshd.service
+
+# --- Register the base system in vpk's database ----------------------------
+# So `vpk list` shows the whole OS and base packages are protected from removal
+# (base=yes, no file manifest). Versions come from the sourced versions.sh.
+reg() { mkdir -p /var/lib/vpk/db/"$1"; printf 'name=%s\nversion=%s\nbase=yes\n' "$1" "$2" > /var/lib/vpk/db/"$1"/meta; }
+reg linux "$LINUX_VERSION";        reg glibc "$GLIBC_VERSION"
+reg binutils "$BINUTILS_VERSION";  reg gcc "$GCC_VERSION"
+reg ncurses "$NCURSES_VERSION";    reg bash "$BASH_VERSION_PKG"
+reg coreutils "$COREUTILS_VERSION";reg bzip2 "$BZIP2_VERSION"
+reg file "$FILE_VERSION";          reg m4 "$M4_VERSION"
+reg bison "$BISON_VERSION";        reg flex "$FLEX_VERSION"
+reg sed "$SED_VERSION";            reg grep "$GREP_VERSION"
+reg gawk "$GAWK_VERSION";          reg diffutils "$DIFFUTILS_VERSION"
+reg findutils "$FINDUTILS_VERSION";reg tar "$TAR_VERSION"
+reg gzip "$GZIP_VERSION";          reg make "$MAKE_VERSION"
+reg patch "$PATCH_VERSION";        reg util-linux "$UTIL_LINUX_VERSION"
+reg zlib "$ZLIB_VERSION";          reg xz "$XZ_VERSION"
+reg expat "$EXPAT_VERSION";        reg libcap "$LIBCAP_VERSION"
+reg kmod "$KMOD_VERSION";          reg gperf "$GPERF_VERSION"
+reg pkgconf "$PKGCONF_VERSION";    reg libffi "$LIBFFI_VERSION"
+reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
+reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
+reg shadow "$SHADOW_VERSION";      reg linux-pam "$LINUXPAM_VERSION"
+reg dbus "$DBUS_VERSION";          reg systemd "$SYSTEMD_VERSION"
+reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
+reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
+reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
+reg procps-ng "$PROCPS_VERSION";   reg less "$LESS_VERSION"
+reg nano "$NANO_VERSION"
 
 echo
 echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"
