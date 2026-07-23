@@ -68,9 +68,18 @@ make run ARCH=aarch64
       (ps/top/free), less, nano; plus bison/flex. Verified live over SSH:
       `eth0 UP 10.0.2.15/24`, ping 0% loss, `curl -sI http://example.com`
       → 200 OK, ps/free work.
-- [ ] **Own package manager** (next — Phase 5 "make it ours").
+- [x] **Own package manager — vpk** (Phase 5 "make it ours"): a self-contained,
+      source-based (ports-style) package manager in C. Links libcurl/liblzma/zlib
+      and implements SHA-256, tar extraction, recipe parsing, recursive
+      dependency resolution and the install DB itself. `vpk install|remove|list|
+      info` (`verk` alias). Ships a CA bundle so HTTPS works. **Verified on
+      VerkOS itself**: `vpk install hello` fetched over HTTPS, verified sha256,
+      built from source with our gcc, installed; `hello` runs.
 - [ ] logind/PAM (needs Linux-PAM + systemd -Dpam=enabled) — deferred.
 Then multi-arch (x86_64) and GRUB/real-hardware boot.
+
+VerkOS is now a self-hosting distro: it builds software from source and manages
+its own packages, on itself.
 - [ ] `make kernel` ARCH=aarch64
 - [ ] `make image` + `make run` → **first boot** 🎯
 
