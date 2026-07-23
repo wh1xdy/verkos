@@ -137,6 +137,11 @@ stage_sources() {
         || sudo cp -a "$SRC_DIR/." "$ROOTFS/sources/"
     # Make version numbers available to the in-chroot script.
     sudo cp "$VERK_ROOT/config/versions.sh" "$ROOTFS/sources/versions.sh"
+    # Stage vpk (the Verk package manager) source + recipes so the in-chroot
+    # script can compile and install it against VerkOS' own libs.
+    sudo cp "$VERK_ROOT/pkg/vpk/vpk.c" "$ROOTFS/sources/vpk.c" 2>/dev/null || true
+    sudo rm -rf "$ROOTFS/sources/vpk-recipes"
+    sudo cp -a "$VERK_ROOT/pkg/recipes" "$ROOTFS/sources/vpk-recipes" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -590,6 +595,19 @@ make
 make install
 cd /sources
 mark nano
+fi
+
+# 12. vpk — the Verk package manager. Self-contained C, compiled against our own
+# libcurl/liblzma/zlib. Ships a starter recipe set under /etc/vpk/recipes.
+if need vpk; then
+say "vpk (Verk package manager)"
+gcc -O2 -o /usr/bin/vpk /sources/vpk.c -lcurl -llzma -lz
+ln -sfv vpk /usr/bin/verk
+mkdir -p /etc/vpk/recipes
+cp -a /sources/vpk-recipes/. /etc/vpk/recipes/ 2>/dev/null || true
+rm -f /etc/vpk/recipes/README.md
+cd /sources
+mark vpk
 fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
