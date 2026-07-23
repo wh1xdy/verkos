@@ -29,25 +29,13 @@ make run ARCH=aarch64
 - [x] `make fetch` — all 36 sources downloaded + SHA-256 verified; pip sdists staged
 - [x] `make toolchain` — cross binutils/gcc/glibc/libstdc++ (aarch64-verk-linux-gnu)
 - [x] `make temp` — full LFS ch.6 temporary tools (17 packages)
-- [~] `make system` — in progress. Boot-critical path:
-      ncurses/bash/coreutils ✓, util-linux ✓, zlib/xz/expat/libcap ✓,
-      pkgconf ✓, kmod ✓, gperf ✓, libffi ✓, Python ✓, ninja ✓, setuptools/wheel ✓
-      → **currently blocked in the meson/jinja2 pip step**, then dbus, systemd.
-
-### ⏭️ Resume here (current blocker)
-
-The offline pip install of jinja2 fails:
-```
-flit_core.config.ConfigError: license field should be <class 'dict'>, not <class 'str'>
-```
-A flit_core ↔ jinja2 metadata mismatch: the staged flit_core version rejects
-jinja2 3.1.4's `license` string (PEP 639 changed this). Fix options for next
-session (in scripts/40-final-system.sh / config/versions.sh + re-`make fetch`):
-- pin an older flit_core (e.g. 3.9.0 is already set — but the *downloaded* one
-  may differ; pin it explicitly in the pip download and `--find-links` install), OR
-- bump jinja2 to a version whose metadata the flit_core accepts, OR
-- stage a matching flit_core/jinja2 pair.
-The stamps mean a re-run jumps straight back to this pip step in seconds.
+- [x] `make system` — **COMPLETE**. Full boot-critical userland + systemd 256.7
+      as `/usr/sbin/init`. Path: ncurses/bash/coreutils, util-linux, pkgconf,
+      zlib/xz/expat/libcap, kmod, gperf, libffi, Python 3.12, ninja,
+      meson/jinja2/markupsafe (pip), perl 5.38.2, libxcrypt, dbus (meson),
+      **systemd**, + /etc config (fstab, resolv.conf, machine-id, default target).
+- [~] `make kernel ARCH=aarch64` — building (arm64 defconfig).
+- [ ] `make image` + `make run` → **first boot** 🎯
 - [ ] `make kernel` ARCH=aarch64
 - [ ] `make image` + `make run` → **first boot** 🎯
 
@@ -65,6 +53,12 @@ The stamps mean a re-run jumps straight back to this pip step in seconds.
 9. kmod needs pkg-config → build pkgconf; needs scdoc → --disable-manpages.
 10. libffi installed to /usr/lib64 (off linker path) → --libdir=/usr/lib + ldconfig.
 11. Python 3.12 ensurepip lacks setuptools → stage setuptools/wheel sdists.
+12. markupsafe wheel was cp311 (host) not cp312 (target) → build it from sdist.
+13. dbus 1.16 dropped autotools → build with meson.
+14. systemd needs libcrypt (glibc 2.38+ drops it) → build libxcrypt.
+15. libxcrypt needs perl → build perl; 5.40.0 miscompiles → pin 5.38.2.
+16. `make && make install` under `set -e` doesn't abort on make failure (masked
+    perl's failure and stamped it done) → use separate statements everywhere.
 
 Plus: per-package build stamps (`/sources/.nst`) so re-runs skip finished packages.
 
