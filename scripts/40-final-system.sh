@@ -498,6 +498,76 @@ cd /sources
 mark dhcpcd
 fi
 
+# 11. Extra userland tools ---------------------------------------------------
+# iproute2 — ip, ss
+if need iproute2; then
+say "iproute2 ${IPROUTE2_VERSION}"
+d=$(unpack iproute2-${IPROUTE2_VERSION}.tar.xz); cd "$d"
+./configure
+make
+make install
+cd /sources
+mark iproute2
+fi
+
+# iputils — ping (meson build; trim deps/docs to just the tools)
+if need iputils; then
+say "iputils ${IPUTILS_VERSION}"
+d=$(unpack iputils-${IPUTILS_VERSION}.tar.gz); cd "$d"
+meson setup build --prefix=/usr --buildtype=release \
+    -Dskip-tests=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false \
+    -DUSE_CAP=false -DUSE_IDN=false
+ninja -C build
+ninja -C build install
+cd /sources
+mark iputils
+fi
+
+# curl — HTTP/HTTPS downloads (uses our openssl + zlib)
+if need curl; then
+say "curl ${CURL_VERSION}"
+d=$(unpack curl-${CURL_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --with-openssl --with-zlib \
+    --with-ca-path=/etc/ssl/certs --disable-static --enable-optimize
+make
+make install
+cd /sources
+mark curl
+fi
+
+# procps-ng — ps, top, free
+if need procps; then
+say "procps-ng ${PROCPS_VERSION}"
+d=$(unpack procps-ng-${PROCPS_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --disable-static --disable-kill
+make
+make install
+cd /sources
+mark procps
+fi
+
+# less — pager
+if need less; then
+say "less ${LESS_VERSION}"
+d=$(unpack less-${LESS_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --sysconfdir=/etc
+make
+make install
+cd /sources
+mark less
+fi
+
+# nano — simple editor
+if need nano; then
+say "nano ${NANO_VERSION}"
+d=$(unpack nano-${NANO_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --sysconfdir=/etc --enable-utf8
+make
+make install
+cd /sources
+mark nano
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'

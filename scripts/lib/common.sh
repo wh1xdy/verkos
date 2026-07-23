@@ -134,6 +134,12 @@ source_url() {
         dhcpcd-*)     echo "$URL_DHCPCD/v${DHCPCD_VERSION}/$pkg" ;;
         openssl-*)    echo "$URL_OPENSSL/openssl-${OPENSSL_VERSION}/$pkg" ;;
         openssh-*)    echo "$URL_OPENSSH/$pkg" ;;
+        iproute2-*)   echo "$URL_IPROUTE2/$pkg" ;;
+        iputils-*)    echo "$URL_IPUTILS/${IPUTILS_VERSION}/$pkg" ;;
+        curl-*)       echo "$URL_CURL/$pkg" ;;
+        procps-ng-*)  echo "$URL_PROCPS/$pkg/download" ;;
+        less-*)       echo "$URL_LESS/$pkg" ;;
+        nano-*)       echo "$URL_NANO/$pkg" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }
