@@ -482,6 +482,10 @@ cat > /etc/profile <<'PROF'
 export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 export PS1='\u@\h:\w\$ '
 export LANG=C.UTF-8
+# Greet interactive logins with verkfetch (VerkOS' neofetch).
+if [ -x /usr/bin/verkfetch ]; then
+    case "$-" in *i*) verkfetch ;; esac
+fi
 PROF
 
 # Machine id (systemd needs one).
@@ -553,6 +557,12 @@ fi
 
 if enter_rootfs '/root/build-native.sh'; then
     stamp_set "final-system-complete"
+    # Install verkfetch (VerkOS' neofetch). It's a repo script, not a fetched
+    # package, so copy it in from the host side; /etc/profile runs it on login.
+    if [ -f "$VERK_ROOT/tools/verkfetch" ]; then
+        sudo install -m 0755 "$VERK_ROOT/tools/verkfetch" "$ROOTFS/usr/bin/verkfetch"
+        ok "installed verkfetch → /usr/bin/verkfetch"
+    fi
     ok "Final system built — systemd is /usr/sbin/init"
 else
     warn "Native build stopped before completion — inspect the log above."

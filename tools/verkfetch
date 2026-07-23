@@ -1,0 +1,178 @@
+#!/bin/sh
+# verkfetch — a tiny neofetch-like system info tool for VerkOS.
+# Pure POSIX sh + /proc; no dependencies, so it runs in a minimal VerkOS.
+# Theme: cyan -> purple. Pick the logo with VERKFETCH_LOGO (a|b|c|d) or $1.
+
+# --- colours ---------------------------------------------------------------
+# 16-colour ANSI (cyan -> purple), so it renders on any console incl. serial.
+if { [ -t 1 ] || [ "${VERKFETCH_COLOR:-}" = "1" ]; } && [ "${NO_COLOR:-}" = "" ]; then
+    C1='\033[96m'  # bright cyan
+    C2='\033[36m'  # cyan
+    C3='\033[94m'  # bright blue
+    C4='\033[95m'  # bright magenta
+    C5='\033[35m'  # magenta / purple
+    LBL='\033[1;96m'  # bold bright-cyan labels
+    RST='\033[0m'
+else
+    C1=; C2=; C3=; C4=; C5=; LBL=; RST=
+fi
+
+# --- gather info -----------------------------------------------------------
+. /etc/os-release 2>/dev/null || { PRETTY_NAME="VerkOS"; VERSION_ID="?"; }
+host=$(cat /etc/hostname 2>/dev/null || echo verkos)
+kern=$(uname -r 2>/dev/null)
+arch=$(uname -m 2>/dev/null)
+shell=$(basename "${SHELL:-/bin/sh}")
+
+# uptime (seconds -> h m) from /proc/uptime
+up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+uph=$(( up / 3600 )); upm=$(( (up % 3600) / 60 ))
+uptime="${uph}h ${upm}m"
+
+# cpu model + core count from /proc/cpuinfo (fall back to arch on ARM, which
+# usually has no friendly model-name line)
+cpu=$(grep -m1 -E '^(model name|Model)' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//')
+[ -z "$cpu" ] && cpu="$arch"
+cores=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)
+
+# memory used/total (MiB) from /proc/meminfo
+memtot=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+memav=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+[ -n "$memtot" ] && [ -n "$memav" ] && mem="$(( memtot - memav ))MiB / ${memtot}MiB" || mem="?"
+
+# a VerkOS-flavoured "packages" stat: userland programs built from source
+pkgs=$(ls /usr/bin /bin 2>/dev/null | sort -u | wc -l | tr -d ' ')
+
+# --- logo variants (PLAIN text; colour + padding applied at render) --------
+# Keep every line <= LOGOW visible chars so the info column stays aligned.
+logo_a() { cat <<'EOF'
+ __     _______ ____  _  __
+ \ \   / / ____|  _ \| |/ /
+  \ \ / /|  _| | |_) | ' /
+   \ V / | |___|  _ <| . \
+    \_/  |_____|_| \_\_|\_\
+EOF
+}
+logo_b() { cat <<'EOF'
+    ___________
+   /          /\
+  /  VerkOS  /  \
+ /__________/    \
+ \          \    /
+  \  ######  \  /
+   \__________\/
+EOF
+}
+logo_c() { cat <<'EOF'
+  \\          //
+   \\        //
+    \\      //
+     \\    //
+      \\  //
+       \\//
+        \/  VerkOS
+EOF
+}
+logo_d() { cat <<'EOF'
+          /\
+         /  \
+        / /\ \
+       / /  \ \
+      /_/ /\ \_\
+     /___/  \___\
+EOF
+}
+# "OS over V" concepts (V^OS)
+logo_e() { cat <<'EOF'
+   ___  ___
+  / _ \/ __|
+ | (_) \__ \
+  \___/|___/
+  \        /
+   \      /
+    \    /
+     \  /
+      \/
+EOF
+}
+logo_f() { cat <<'EOF'
+    ___  ___
+   / _ \/ __|
+  | (_) \__ \
+   \___/|___/
+ \           /
+  \         /
+   \       /
+    \     /
+     \   /
+      \_/
+EOF
+}
+logo_g() { cat <<'EOF'
+         .  ___  ___
+        /| / _ \/ __|
+       / |( (_) )__ \
+      /  | \___/|___/
+     / V |
+    /____|
+EOF
+}
+
+logo="${1:-${VERKFETCH_LOGO:-a}}"
+case "$logo" in
+    a) art=$(logo_a) ;;
+    b) art=$(logo_b) ;;
+    c) art=$(logo_c) ;;
+    d) art=$(logo_d) ;;
+    e) art=$(logo_e) ;;
+    f) art=$(logo_f) ;;
+    g) art=$(logo_g) ;;
+    *) art=$(logo_a) ;;
+esac
+
+LOGOW=28   # fixed logo column width, so info lines all start at the same x
+
+# --- info lines (one per positional param) ---------------------------------
+info=$(cat <<EOF
+${LBL}root${RST}@${LBL}${host}${RST}
+${C4}─────────────${RST}
+${LBL}OS${RST}      ${PRETTY_NAME} ${VERSION_ID}
+${LBL}Kernel${RST}  Linux ${kern}
+${LBL}Arch${RST}    ${arch}
+${LBL}Uptime${RST}  ${uptime}
+${LBL}Shell${RST}   ${shell}
+${LBL}CPU${RST}     ${cpu} (${cores})
+${LBL}Memory${RST}  ${mem}
+${LBL}Progs${RST}   ${pkgs} (built from source)
+${C1}●${C2}●${C3}●${C4}●${C5}●${RST}
+EOF
+)
+
+# --- render: colour each plain logo line (cyan->purple), pad, append info ---
+oldIFS=$IFS; IFS='
+'
+set -- $info                       # info lines -> $1..$n
+n=$#
+IFS=$oldIFS
+colors="$C1 $C2 $C3 $C4 $C5 $C4 $C3 $C2 $C1"
+
+printf '\n'
+li=0
+printf '%s\n' "$art" | { while IFS= read -r line; do
+    li=$((li + 1))
+    # pick the li-th colour word (cycles)
+    lc=$(printf '%s\n' $colors | sed -n "$(( (li - 1) % 9 + 1 ))p")
+    eval "right=\${$li:-}"
+    # pad the plain logo line to LOGOW, then colour it, then the info column
+    printf "%b%-${LOGOW}s%b%b\n" "$lc" "$line" "$RST" "$right"
+done
+# any info lines past the logo height
+la=$(printf '%s\n' "$art" | wc -l)
+i=$((la + 1))
+while [ "$i" -le "$n" ]; do
+    eval "right=\${$i:-}"
+    printf "%-${LOGOW}s%b\n" "" "$right"
+    i=$((i + 1))
+done
+}
+printf '\n'
