@@ -551,7 +551,7 @@ fi
 if need curl; then
 say "curl ${CURL_VERSION}"
 d=$(unpack curl-${CURL_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --with-openssl --with-zlib \
+./configure --prefix=/usr --with-openssl --with-zlib --without-libpsl \
     --with-ca-path=/etc/ssl/certs --disable-static --enable-optimize
 make
 make install
