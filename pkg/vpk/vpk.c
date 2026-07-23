@@ -39,11 +39,16 @@
 #include <zlib.h>
 
 /* ---------------------------------------------------------------- config -- */
-#define RECIPE_DIR "/etc/vpk/recipes"
+#define RECIPE_DIR "/etc/vpk/recipes"          /* recipes shipped with the OS   */
+#define RCACHE_DIR "/var/cache/vpk/recipes"     /* recipes fetched from the repo */
 #define DB_DIR     "/var/lib/vpk/db"
 #define CACHE_DIR  "/var/cache/vpk"
 #define BUILD_DIR  "/var/tmp/vpk"
+#define INDEX_PATH "/var/lib/vpk/index"         /* cached package index          */
 #define VPK_VERSION "0.1"
+/* Remote package repo. Recipes live at <base>/pkg/recipes/<name>/recipe and the
+ * index at <base>/pkg/recipes/INDEX. Override with a single line in /etc/vpk/repo. */
+#define REPO_BASE_DEFAULT "https://raw.githubusercontent.com/wh1xdy/verkos/main"
 
 /* ------------------------------------------------------------- utilities -- */
 static void die(const char *fmt, ...) {
@@ -252,6 +257,61 @@ out:
     fclose(f); return ret;
 }
 
+/* ------------------------------------------------------- binary packages -- */
+/* recursive rm -rf (to reclaim build scratch) */
+static void rmrf(const char *path) {
+    struct stat st; if (lstat(path,&st)) return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d=opendir(path); if(d){ struct dirent *e;
+            while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+                char p[4096]; snprintf(p,sizeof p,"%s/%s",path,e->d_name); rmrf(p); }
+            closedir(d); }
+        rmdir(path);
+    } else unlink(path);
+}
+/* Write a ustar tar of `srcdir`'s contents straight into a gzip stream — this is
+ * the .vpk binary package: a gzipped tar of the files that go to /. */
+static void tp_pad(gzFile g, long n){ char z[512]={0}; long r=(512-(n%512))%512; if(r) gzwrite(g,z,(unsigned)r); }
+static void tp_hdr(gzFile g,const char *name,long size,long mode,char type,const char *link){
+    char h[512]; memset(h,0,512);
+    snprintf(h,100,"%s",name);
+    snprintf(h+100,8,"%07lo",mode&07777);
+    snprintf(h+108,8,"%07o",0); snprintf(h+116,8,"%07o",0);
+    snprintf(h+124,12,"%011lo",size);
+    snprintf(h+136,12,"%011o",0);
+    h[156]=type; if(link) snprintf(h+157,100,"%s",link);
+    memcpy(h+257,"ustar",5); h[263]='0'; h[264]='0';
+    memset(h+148,' ',8);
+    unsigned sum=0; for(int i=0;i<512;i++) sum+=(unsigned char)h[i];
+    snprintf(h+148,7,"%06o",sum); h[155]=' ';
+    gzwrite(g,h,512);
+}
+static void tp_walk(gzFile g,const char *base,const char *rel){
+    char full[4096]; snprintf(full,sizeof full,"%s%s%s",base,*rel?"/":"",rel);
+    DIR *d=opendir(full); if(!d) return; struct dirent *e;
+    while((e=readdir(d))){
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        char cr[4096]; snprintf(cr,sizeof cr,"%s%s%s",rel,*rel?"/":"",e->d_name);
+        char sp[4096]; snprintf(sp,sizeof sp,"%s/%s",base,cr);
+        struct stat st; if(lstat(sp,&st))continue;
+        if(S_ISDIR(st.st_mode)){ char dn[4102]; snprintf(dn,sizeof dn,"%s/",cr);
+            tp_hdr(g,dn,0,st.st_mode&07777,'5',NULL); tp_walk(g,base,cr); }
+        else if(S_ISLNK(st.st_mode)){ char t[4096]; ssize_t k=readlink(sp,t,sizeof t-1);
+            if(k<0)continue; t[k]=0; tp_hdr(g,cr,0,0777,'2',t); }
+        else if(S_ISREG(st.st_mode)){ tp_hdr(g,cr,st.st_size,st.st_mode&07777,'0',NULL);
+            FILE *f=fopen(sp,"rb"); if(f){ char b[65536]; size_t n;
+                while((n=fread(b,1,sizeof b,f))>0) gzwrite(g,b,(unsigned)n); fclose(f); }
+            tp_pad(g,st.st_size); }
+    }
+    closedir(d);
+}
+static int make_binpkg(const char *destdir,const char *vpkpath){
+    gzFile g=gzopen(vpkpath,"wb6"); if(!g) return -1;
+    tp_walk(g,destdir,"");
+    char z[1024]={0}; gzwrite(g,z,1024);        /* end-of-archive */
+    gzclose(g); return 0;
+}
+
 /* --------------------------------------------------------------- recipe --- */
 typedef struct {
     char name[64], version[64], source[1024], sha256[65];
@@ -259,8 +319,25 @@ typedef struct {
     char build[8192];     /* body of build() */
 } recipe_t;
 
+/* Base URL of the package repo; a single line in /etc/vpk/repo overrides it. */
+static const char *repo_base(void) {
+    static char buf[512]; if (buf[0]) return buf;
+    FILE *f=fopen("/etc/vpk/repo","r");
+    if (f){ if (fgets(buf,sizeof buf,f)) buf[strcspn(buf,"\r\n")]=0; fclose(f); }
+    if (!buf[0]) snprintf(buf,sizeof buf,"%s",REPO_BASE_DEFAULT);
+    return buf;
+}
+/* Locate a recipe: prefer OS-shipped recipes, then the fetched cache; else
+ * download it from the repo into the cache. Lets `vpk install <newapp>` work
+ * without rebuilding the OS — just push a recipe to the repo. */
 static int recipe_path(const char *name, char *out, size_t n) {
-    snprintf(out,n,"%s/%s/recipe",RECIPE_DIR,name); return access(out,R_OK);
+    snprintf(out,n,"%s/%s/recipe",RECIPE_DIR,name); if (access(out,R_OK)==0) return 0;
+    snprintf(out,n,"%s/%s/recipe",RCACHE_DIR,name); if (access(out,R_OK)==0) return 0;
+    char dir[512]; snprintf(dir,sizeof dir,"%s/%s",RCACHE_DIR,name); mkpath(dir,0755);
+    char url[1024]; snprintf(url,sizeof url,"%s/pkg/recipes/%s/recipe",repo_base(),name);
+    info("fetching recipe '%s' from repo",name);
+    if (download(url,out)!=0) return -1;
+    return 0;
 }
 /* very small parser: key=value lines + a build() { ... } block */
 static int recipe_load(const char *name, recipe_t *r) {
@@ -308,7 +385,6 @@ static void db_meta(const char *name, const char *key, char *out, size_t n) {
     fclose(f);
 }
 static int is_base(const char *name){ char v[32]; db_meta(name,"base",v,sizeof v); return !strcmp(v,"yes"); }
-static void db_record(const recipe_t *r, const char *destdir);  /* fwd */
 
 /* ------------------------------------------------------- dep resolution --- */
 /* Depth-first topological order of deps (installs deps before dependents).   */
@@ -378,43 +454,12 @@ static void copy_and_record(const char *base, const char *rel, FILE *db) {
     closedir(d);
 }
 
-static void install_one(const recipe_t *r) {
-    info("installing %s %s", r->name, r->version);
-    mkpath(CACHE_DIR,0755);
-    char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r->name);
-    mkpath(work,0755);
-
-    /* 1. fetch source (cached by basename) */
-    const char *bn=strrchr(r->source,'/'); bn=bn?bn+1:r->source;
-    char tarball[1024]; snprintf(tarball,sizeof tarball,"%s/%s",CACHE_DIR,bn);
-    if (access(tarball,R_OK)) { info("fetch %s",r->source);
-        if (download(r->source,tarball)) die("download failed"); }
-
-    /* 2. verify sha256 */
-    if (r->sha256[0]) {
-        char got[65]; if (sha256_file(tarball,got)) die("hash failed");
-        if (strcmp(got,r->sha256)) die("sha256 mismatch for %s\n  want %s\n  got  %s",bn,r->sha256,got);
-        info("verified sha256");
-    }
-
-    /* 3. decompress + extract (strip leading dir) */
-    char tar[1024]; snprintf(tar,sizeof tar,"%s/src.tar",work);
-    if (decompress_to_tar(tarball,tar)) die("decompress failed");
-    char srcdir[512]; snprintf(srcdir,sizeof srcdir,"%s/src",work);
-    mkpath(srcdir,0755);
-    if (untar(tar,srcdir,1)) die("extract failed");
-    unlink(tar);
-
-    /* 4. build into DESTDIR */
-    char dest[512]; snprintf(dest,sizeof dest,"%s/dest",work);
-    char rm[600]; snprintf(rm,sizeof rm,"%s",dest);
-    /* fresh dest */
-    { char cmd[700]; snprintf(cmd,sizeof cmd,"%s",dest); }
-    mkpath(dest,0755);
-    info("building %s", r->name);
-    if (run_build(r,srcdir,dest)) die("build failed for %s",r->name);
-
-    /* 5. merge into / and record db */
+static int binpkg_path(const recipe_t *r, char *out, size_t n) {
+    snprintf(out,n,"%s/pkg/%s-%s.vpk",CACHE_DIR,r->name,r->version);
+    return access(out,R_OK);
+}
+/* merge a built/extracted DESTDIR tree into / and record the db file list */
+static void record_and_merge(const recipe_t *r, const char *dest) {
     char dbdir[512]; snprintf(dbdir,sizeof dbdir,"%s/%s",DB_DIR,r->name);
     mkpath(dbdir,0755);
     char files[600]; snprintf(files,sizeof files,"%s/files",dbdir);
@@ -424,8 +469,64 @@ static void install_one(const recipe_t *r) {
     char meta[600]; snprintf(meta,sizeof meta,"%s/meta",dbdir);
     FILE *m=fopen(meta,"w");
     if(m){ fprintf(m,"name=%s\nversion=%s\n",r->name,r->version); fclose(m); }
+}
+/* fetch + verify + unpack + build into DESTDIR; also saves a .vpk binary
+ * package. Returns the DESTDIR path in `destout`. */
+static void build_into_dest(const recipe_t *r, char *destout, size_t dn) {
+    mkpath(CACHE_DIR,0755);
+    char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r->name);
+    rmrf(work); mkpath(work,0755);
+
+    const char *bn=strrchr(r->source,'/'); bn=bn?bn+1:r->source;
+    char tarball[1024]; snprintf(tarball,sizeof tarball,"%s/%s",CACHE_DIR,bn);
+    if (access(tarball,R_OK)) { info("fetch %s",r->source);
+        if (download(r->source,tarball)) die("download failed"); }
+
+    if (r->sha256[0]) {
+        char got[65]; if (sha256_file(tarball,got)) die("hash failed");
+        if (strcmp(got,r->sha256)) die("sha256 mismatch for %s\n  want %s\n  got  %s",bn,r->sha256,got);
+        info("verified sha256");
+    }
+
+    char tar[1024]; snprintf(tar,sizeof tar,"%s/src.tar",work);
+    if (decompress_to_tar(tarball,tar)) die("decompress failed");
+    char srcdir[512]; snprintf(srcdir,sizeof srcdir,"%s/src",work);
+    mkpath(srcdir,0755);
+    if (untar(tar,srcdir,1)) die("extract failed");
+    unlink(tar);
+
+    char dest[512]; snprintf(dest,sizeof dest,"%s/dest",work);
+    mkpath(dest,0755);
+    info("building %s", r->name);
+    if (run_build(r,srcdir,dest)) die("build failed for %s",r->name);
+
+    /* save a binary package for fast reinstall next time */
+    char pkgdir[512]; snprintf(pkgdir,sizeof pkgdir,"%s/pkg",CACHE_DIR); mkpath(pkgdir,0755);
+    char vpk[600]; snprintf(vpk,sizeof vpk,"%s/%s-%s.vpk",pkgdir,r->name,r->version);
+    if (make_binpkg(dest,vpk)==0) info("cached binary package %s-%s.vpk",r->name,r->version);
+    snprintf(destout,dn,"%s",dest);
+}
+/* install by building from source (then merge + reclaim scratch) */
+static void install_one(const recipe_t *r) {
+    info("installing %s %s (from source)", r->name, r->version);
+    char dest[512]; build_into_dest(r,dest,sizeof dest);
+    record_and_merge(r,dest);
+    char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r->name); rmrf(work);
     info("installed %s %s", r->name, r->version);
-    (void)rm;
+}
+/* install directly from a prebuilt .vpk binary package (no building) */
+static void install_from_binpkg(const recipe_t *r, const char *vpk) {
+    info("installing %s %s (binary package)", r->name, r->version);
+    char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r->name);
+    rmrf(work); mkpath(work,0755);
+    char tar[1024]; snprintf(tar,sizeof tar,"%s/bin.tar",work);
+    if (decompress_gz(vpk,tar)) die("binpkg decompress failed");
+    char dest[512]; snprintf(dest,sizeof dest,"%s/bindest",work); mkpath(dest,0755);
+    if (untar(tar,dest,0)) die("binpkg extract failed");   /* no strip */
+    unlink(tar);
+    record_and_merge(r,dest);
+    rmrf(work);
+    info("installed %s %s", r->name, r->version);
 }
 
 /* ----------------------------------------------------------- commands ----- */
@@ -436,7 +537,18 @@ static void cmd_install(int argc, char **argv) {
     for (int i=0;i<n;i++) {
         if (is_installed(order[i])) { info("%s already installed, skipping",order[i]); continue; }
         recipe_t r; if (recipe_load(order[i],&r)) die("no recipe for '%s'",order[i]);
-        install_one(&r);
+        char vpk[600];
+        if (binpkg_path(&r,vpk,sizeof vpk)==0) install_from_binpkg(&r,vpk);  /* fast path */
+        else install_one(&r);                                                /* build from source */
+    }
+}
+/* build a binary package (.vpk) without installing — for prebuilding a repo */
+static void cmd_build(int argc, char **argv) {
+    for (int i=0;i<argc;i++) {
+        recipe_t r; if (recipe_load(argv[i],&r)) die("no recipe for '%s'",argv[i]);
+        char dest[512]; build_into_dest(&r,dest,sizeof dest);
+        char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r.name); rmrf(work);
+        info("built binary package %s-%s.vpk", r.name, r.version);
     }
 }
 static void cmd_remove(int argc, char **argv) {
@@ -477,6 +589,32 @@ static void cmd_list(void) {
     }
     closedir(d);
 }
+/* refresh the package index from the repo */
+static void cmd_update(void) {
+    mkpath(DB_DIR,0755);   /* /var/lib/vpk exists */
+    char url[1024]; snprintf(url,sizeof url,"%s/pkg/recipes/INDEX",repo_base());
+    info("updating index from %s", repo_base());
+    if (download(url,INDEX_PATH)!=0) die("could not fetch index (is the repo URL right?)");
+    int n=0; FILE *f=fopen(INDEX_PATH,"r");
+    if(f){ char l[256]; while(fgets(l,sizeof l,f)) if(l[0]&&l[0]!='#') n++; fclose(f); }
+    info("index updated — %d package(s) available", n);
+}
+/* list available packages from the index, optional substring filter */
+static void cmd_search(const char *term) {
+    FILE *f=fopen(INDEX_PATH,"r");
+    if(!f) die("no index yet — run 'vpk update' first");
+    char l[256]; int n=0;
+    while (fgets(l,sizeof l,f)) {
+        if (l[0]=='#'||l[0]=='\n') continue;
+        if (term && !strstr(l,term)) continue;
+        l[strcspn(l,"\n")]=0;
+        char name[64]=""; sscanf(l,"%63s",name);
+        printf("%-20s %s\n", name, is_installed(name)?"[installed]":"");
+        n++;
+    }
+    fclose(f);
+    if (!n) info("no packages match");
+}
 static void cmd_info(const char *name) {
     recipe_t r; if (recipe_load(name,&r)) die("no recipe for '%s'",name);
     printf("Name:      %s\n",r.name);
@@ -489,7 +627,12 @@ static void cmd_info(const char *name) {
 static void usage(void) {
     printf("vpk %s — the Verk package manager\n\n"
            "usage:\n"
-           "  vpk install <pkg>...   build+install from source (with deps)\n"
+           "  vpk update             refresh the package index from the repo\n"
+           "  vpk search [term]      list available packages (from the index)\n"
+           "  vpk install <pkg>...   install (fetches recipe from the repo if not\n"
+           "                         local; uses a cached binary package if present,\n"
+           "                         else builds from source + caches it)\n"
+           "  vpk build   <pkg>...   build a binary package (.vpk) without installing\n"
            "  vpk remove  <pkg>...   remove installed package(s)\n"
            "  vpk list               list installed packages\n"
            "  vpk info    <pkg>      show recipe info\n", VPK_VERSION);
@@ -501,7 +644,10 @@ int main(int argc, char **argv) {
     mkpath(DB_DIR,0755); mkpath(BUILD_DIR,0755);
     const char *cmd=argv[1];
     if      (!strcmp(cmd,"install")&&argc>2) cmd_install(argc-2,argv+2);
+    else if (!strcmp(cmd,"build")  &&argc>2) cmd_build(argc-2,argv+2);
     else if (!strcmp(cmd,"remove") &&argc>2) cmd_remove(argc-2,argv+2);
+    else if (!strcmp(cmd,"update"))          cmd_update();
+    else if (!strcmp(cmd,"search"))          cmd_search(argc>2?argv[2]:NULL);
     else if (!strcmp(cmd,"list"))            cmd_list();
     else if (!strcmp(cmd,"info")   &&argc>2) cmd_info(argv[2]);
     else if (!strcmp(cmd,"--version")) printf("vpk %s\n",VPK_VERSION);
