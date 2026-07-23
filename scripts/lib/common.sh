@@ -131,6 +131,9 @@ source_url() {
         libxcrypt-*)  echo "$URL_LIBXCRYPT/v${LIBXCRYPT_VERSION}/$pkg" ;;
         perl-*)       echo "$URL_PERL/$pkg" ;;
         shadow-*)     echo "$URL_SHADOW/${SHADOW_VERSION}/$pkg" ;;
+        dhcpcd-*)     echo "$URL_DHCPCD/v${DHCPCD_VERSION}/$pkg" ;;
+        openssl-*)    echo "$URL_OPENSSL/openssl-${OPENSSL_VERSION}/$pkg" ;;
+        openssh-*)    echo "$URL_OPENSSH/$pkg" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }

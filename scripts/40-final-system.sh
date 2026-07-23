@@ -55,6 +55,8 @@ systemd-resolve:x:77:77:systemd Resolver:/:/usr/bin/false
 systemd-timesync:x:78:78:systemd Time Synchronization:/:/usr/bin/false
 systemd-coredump:x:79:79:systemd Core Dumper:/:/usr/bin/false
 uuidd:x:80:80:UUID Generation Daemon User:/dev/null:/usr/bin/false
+sshd:x:50:50:sshd PrivSep:/var/lib/sshd:/usr/bin/false
+dhcpcd:x:52:52:dhcpcd PrivSep:/var/lib/dhcpcd:/usr/bin/false
 nobody:x:65534:65534:Unprivileged User:/dev/null:/usr/bin/false
 EOF
     sudo tee "$ROOTFS/etc/group" >/dev/null <<'EOF'
@@ -86,6 +88,8 @@ systemd-resolve:x:77:
 systemd-timesync:x:78:
 systemd-coredump:x:79:
 uuidd:x:80:
+sshd:x:50:
+dhcpcd:x:52:
 wheel:x:97:
 users:x:999:
 nogroup:x:65534:
@@ -454,6 +458,46 @@ fi
 ln -sfv /usr/lib/systemd/systemd /usr/sbin/init
 cd /sources
 
+# 10. Networking + SSH -------------------------------------------------------
+# OpenSSL (crypto for OpenSSH). install_sw/install_ssldirs skip the slow docs.
+if need openssl; then
+say "openssl ${OPENSSL_VERSION}"
+d=$(unpack openssl-${OPENSSL_VERSION}.tar.gz); cd "$d"
+./config --prefix=/usr --openssldir=/etc/ssl --libdir=lib shared zlib-dynamic
+make
+make install_sw install_ssldirs
+ldconfig
+cd /sources
+mark openssl
+fi
+
+# OpenSSH — sshd + ssh client. Needs openssl + zlib.
+if need openssh; then
+say "openssh ${OPENSSH_VERSION}"
+d=$(unpack openssh-${OPENSSH_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --sysconfdir=/etc/ssh \
+    --with-privsep-path=/var/lib/sshd --with-privsep-user=sshd \
+    --with-ssl-dir=/usr --with-zlib
+make
+install -d -m 0700 /var/lib/sshd
+make install
+cd /sources
+mark openssh
+fi
+
+# dhcpcd — the ACTIVE DHCP/DNS client (chosen over systemd-networkd; first step
+# toward replacing systemd's networking).
+if need dhcpcd; then
+say "dhcpcd ${DHCPCD_VERSION}"
+d=$(unpack dhcpcd-${DHCPCD_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/lib/dhcpcd \
+    --dbdir=/var/lib/dhcpcd --rundir=/run --privsepuser=dhcpcd
+make
+make install
+cd /sources
+mark dhcpcd
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -517,6 +561,62 @@ AL
 
 # Enable the D-Bus system bus (systemd services expect it).
 systemctl enable dbus 2>/dev/null || true
+
+# --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
+# --- as a swappable option (first concrete step toward replacing systemd bits).
+mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/network
+cat > /etc/systemd/network/20-wired.network <<'NET'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+NET
+rm -f /etc/resolv.conf; : > /etc/resolv.conf     # dhcpcd writes this directly
+
+cat > /etc/systemd/system/dhcpcd.service <<'DH'
+[Unit]
+Description=dhcpcd DHCP/DNS client (VerkOS)
+Wants=network.target
+Before=network.target
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dhcpcd -B
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+DH
+ln -sf /etc/systemd/system/dhcpcd.service \
+       /etc/systemd/system/multi-user.target.wants/dhcpcd.service
+
+# --- SSH: host keys, sshd service, password (root/verkos) + key auth --------
+ssh-keygen -A 2>/dev/null || true
+mkdir -p /root/.ssh; chmod 700 /root/.ssh
+[ -f /root/.ssh/verkos_ed25519 ] || \
+    ssh-keygen -t ed25519 -N '' -C verkos -f /root/.ssh/verkos_ed25519 2>/dev/null
+cat /root/.ssh/verkos_ed25519.pub > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+cat >> /etc/ssh/sshd_config <<'SSHD'
+
+# --- VerkOS: allow root via both password and key ---
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+SSHD
+cat > /etc/systemd/system/sshd.service <<'SS'
+[Unit]
+Description=OpenSSH server (VerkOS)
+After=network.target
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStart=/usr/sbin/sshd -D -e
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+SS
+ln -sf /etc/systemd/system/sshd.service \
+       /etc/systemd/system/multi-user.target.wants/sshd.service
 
 echo
 echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"

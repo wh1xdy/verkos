@@ -50,6 +50,11 @@ PKGCONF_VERSION="2.3.0";     PKGCONF_SHA256="3a9080ac51d03615e7c1910a0a2a8df0842
 PERL_VERSION="5.38.2";       PERL_SHA256="d91115e90b896520e83d4de6b52f8254ef2b70a8d545ffab33200ea9f1cf29e8"
 SHADOW_VERSION="4.16.0";     SHADOW_SHA256="b78e3921a95d53282a38e90628880624736bf6235e36eea50c50835f59a3530b"
 
+# --- Networking + SSH ------------------------------------------------------
+DHCPCD_VERSION="10.1.0";     DHCPCD_SHA256="abc307c63853da3199baa5c1e15fd5ede9d68d068b2a59ca14c5a6768e9cc3b7"
+OPENSSL_VERSION="3.4.0";     OPENSSL_SHA256="e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
+OPENSSH_VERSION="9.9p1";     OPENSSH_SHA256="b343fbcdbff87f15b1986e6e15d6d4fc9a7d36066be6b7fb507087ba8f966c02"
+
 # --- Init / system layer ---------------------------------------------------
 SYSTEMD_VERSION="256.7";     SYSTEMD_SHA256="896d76ff65c88f5fd9e42f90d152b0579049158a163431dd77cdc57748b1d7b0"
 DBUS_VERSION="1.16.0";       DBUS_SHA256="9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
@@ -104,3 +109,6 @@ URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
 URL_LIBXCRYPT="https://github.com/besser82/libxcrypt/releases/download"
 URL_PERL="https://www.cpan.org/src/5.0"
 URL_SHADOW="https://github.com/shadow-maint/shadow/releases/download"
+URL_DHCPCD="https://github.com/NetworkConfiguration/dhcpcd/releases/download"
+URL_OPENSSL="https://github.com/openssl/openssl/releases/download"
+URL_OPENSSH="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable"
