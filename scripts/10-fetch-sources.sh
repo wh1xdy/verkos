@@ -59,16 +59,19 @@ if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
     PIP="$(command -v pip3 || command -v pip)"
     step "Fetching Python build tools (sdists) for offline chroot install"
     mkdir -p "$SRC_DIR/pip"
-    # meson/jinja2/markupsafe are pure-Python (markupsafe ships a matching
-    # cp312 wheel); download them as WHEELS, not sdists. Wheels install with no
-    # build backend at all, sidestepping the setuptools/flit_core version dance
-    # that broke building the sdists offline. pip resolves runtime deps (e.g.
-    # jinja2 -> markupsafe) into the same dir.
+    # jinja2 + meson are pure-Python (py3-none-any wheels) — grab them as wheels,
+    # along with setuptools + wheel (also universal) to build markupsafe. But
+    # markupsafe has a C extension: its wheels are Python-version+arch specific,
+    # and this host's pip (Python 3.11) would fetch a cp311 wheel that won't
+    # match the target's Python 3.12. So fetch markupsafe as an sdist and build
+    # it against the target Python in the chroot.
     "$PIP" download --dest "$SRC_DIR/pip" \
-        "markupsafe==${MARKUPSAFE_VERSION}" \
+        "setuptools" "wheel" \
         "jinja2==${JINJA2_VERSION}" \
         "meson==${MESON_VERSION}" \
-        && ok "Python build-tool wheels in $SRC_DIR/pip" \
+        && "$PIP" download --no-binary :all: --dest "$SRC_DIR/pip" \
+        "markupsafe==${MARKUPSAFE_VERSION}" \
+        && ok "Python build tools staged in $SRC_DIR/pip" \
         || warn "pip download failed — systemd's meson/jinja2 must be provided another way"
 else
     warn "No host pip found — meson/jinja2/markupsafe won't be staged for the"
