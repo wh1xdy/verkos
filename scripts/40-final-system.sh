@@ -395,8 +395,7 @@ say "dbus ${DBUS_VERSION}"
 d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
 meson setup build --prefix=/usr --buildtype=release \
     --sysconfdir=/etc --localstatedir=/var \
-    -Ddoxygen_docs=disabled -Dxml_docs=disabled \
-    -Dsystemd=enabled -Dsystemd_system_unitdir=/usr/lib/systemd/system
+    -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
 ninja -C build; ninja -C build install; cd /sources
 mark dbus
 fi
@@ -737,15 +736,36 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 AL
 
-# Enable the D-Bus system bus (systemd-logind and others need it). Enable the
-# socket (socket-activation) + service via explicit symlinks — systemctl enable
-# is unreliable in the chroot. /run/dbus is created by dbus's tmpfiles at boot.
-mkdir -p /etc/systemd/system/sockets.target.wants
-if [ -f /usr/lib/systemd/system/dbus.socket ]; then
-    ln -sf /usr/lib/systemd/system/dbus.socket \
-           /etc/systemd/system/sockets.target.wants/dbus.socket
-    ln -sf /usr/lib/systemd/system/dbus.service /etc/systemd/system/dbus.service
-fi
+# D-Bus system bus units. Our dbus is built without systemd integration (that
+# would pull in glib), so provide the socket + service ourselves and enable the
+# socket. systemd-logind and friends connect to /run/dbus/system_bus_socket.
+mkdir -p /etc/systemd/system/sockets.target.wants /usr/lib/tmpfiles.d
+cat > /usr/lib/systemd/system/dbus.socket <<'DS'
+[Unit]
+Description=D-Bus System Message Bus Socket
+Before=sockets.target
+[Socket]
+ListenStream=/run/dbus/system_bus_socket
+[Install]
+WantedBy=sockets.target
+Also=dbus.service
+DS
+cat > /usr/lib/systemd/system/dbus.service <<'DV'
+[Unit]
+Description=D-Bus System Message Bus
+Requires=dbus.socket
+After=dbus.socket
+[Service]
+ExecStartPre=/usr/bin/mkdir -p /run/dbus
+ExecStart=/usr/bin/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+ExecReload=/usr/bin/dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig
+[Install]
+Alias=dbus.service
+DV
+echo 'd /run/dbus 0755 root root -' > /usr/lib/tmpfiles.d/dbus.conf
+ln -sf /usr/lib/systemd/system/dbus.socket \
+       /etc/systemd/system/sockets.target.wants/dbus.socket
+ln -sf /usr/lib/systemd/system/dbus.service /etc/systemd/system/dbus.service
 
 # --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
 # --- as a swappable option (first concrete step toward replacing systemd bits).
