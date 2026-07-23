@@ -631,6 +631,14 @@ RC
 
 ln -sfv /usr/share/zoneinfo/UTC /etc/localtime
 
+# CA certificate bundle (Mozilla, via curl.se) so HTTPS verification works for
+# vpk, curl and anything using OpenSSL's default paths.
+mkdir -p /etc/ssl/certs
+if [ -f /sources/cacert.pem ]; then
+    cp /sources/cacert.pem /etc/ssl/certs/ca-certificates.crt
+    ln -sfv ca-certificates.crt /etc/ssl/cert.pem
+fi
+
 cat > /etc/ld.so.conf <<'LD'
 /usr/local/lib
 /opt/lib
@@ -642,6 +650,7 @@ cat > /etc/profile <<'PROF'
 export PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 export PS1='\u@\h:\w\$ '
 export LANG=C.UTF-8
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 # Greet interactive logins with verkfetch (VerkOS' neofetch).
 if [ -x /usr/bin/verkfetch ]; then
     case "$-" in *i*) verkfetch ;; esac
