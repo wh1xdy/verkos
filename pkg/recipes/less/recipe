@@ -1,0 +1,10 @@
+name=less
+version=668
+source=https://www.greenwoodsoftware.com/less/less-668.tar.gz
+sha256=2819f55564d86d542abbecafd82ff61e819a3eec967faa36cd3e68f1596a44b8
+depends="ncurses"
+build() {
+    ./configure --prefix=/usr --sysconfdir=/etc
+    make
+    make DESTDIR="$DESTDIR" install
+}

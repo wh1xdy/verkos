@@ -1,0 +1,10 @@
+name=nano
+version=8.2
+source=https://www.nano-editor.org/dist/v8/nano-8.2.tar.xz
+sha256=d5ad07dd862facae03051c54c6535e54c7ed7407318783fcad1ad2d7076fffeb
+depends="ncurses"
+build() {
+    ./configure --prefix=/usr --sysconfdir=/etc --enable-utf8
+    make
+    make DESTDIR="$DESTDIR" install
+}

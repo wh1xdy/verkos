@@ -1,0 +1,10 @@
+name=procps-ng
+version=4.0.4
+source=https://sourceforge.net/projects/procps-ng/files/Production/procps-ng-4.0.4.tar.xz/download
+sha256=22870d6feb2478adb617ce4f09a787addaf2d260c5a8aa7b17d889a962c5e42e
+depends="ncurses"
+build() {
+    ./configure --prefix=/usr --disable-static --disable-kill
+    make
+    make DESTDIR="$DESTDIR" install
+}
