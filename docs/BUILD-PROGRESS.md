@@ -68,6 +68,11 @@ make run ARCH=aarch64
       (ps/top/free), less, nano; plus bison/flex. Verified live over SSH:
       `eth0 UP 10.0.2.15/24`, ping 0% loss, `curl -sI http://example.com`
       → 200 OK, ps/free work.
+- [x] **App recipes verified on VerkOS**: `vpk install htop` and `vpk install
+      wget` both build from source on the running system — dependency resolution
+      skips the base deps (ncurses/openssl/zlib already installed), fetches over
+      HTTPS, verifies sha256, builds, installs, runs. 17 recipes shipped (11
+      base ports + tree/htop/wget/git/vim + hello).
 - [x] **Own package manager — vpk** (Phase 5 "make it ours"): a self-contained,
       source-based (ports-style) package manager in C. Links libcurl/liblzma/zlib
       and implements SHA-256, tar extraction, recipe parsing, recursive
