@@ -55,6 +55,14 @@ DHCPCD_VERSION="10.1.0";     DHCPCD_SHA256="abc307c63853da3199baa5c1e15fd5ede9d6
 OPENSSL_VERSION="3.4.0";     OPENSSL_SHA256="e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
 OPENSSH_VERSION="9.9p1";     OPENSSH_SHA256="b343fbcdbff87f15b1986e6e15d6d4fc9a7d36066be6b7fb507087ba8f966c02"
 
+# --- Extra userland tools --------------------------------------------------
+IPROUTE2_VERSION="6.12.0";   IPROUTE2_SHA256="bbd141ef7b5d0127cc2152843ba61f274dc32814fa3e0f13e7d07a080bef53d9"
+IPUTILS_VERSION="20240905";  IPUTILS_SHA256="599cda8e3f5f7ce4c612456ab1101369da8f79aa0f83c8e877290a1c7bb56010"
+CURL_VERSION="8.11.0";       CURL_SHA256="db59cf0d671ca6e7f5c2c5ec177084a33a79e04c97e71cf183a5cdea235054eb"
+PROCPS_VERSION="4.0.4";      PROCPS_SHA256="22870d6feb2478adb617ce4f09a787addaf2d260c5a8aa7b17d889a962c5e42e"
+LESS_VERSION="668";          LESS_SHA256="2819f55564d86d542abbecafd82ff61e819a3eec967faa36cd3e68f1596a44b8"
+NANO_VERSION="8.2";          NANO_SHA256="d5ad07dd862facae03051c54c6535e54c7ed7407318783fcad1ad2d7076fffeb"
+
 # --- Init / system layer ---------------------------------------------------
 SYSTEMD_VERSION="256.7";     SYSTEMD_SHA256="896d76ff65c88f5fd9e42f90d152b0579049158a163431dd77cdc57748b1d7b0"
 DBUS_VERSION="1.16.0";       DBUS_SHA256="9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
@@ -112,3 +120,9 @@ URL_SHADOW="https://github.com/shadow-maint/shadow/releases/download"
 URL_DHCPCD="https://github.com/NetworkConfiguration/dhcpcd/releases/download"
 URL_OPENSSL="https://github.com/openssl/openssl/releases/download"
 URL_OPENSSH="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable"
+URL_IPROUTE2="https://www.kernel.org/pub/linux/utils/net/iproute2"
+URL_IPUTILS="https://github.com/iputils/iputils/releases/download"
+URL_CURL="https://curl.se/download"
+URL_PROCPS="https://sourceforge.net/projects/procps-ng/files/Production"
+URL_LESS="https://www.greenwoodsoftware.com/less"
+URL_NANO="https://www.nano-editor.org/dist/v8"
