@@ -140,6 +140,7 @@ source_url() {
         procps-ng-*)  echo "$URL_PROCPS/$pkg/download" ;;
         less-*)       echo "$URL_LESS/$pkg" ;;
         nano-*)       echo "$URL_NANO/$pkg" ;;
+        cacert.pem)   echo "$URL_CACERT/cacert.pem" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }

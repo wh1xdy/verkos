@@ -53,6 +53,9 @@ fetch_one "curl-${CURL_VERSION}.tar.xz"               "$CURL_SHA256"
 fetch_one "procps-ng-${PROCPS_VERSION}.tar.xz"        "$PROCPS_SHA256"
 fetch_one "less-${LESS_VERSION}.tar.gz"               "$LESS_SHA256"
 fetch_one "nano-${NANO_VERSION}.tar.xz"               "$NANO_SHA256"
+# Mozilla CA bundle (curl.se) — for HTTPS verification (vpk/curl). Mutable file,
+# so no pinned hash; it's a cert store, not built source.
+fetch_one "cacert.pem"                                ""
 fetch_one "kmod-${KMOD_VERSION}.tar.xz"               "$KMOD_SHA256"
 fetch_one "util-linux-${UTIL_LINUX_VERSION}.tar.xz"   "$UTIL_LINUX_SHA256"
 fetch_one "dbus-${DBUS_VERSION}.tar.xz"               "$DBUS_SHA256"

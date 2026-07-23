@@ -147,6 +147,9 @@ static int download(const char *url, const char *dest) {
     curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,1L);
     curl_easy_setopt(c,CURLOPT_FAILONERROR,1L);
     curl_easy_setopt(c,CURLOPT_USERAGENT,"vpk/" VPK_VERSION);
+    /* Use VerkOS' CA bundle for HTTPS verification when present. */
+    if (access("/etc/ssl/certs/ca-certificates.crt",R_OK)==0)
+        curl_easy_setopt(c,CURLOPT_CAINFO,"/etc/ssl/certs/ca-certificates.crt");
     CURLcode rc=curl_easy_perform(c);
     curl_easy_cleanup(c); fclose(f);
     if (rc!=CURLE_OK){ fprintf(stderr,"vpk: download failed: %s\n",curl_easy_strerror(rc)); unlink(dest); return -1; }
