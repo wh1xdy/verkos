@@ -447,10 +447,10 @@ fi
 if need linuxpam; then
 say "Linux-PAM ${LINUXPAM_VERSION}"
 d=$(unpack Linux-PAM-${LINUXPAM_VERSION}.tar.xz); cd "$d"
-meson setup build --prefix=/usr --sysconfdir=/etc --buildtype=release \
-    -Ddocs=disabled -Dexamples=false
-ninja -C build
-ninja -C build install
+./configure --prefix=/usr --sysconfdir=/etc --disable-doc \
+    --enable-securedir=/usr/lib/security
+make
+make install
 ldconfig
 cd /sources
 mark linuxpam
