@@ -216,7 +216,7 @@ fi
 # coreutils/bash/etc. in the rootfs; a compiler isn't needed at runtime), and it
 # is by far the slowest, most failure-prone part. Skip it by default to reach
 # first boot fast; set VERK_FULL_USERLAND=1 to build the complete userland.
-if [ "${VERK_FULL_USERLAND:-0}" = "1" ]; then
+if [ "${VERK_FULL_USERLAND:-0}" = "1" ] && need full-userland; then
 # bzip2 (LFS recipe: shared lib + binaries)
 say "bzip2 ${BZIP2_VERSION}"
 d=$(unpack bzip2-${BZIP2_VERSION}.tar.gz); cd "$d"
@@ -296,6 +296,7 @@ for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
     make; make install
     cd /sources
 done
+mark full-userland
 fi   # end VERK_FULL_USERLAND
 
 # 5. util-linux (systemd needs libmount/libblkid/libuuid)
@@ -380,12 +381,15 @@ command -v meson >/dev/null && command -v ninja >/dev/null \
 cd /sources
 
 # 8. D-Bus (systemd's IPC bus) — dbus 1.16 uses meson, not autotools.
+if need dbus; then
 say "dbus ${DBUS_VERSION}"
 d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
 meson setup build --prefix=/usr --buildtype=release \
     --sysconfdir=/etc --localstatedir=/var \
     -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
 ninja -C build; ninja -C build install; cd /sources
+mark dbus
+fi
 
 # 8.4 perl — needed by libxcrypt's configure (and generally). Stamped: slow.
 if need perl; then
@@ -399,6 +403,7 @@ fi
 
 # 8.5 libxcrypt — provides libcrypt/crypt.h. Modern glibc (2.38+) builds without
 # the crypt add-on, and systemd needs the 'crypt' library. LFS uses libxcrypt.
+if need libxcrypt; then
 say "libxcrypt ${LIBXCRYPT_VERSION}"
 d=$(unpack libxcrypt-${LIBXCRYPT_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --enable-hashes=strong,glibc \
@@ -406,8 +411,31 @@ d=$(unpack libxcrypt-${LIBXCRYPT_VERSION}.tar.xz); cd "$d"
 make; make install
 ldconfig
 cd /sources
+mark libxcrypt
+fi
+
+# 8.6 shadow — /bin/login, passwd, useradd, /etc/shadow. util-linux's login was
+# disabled, so this is what makes the getty login prompt actually work.
+if need shadow; then
+say "shadow ${SHADOW_VERSION}"
+d=$(unpack shadow-${SHADOW_VERSION}.tar.xz); cd "$d"
+sed -i 's/groups$(EXEEXT) //' src/Makefile.in
+find man -name Makefile.in -exec sed -i 's/groups\.1 / /'   {} \;
+find man -name Makefile.in -exec sed -i 's/getspnam\.3 / /' {} \;
+find man -name Makefile.in -exec sed -i 's/passwd\.5 / /'   {} \;
+sed -e 's:#ENCRYPT_METHOD DES:ENCRYPT_METHOD YESCRYPT:' \
+    -e 's:/var/spool/mail:/var/mail:' -e '/PATH=/{s@/sbin:@@;s@/usr/sbin:@@}' \
+    -i etc/login.defs
+./configure --sysconfdir=/etc --disable-static \
+    --without-libbsd --with-{b,yes}crypt --without-selinux \
+    --without-libpam
+make; make exec_prefix=/usr install
+cd /sources
+mark shadow
+fi
 
 # 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot)
+if need systemd; then
 say "systemd ${SYSTEMD_VERSION}"
 d=$(unpack systemd-${SYSTEMD_VERSION}.tar.gz); cd "$d"
 mkdir -p build && cd build
@@ -420,6 +448,8 @@ meson setup .. \
     -Ddev-kvm-mode=0660 -Dnobody-group=nogroup
 ninja
 ninja install
+mark systemd
+fi
 # Point /sbin/init at systemd.
 ln -sfv /usr/lib/systemd/systemd /usr/sbin/init
 cd /sources
@@ -462,8 +492,27 @@ systemctl set-default multi-user.target 2>/dev/null \
   || ln -sfv /usr/lib/systemd/system/multi-user.target \
              /etc/systemd/system/default.target
 
-# Empty root password for early development. CHANGE BEFORE ANY REAL USE.
-sed -i 's|^root:x:|root::|' /etc/passwd
+# Users/passwords: create /etc/shadow from /etc/passwd, then set a known root
+# password. DEV DEFAULT: root / "verkos" — CHANGE BEFORE ANY REAL USE.
+sed -i 's|^root::|root:x:|' /etc/passwd    # undo the earlier empty-password hack
+if command -v pwconv >/dev/null; then
+    pwconv
+    echo "root:verkos" | chpasswd
+else
+    sed -i 's|^root:x:|root::|' /etc/passwd  # no shadow tools: fall back to empty
+fi
+
+# Serial-console autologin: drop straight to a root shell on boot (handy for dev
+# and demos). Applies to any serial-getty@ instance regardless of tty name.
+mkdir -p /etc/systemd/system/serial-getty@.service.d
+cat > /etc/systemd/system/serial-getty@.service.d/autologin.conf <<'AL'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
+AL
+
+# Enable the D-Bus system bus (systemd services expect it).
+systemctl enable dbus 2>/dev/null || true
 
 echo
 echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"
