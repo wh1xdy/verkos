@@ -75,11 +75,25 @@ make run ARCH=aarch64
       info` (`verk` alias). Ships a CA bundle so HTTPS works. **Verified on
       VerkOS itself**: `vpk install hello` fetched over HTTPS, verified sha256,
       built from source with our gcc, installed; `hello` runs.
-- [ ] logind/PAM (needs Linux-PAM + systemd -Dpam=enabled) — deferred.
+- [x] **Recipe ecosystem + deep vpk integration**:
+      - `scripts/gen-recipes.sh` generates vpk recipes from the build's own data
+        (version/source/sha from versions.sh, build()/depends from a table);
+        11 ports recipes shipped (ncurses, zlib, xz, expat, openssl, less, nano,
+        curl, procps-ng, iproute2, dhcpcd) + hello.
+      - The **whole base system (47 packages) is registered in vpk's db**, so
+        `vpk list` shows the OS (each tagged `[base]`), and vpk refuses to
+        remove base packages.
+- [x] **logind fixed** (the real cause was a missing D-Bus system bus, not PAM):
+      our dbus was built `-Dsystemd=disabled` so it shipped no dbus.service/
+      .socket → logind looped on "Failed to connect to system bus". Provide the
+      dbus units + tmpfiles ourselves and enable dbus.socket. Verified:
+      systemd-logind runs, no loop, `/run/dbus/system_bus_socket` exists.
+- [x] **Linux-PAM 1.6.1** built; systemd rebuilt with `-Dpam=enabled`
+      (pam_systemd.so at /usr/lib/security); /etc/pam.d stack shipped.
 Then multi-arch (x86_64) and GRUB/real-hardware boot.
 
 VerkOS is now a self-hosting distro: it builds software from source and manages
-its own packages, on itself.
+its own packages (base system included), on itself, with working login sessions.
 - [ ] `make kernel` ARCH=aarch64
 - [ ] `make image` + `make run` → **first boot** 🎯
 
