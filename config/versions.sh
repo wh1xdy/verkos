@@ -56,6 +56,7 @@ KMOD_VERSION="33";           KMOD_SHA256="dc768b3155172091f56dc69430b5481f2d76ec
 EXPAT_VERSION="2.6.4";       EXPAT_SHA256="a695629dae047055b37d50a0ff4776d1d45d0a4c842cf4ccee158441f55ff7ee"
 ZLIB_VERSION="1.3.2";        ZLIB_SHA256="bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
 LIBCAP_VERSION="2.70";       LIBCAP_SHA256="23a6ef8aadaf1e3e875f633bb2d116cfef8952dba7bc7c569b13458e1952b30f"
+LIBXCRYPT_VERSION="4.4.36";  LIBXCRYPT_SHA256="e5e1f4caee0a01de2aee26e3138807d6d3ca2b8e67287966d1fefd65e1fd8943"
 
 # --- Python + systemd build tooling ----------------------------------------
 # systemd is built with meson/ninja and needs python3 + jinja2. We build libffi,
@@ -98,3 +99,4 @@ URL_PYTHON="https://www.python.org/ftp/python"
 URL_LIBFFI="https://github.com/libffi/libffi/releases/download"
 URL_NINJA="https://github.com/ninja-build/ninja/archive/refs/tags"
 URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
+URL_LIBXCRYPT="https://github.com/besser82/libxcrypt/releases/download"
