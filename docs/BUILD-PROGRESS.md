@@ -64,7 +64,11 @@ make run ARCH=aarch64
         (2222→22), `eth0: up`, DNS resolves (getent hosts one.one.one.one →
         Cloudflare), outbound works.
 - [x] Fun: verkfetch (neofetch) with cyan→purple ASCII (user is refining the art).
-- [ ] iproute2 (`ip`/`ss`) — not built yet; networking works without it.
+- [x] **Userland tools** — iproute2 (ip/ss), iputils (ping), curl, procps-ng
+      (ps/top/free), less, nano; plus bison/flex. Verified live over SSH:
+      `eth0 UP 10.0.2.15/24`, ping 0% loss, `curl -sI http://example.com`
+      → 200 OK, ps/free work.
+- [ ] **Own package manager** (next — Phase 5 "make it ours").
 - [ ] logind/PAM (needs Linux-PAM + systemd -Dpam=enabled) — deferred.
 Then multi-arch (x86_64) and GRUB/real-hardware boot.
 - [ ] `make kernel` ARCH=aarch64
