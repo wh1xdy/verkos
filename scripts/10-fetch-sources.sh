@@ -59,17 +59,16 @@ if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
     PIP="$(command -v pip3 || command -v pip)"
     step "Fetching Python build tools (sdists) for offline chroot install"
     mkdir -p "$SRC_DIR/pip"
-    # Python 3.12's ensurepip no longer ships setuptools, and pip builds these
-    # sdists with build isolation — so setuptools+wheel (and flit_core) must be
-    # staged locally too, or the offline install fails with "No module named
-    # setuptools". Download them all as sdists into sources/pip/.
-    "$PIP" download --no-binary :all: --dest "$SRC_DIR/pip" \
-        "setuptools" "wheel" \
-        "flit_core==${FLIT_CORE_VERSION}" \
+    # meson/jinja2/markupsafe are pure-Python (markupsafe ships a matching
+    # cp312 wheel); download them as WHEELS, not sdists. Wheels install with no
+    # build backend at all, sidestepping the setuptools/flit_core version dance
+    # that broke building the sdists offline. pip resolves runtime deps (e.g.
+    # jinja2 -> markupsafe) into the same dir.
+    "$PIP" download --dest "$SRC_DIR/pip" \
         "markupsafe==${MARKUPSAFE_VERSION}" \
         "jinja2==${JINJA2_VERSION}" \
         "meson==${MESON_VERSION}" \
-        && ok "Python build-tool sdists in $SRC_DIR/pip" \
+        && ok "Python build-tool wheels in $SRC_DIR/pip" \
         || warn "pip download failed — systemd's meson/jinja2 must be provided another way"
 else
     warn "No host pip found — meson/jinja2/markupsafe won't be staged for the"

@@ -366,14 +366,8 @@ cd /sources
 
 say "meson + jinja2 (offline pip from /sources/pip)"
 if [ -d /sources/pip ]; then
-    # Install the build backends into the system first (Python 3.12 ensurepip
-    # omits setuptools), so building the sdists below finds them.
-    pip3 install --no-index --no-build-isolation --find-links /sources/pip \
-        setuptools wheel flit_core
-    # Now build+install the actual tools; --no-build-isolation reuses the
-    # setuptools/flit_core just installed.
-    pip3 install --no-index --no-build-isolation --find-links /sources/pip \
-        markupsafe jinja2 meson
+    # Wheels only — no build backend needed, so no setuptools/flit_core dance.
+    pip3 install --no-index --find-links /sources/pip meson jinja2 markupsafe
 else
     echo "!! /sources/pip missing — run 'make fetch' on a host with pip first" >&2
     exit 1
