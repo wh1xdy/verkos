@@ -48,13 +48,16 @@ make run ARCH=aarch64
   system bus, and systemd was built `-PAM`. Boot still reaches Multi-User and
   the login prompt. Fix in the full-userland pass (add shadow/PAM, wire dbus).
 
-## Next (per user direction — see memory verkos-roadmap-direction)
+## Phase 2 progress
 
-1. **Full userland**: re-run `make system` with `VERK_FULL_USERLAND=1` to add the
-   compiler + full GNU userland; also add shadow/PAM + login so `verkos login:`
-   accepts a login and logind works.
-2. **Networking**: systemd-networkd, DNS, DHCP, SSH.
-3. **Fun**: a neofetch-like tool with VerkOS ASCII artwork.
+- [x] **Full userland** (`VERK_FULL_USERLAND=1`): gcc, binutils, bison, flex,
+      sed, grep, gawk, tar, ... all built natively into the rootfs.
+- [x] **Working login**: shadow 4.16.0 gives /bin/login + passwd; root password
+      set (dev default `verkos`); serial-getty autologin drops boot straight to
+      a **`root@verkos:~#`** shell. Verified booting the rebuilt ext4 image.
+- [ ] Networking: systemd-networkd, DNS, DHCP, SSH.
+- [ ] Fun: neofetch-like tool with VerkOS ASCII artwork (do WITH the user).
+- [ ] logind/PAM (needs Linux-PAM + systemd -Dpam=enabled) — deferred.
 Then multi-arch (x86_64) and GRUB/real-hardware boot.
 - [ ] `make kernel` ARCH=aarch64
 - [ ] `make image` + `make run` → **first boot** 🎯
