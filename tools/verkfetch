@@ -118,7 +118,7 @@ logo_g() { cat <<'EOF'
 EOF
 }
 
-logo="${1:-${VERKFETCH_LOGO:-a}}"
+logo="${1:-${VERKFETCH_LOGO:-f}}"
 case "$logo" in
     a) art=$(logo_a) ;;
     b) art=$(logo_b) ;;
