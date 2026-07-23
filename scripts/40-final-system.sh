@@ -168,7 +168,11 @@ JOBS=$(nproc 2>/dev/null || echo 2); export MAKEFLAGS="-j$JOBS"
 # Per-package stamps so a re-run (after fixing a later package) skips the ones
 # already installed instead of rebuilding the whole chain. Wrap a block as:
 #   if need X; then ...build...; mark X; fi
-NST=/sources/.nst; mkdir -p "$NST"
+# Per-package build stamps. MUST live inside the rootfs (per-architecture), NOT
+# under /sources (which is shared across arches) — otherwise an x86_64 build
+# would skip packages already stamped by the aarch64 build and ship a rootfs
+# missing systemd et al.
+NST=/var/lib/vpk-build-stamps; mkdir -p "$NST"
 need(){ [ -f "$NST/$1" ] && { echo ":: $1 already built, skipping"; return 1; } || return 0; }
 mark(){ touch "$NST/$1"; }
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
