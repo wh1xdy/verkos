@@ -499,6 +499,30 @@ mark dhcpcd
 fi
 
 # 11. Extra userland tools ---------------------------------------------------
+# bison + flex — parser/lexer generators (needed by iproute2 and others). Also
+# built in the full-userland block, but they're build tools several packages
+# need, so build them here too (stamped) even without VERK_FULL_USERLAND.
+if need bison; then
+say "bison ${BISON_VERSION}"
+d=$(unpack bison-${BISON_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr
+make
+make install
+ln -sfv bison /usr/bin/yacc
+cd /sources
+mark bison
+fi
+if need flex; then
+say "flex ${FLEX_VERSION}"
+d=$(unpack flex-${FLEX_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --disable-static
+make
+make install
+ln -sfv flex /usr/bin/lex
+cd /sources
+mark flex
+fi
+
 # iproute2 — ip, ss
 if need iproute2; then
 say "iproute2 ${IPROUTE2_VERSION}"
