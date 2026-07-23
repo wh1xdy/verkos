@@ -15,10 +15,12 @@ build_ext4_image() {
     local img="$OUT_DIR/verkos-${ARCH}.ext4"
     # Size the image to the rootfs usage + 25% headroom (min 2 GB), so it also
     # has room to be used/written after boot.
+    # Generous free space: rootfs + VERK_IMAGE_HEADROOM_MB (default 4 GiB), so
+    # there's room to build/install packages with vpk on the running system.
     local kb size_mb
     kb=$(du -sk "$ROOTFS" | cut -f1)
-    size_mb=$(( kb / 1024 * 5 / 4 + 512 ))
-    [ "$size_mb" -lt 2048 ] && size_mb=2048
+    size_mb=$(( kb / 1024 + ${VERK_IMAGE_HEADROOM_MB:-4096} ))
+    [ "$size_mb" -lt 4096 ] && size_mb=4096
 
     rm -f "$img"
     log "creating ${size_mb} MiB ext4 image from $ROOTFS"
