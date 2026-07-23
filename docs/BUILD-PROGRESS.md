@@ -55,8 +55,16 @@ make run ARCH=aarch64
 - [x] **Working login**: shadow 4.16.0 gives /bin/login + passwd; root password
       set (dev default `verkos`); serial-getty autologin drops boot straight to
       a **`root@verkos:~#`** shell. Verified booting the rebuilt ext4 image.
-- [ ] Networking: systemd-networkd, DNS, DHCP, SSH.
-- [ ] Fun: neofetch-like tool with VerkOS ASCII artwork (do WITH the user).
+- [x] **Networking + SSH** — VerkOS goes online and is SSH-accessible:
+      - **dhcpcd** is the active DHCP/DNS client (chosen over systemd-networkd as
+        the first step toward replacing systemd bits); networkd is built but
+        left disabled as a swappable option.
+      - **OpenSSL 3.4.0 + OpenSSH 9.9p1**: sshd runs, root login via password
+        (verkos) AND an ed25519 key. Verified: SSH'd in over the QEMU hostfwd
+        (2222→22), `eth0: up`, DNS resolves (getent hosts one.one.one.one →
+        Cloudflare), outbound works.
+- [x] Fun: verkfetch (neofetch) with cyan→purple ASCII (user is refining the art).
+- [ ] iproute2 (`ip`/`ss`) — not built yet; networking works without it.
 - [ ] logind/PAM (needs Linux-PAM + systemd -Dpam=enabled) — deferred.
 Then multi-arch (x86_64) and GRUB/real-hardware boot.
 - [ ] `make kernel` ARCH=aarch64
