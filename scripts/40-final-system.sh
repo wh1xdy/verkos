@@ -387,6 +387,16 @@ meson setup build --prefix=/usr --buildtype=release \
     -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
 ninja -C build && ninja -C build install; cd /sources
 
+# 8.5 libxcrypt — provides libcrypt/crypt.h. Modern glibc (2.38+) builds without
+# the crypt add-on, and systemd needs the 'crypt' library. LFS uses libxcrypt.
+say "libxcrypt ${LIBXCRYPT_VERSION}"
+d=$(unpack libxcrypt-${LIBXCRYPT_VERSION}.tar.xz); cd "$d"
+./configure --prefix=/usr --enable-hashes=strong,glibc \
+    --enable-obsolete-api=no --disable-static --disable-failure-tokens
+make && make install
+ldconfig
+cd /sources
+
 # 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot)
 say "systemd ${SYSTEMD_VERSION}"
 d=$(unpack systemd-${SYSTEMD_VERSION}.tar.gz); cd "$d"
