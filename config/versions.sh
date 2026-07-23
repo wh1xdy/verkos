@@ -47,6 +47,7 @@ PATCH_VERSION="2.7.6";       PATCH_SHA256="ac610bda97abe0d9f6b7c963255a11dcb196c
 BZIP2_VERSION="1.0.8";       BZIP2_SHA256="ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269"
 GPERF_VERSION="3.1";         GPERF_SHA256="588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2"
 PKGCONF_VERSION="2.3.0";     PKGCONF_SHA256="3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
+PERL_VERSION="5.40.0";       PERL_SHA256="d5325300ad267624cb0b7d512cfdfcd74fa7fe00c455c5b51a6bd53e5e199ef9"
 
 # --- Init / system layer ---------------------------------------------------
 SYSTEMD_VERSION="256.7";     SYSTEMD_SHA256="896d76ff65c88f5fd9e42f90d152b0579049158a163431dd77cdc57748b1d7b0"
@@ -100,3 +101,4 @@ URL_LIBFFI="https://github.com/libffi/libffi/releases/download"
 URL_NINJA="https://github.com/ninja-build/ninja/archive/refs/tags"
 URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
 URL_LIBXCRYPT="https://github.com/besser82/libxcrypt/releases/download"
+URL_PERL="https://www.cpan.org/src/5.0"

@@ -129,6 +129,7 @@ source_url() {
         ninja-*)      echo "$URL_NINJA/v${NINJA_VERSION}.tar.gz" ;;
         pkgconf-*)    echo "$URL_PKGCONF/$pkg" ;;
         libxcrypt-*)  echo "$URL_LIBXCRYPT/v${LIBXCRYPT_VERSION}/$pkg" ;;
+        perl-*)       echo "$URL_PERL/$pkg" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;
     esac
 }
