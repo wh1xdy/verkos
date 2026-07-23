@@ -539,8 +539,8 @@ if need iputils; then
 say "iputils ${IPUTILS_VERSION}"
 d=$(unpack iputils-${IPUTILS_VERSION}.tar.gz); cd "$d"
 meson setup build --prefix=/usr --buildtype=release \
-    -Dskip-tests=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false \
-    -DUSE_CAP=false -DUSE_IDN=false
+    -DSKIP_TESTS=true -DBUILD_MANS=false -DBUILD_HTML_MANS=false \
+    -DUSE_CAP=false -DUSE_IDN=false -DNO_SETCAP_OR_SUID=true
 ninja -C build
 ninja -C build install
 cd /sources
