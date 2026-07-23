@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Boot VerkOS/aarch64 in QEMU via direct kernel boot on the 'virt' board.
+# Boot VerkOS/aarch64 in QEMU: direct kernel boot with the rootfs on a virtio
+# disk (root=/dev/vda), systemd as PID 1, on the 'virt' board. Serial console.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../config/targets/aarch64.sh"
 OUT="${WORK:-$HERE/../work}/aarch64/out"
 
 KERNEL="$OUT/vmlinuz"        # arm64 'Image' installed as vmlinuz by stage 50
-INITRD="$OUT/initramfs-aarch64.cpio.gz"
+DISK="$OUT/verkos-aarch64.ext4"
 [ -f "$KERNEL" ] || { echo "no kernel at $KERNEL — run: make kernel ARCH=aarch64" >&2; exit 1; }
-[ -f "$INITRD" ] || { echo "no initramfs at $INITRD — run: make image ARCH=aarch64" >&2; exit 1; }
+[ -f "$DISK" ]   || { echo "no disk at $DISK — run: make image ARCH=aarch64" >&2; exit 1; }
 
-# 'virt' + cortex-a72 is a clean, well-supported dev target. No firmware needed
-# for direct kernel boot.
+# -nic none: the 'virt' board's default virtio-net wants a ROM file that headless
+# QEMU builds may lack, and networking isn't needed to boot. Add it back later.
 exec "$QEMU_BIN" \
-    -machine "$QEMU_MACHINE" -cpu "$QEMU_CPU" -m 1024 -smp 2 \
-    -kernel "$KERNEL" -initrd "$INITRD" \
-    -append "console=${QEMU_CONSOLE} rdinit=/init" \
-    $QEMU_EXTRA
+    -machine "$QEMU_MACHINE" -cpu "$QEMU_CPU" -m 2048 -smp 2 \
+    -kernel "$KERNEL" \
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} init=/usr/lib/systemd/systemd" \
+    -drive file="$DISK",format=raw,if=virtio \
+    -nic none $QEMU_EXTRA

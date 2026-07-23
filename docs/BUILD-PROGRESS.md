@@ -34,8 +34,28 @@ make run ARCH=aarch64
       zlib/xz/expat/libcap, kmod, gperf, libffi, Python 3.12, ninja,
       meson/jinja2/markupsafe (pip), perl 5.38.2, libxcrypt, dbus (meson),
       **systemd**, + /etc config (fstab, resolv.conf, machine-id, default target).
-- [~] `make kernel ARCH=aarch64` — building (arm64 defconfig).
-- [ ] `make image` + `make run` → **first boot** 🎯
+- [x] `make kernel ARCH=aarch64` — Linux 6.12.9 arm64 (vmlinuz, 44M).
+- [x] `make image ARCH=aarch64` — ext4 root disk image (stage 60 now builds a
+      disk image, not a multi-GB initramfs; the 4.5 GB rootfs made initramfs
+      impractical).
+- [x] 🎯🎉 **FIRST BOOT ACHIEVED** — `make run ARCH=aarch64` boots Linux 6.12.9,
+      mounts the ext4 root, runs **systemd 256.7 as PID 1**, reaches the
+      Multi-User target, and shows the `verkos login:` prompt. Booted in QEMU
+      (virt board, cortex-a72) inside the Colima container.
+
+### Known non-fatal issue at first boot
+- `systemd-logind` fails in a restart loop — it needs PAM + a running D-Bus
+  system bus, and systemd was built `-PAM`. Boot still reaches Multi-User and
+  the login prompt. Fix in the full-userland pass (add shadow/PAM, wire dbus).
+
+## Next (per user direction — see memory verkos-roadmap-direction)
+
+1. **Full userland**: re-run `make system` with `VERK_FULL_USERLAND=1` to add the
+   compiler + full GNU userland; also add shadow/PAM + login so `verkos login:`
+   accepts a login and logind works.
+2. **Networking**: systemd-networkd, DNS, DHCP, SSH.
+3. **Fun**: a neofetch-like tool with VerkOS ASCII artwork.
+Then multi-arch (x86_64) and GRUB/real-hardware boot.
 - [ ] `make kernel` ARCH=aarch64
 - [ ] `make image` + `make run` → **first boot** 🎯
 
