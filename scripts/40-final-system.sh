@@ -395,7 +395,8 @@ say "dbus ${DBUS_VERSION}"
 d=$(unpack dbus-${DBUS_VERSION}.tar.xz); cd "$d"
 meson setup build --prefix=/usr --buildtype=release \
     --sysconfdir=/etc --localstatedir=/var \
-    -Ddoxygen_docs=disabled -Dxml_docs=disabled -Dsystemd=disabled
+    -Ddoxygen_docs=disabled -Dxml_docs=disabled \
+    -Dsystemd=enabled -Dsystemd_system_unitdir=/usr/lib/systemd/system
 ninja -C build; ninja -C build install; cd /sources
 mark dbus
 fi
@@ -736,8 +737,15 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 AL
 
-# Enable the D-Bus system bus (systemd services expect it).
-systemctl enable dbus 2>/dev/null || true
+# Enable the D-Bus system bus (systemd-logind and others need it). Enable the
+# socket (socket-activation) + service via explicit symlinks — systemctl enable
+# is unreliable in the chroot. /run/dbus is created by dbus's tmpfiles at boot.
+mkdir -p /etc/systemd/system/sockets.target.wants
+if [ -f /usr/lib/systemd/system/dbus.socket ]; then
+    ln -sf /usr/lib/systemd/system/dbus.socket \
+           /etc/systemd/system/sockets.target.wants/dbus.socket
+    ln -sf /usr/lib/systemd/system/dbus.service /etc/systemd/system/dbus.service
+fi
 
 # --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
 # --- as a swappable option (first concrete step toward replacing systemd bits).
