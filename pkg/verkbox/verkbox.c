@@ -17,6 +17,13 @@
 #include <ctype.h>
 #include <pwd.h>
 #include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <utime.h>
 
 #define VERKBOX_VERSION "0.1"
 
@@ -269,12 +276,1943 @@ static int a_seq(int c, char **v) {
     return 0;
 }
 
+/* -------------------------------------------------- extended applets --- */
+/* ---- ls ---- */
+static int ls_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static char *ls_dup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+/* List a single directory, one entry per line, C-locale (strcmp) sorted.
+   Returns 0 on success, 2 on open/read failure. */
+static int ls_one_dir(const char *dirname, int show_all, int almost) {
+    DIR *dp = opendir(dirname);
+    if (!dp) {
+        fprintf(stderr, "ls: cannot open directory '%s': %s\n", dirname, strerror(errno));
+        return 2;
+    }
+    char **names = NULL;
+    size_t n = 0, cap = 0;
+    int rc = 0;
+    struct dirent *e;
+    errno = 0;
+    while ((e = readdir(dp)) != NULL) {
+        const char *nm = e->d_name;
+        int skip = 0;
+        if (nm[0] == '.') {
+            if (show_all)
+                skip = 0;                 /* -a: include everything, even . and .. */
+            else if (almost)
+                skip = (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')); /* -A: drop . and .. */
+            else
+                skip = 1;                 /* default: drop all dotfiles */
+        }
+        if (!skip) {
+            if (n == cap) {
+                size_t ncap = cap ? cap * 2 : 64;
+                char **t = realloc(names, ncap * sizeof *names);
+                if (!t) {
+                    fprintf(stderr, "ls: memory exhausted\n");
+                    for (size_t k = 0; k < n; k++) free(names[k]);
+                    free(names);
+                    closedir(dp);
+                    return 2;
+                }
+                names = t;
+                cap = ncap;
+            }
+            names[n] = ls_dup(nm);
+            if (!names[n]) {
+                fprintf(stderr, "ls: memory exhausted\n");
+                for (size_t k = 0; k < n; k++) free(names[k]);
+                free(names);
+                closedir(dp);
+                return 2;
+            }
+            n++;
+        }
+        errno = 0;
+    }
+    if (errno != 0) {
+        fprintf(stderr, "ls: reading directory '%s': %s\n", dirname, strerror(errno));
+        rc = 2;
+    }
+    closedir(dp);
+    if (n > 1)
+        qsort(names, n, sizeof *names, ls_cmp);
+    for (size_t i = 0; i < n; i++) {
+        printf("%s\n", names[i]);
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+static int a_ls(int argc, char **argv) {
+    int show_all = 0, almost = 0;      /* -a / -A (last one wins) */
+    int i, endopts = 0;
+    int status = 0;
+
+    /* Collect operands (non-option args). */
+    char **operands = malloc(sizeof(char *) * (argc > 0 ? (size_t)argc : 1));
+    if (!operands) {
+        fprintf(stderr, "ls: memory exhausted\n");
+        return 2;
+    }
+    int nop = 0;
+
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!endopts && arg[0] == '-' && arg[1] != '\0') {
+            if (arg[1] == '-' && arg[2] == '\0') { endopts = 1; continue; } /* "--" */
+            if (arg[1] == '-') {
+                if (strcmp(arg, "--all") == 0)        { show_all = 1; almost = 0; continue; }
+                if (strcmp(arg, "--almost-all") == 0) { almost = 1; show_all = 0; continue; }
+                fprintf(stderr,
+                    "ls: unrecognized option '%s'\nTry 'ls --help' for more information.\n", arg);
+                free(operands);
+                return 2;
+            }
+            for (char *p = arg + 1; *p; p++) {
+                switch (*p) {
+                    case 'a': show_all = 1; almost = 0; break;
+                    case 'A': almost = 1; show_all = 0; break;
+                    case '1': break;               /* one-per-line: already the default */
+                    default:
+                        fprintf(stderr,
+                            "ls: invalid option -- '%c'\nTry 'ls --help' for more information.\n", *p);
+                        free(operands);
+                        return 2;
+                }
+            }
+            continue;
+        }
+        operands[nop++] = arg;
+    }
+
+    /* Split operands into non-directories (printed first) and directories. */
+    char **files = malloc(sizeof(char *) * (nop > 0 ? (size_t)nop : 1));
+    char **dirs  = malloc(sizeof(char *) * (nop > 0 ? (size_t)nop : 1));
+    if (!files || !dirs) {
+        fprintf(stderr, "ls: memory exhausted\n");
+        free(operands); free(files); free(dirs);
+        return 2;
+    }
+    int nf = 0, nd = 0;
+
+    if (nop == 0) {
+        dirs[nd++] = ".";                 /* no operands: list current directory */
+    } else {
+        for (i = 0; i < nop; i++) {
+            struct stat st;
+            if (lstat(operands[i], &st) != 0) {
+                fprintf(stderr, "ls: cannot access '%s': %s\n", operands[i], strerror(errno));
+                status = 2;
+                continue;
+            }
+            int isdir;
+            if (S_ISLNK(st.st_mode)) {
+                /* Command-line symlink to a directory is dereferenced and listed. */
+                struct stat st2;
+                isdir = (stat(operands[i], &st2) == 0 && S_ISDIR(st2.st_mode));
+            } else {
+                isdir = S_ISDIR(st.st_mode);
+            }
+            if (isdir)
+                dirs[nd++] = operands[i];
+            else
+                files[nf++] = operands[i];
+        }
+    }
+
+    if (nf > 1) qsort(files, nf, sizeof(char *), ls_cmp);
+    if (nd > 1) qsort(dirs,  nd, sizeof(char *), ls_cmp);
+
+    /* Header printed for each directory unless there is a single operand that
+       resolves to exactly one directory with no listed files (GNU counts the
+       total number of operands, so a failed operand still forces headers). */
+    int print_header = !(nf == 0 && nop <= 1 && nd == 1);
+
+    for (i = 0; i < nf; i++)
+        printf("%s\n", files[i]);
+    if (nf > 0 && nd > 0)
+        putchar('\n');                    /* blank line between files and first dir */
+
+    int first = 1;
+    for (i = 0; i < nd; i++) {
+        if (print_header) {
+            if (!first) putchar('\n');     /* blank line before each subsequent header */
+            printf("%s:\n", dirs[i]);
+            first = 0;
+        }
+        if (ls_one_dir(dirs[i], show_all, almost) != 0)
+            status = 2;
+    }
+
+    free(operands);
+    free(files);
+    free(dirs);
+    return status;
+}
+
+/* ---- tail ---- */
+/* tail [-n N|-N|-n +K] [file...] — print the last N lines (default 10).
+ * -n +K prints from line K to end. With >1 file, GNU-style "==> name <=="
+ * headers separated by a blank line. Last-N mode keeps only min(N,#lines)
+ * lines in memory via a growing ring buffer. */
+static char *tail_readline(FILE *f, size_t *outlen) {
+    size_t cap = 128, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) { *outlen = 0; return NULL; }
+    int c;
+    while ((c = getc(f)) != EOF) {
+        if (len == cap) {
+            char *nb = realloc(buf, cap * 2);
+            if (!nb) { free(buf); *outlen = 0; return NULL; }
+            buf = nb; cap *= 2;
+        }
+        buf[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (len == 0) { free(buf); *outlen = 0; return NULL; }
+    *outlen = len;
+    return buf;
+}
+
+static int tail_parsecount(const char *s, long *count, int *from_start) {
+    const char *p = s;
+    if (*p == '+') { *from_start = 1; p++; }
+    else { *from_start = 0; if (*p == '-') p++; }
+    if (*p == '\0') return -1;
+    long v = 0;
+    for (; *p; p++) {
+        if (!isdigit((unsigned char)*p)) return -1;
+        if (v < 100000000000000000L)
+            v = v * 10 + (*p - '0');
+    }
+    *count = v;
+    return 0;
+}
+
+static int tail_stream(FILE *f, long n, int from_start) {
+    size_t len;
+    char *line;
+    if (from_start) {                       /* -n +K: print from line K */
+        long ln = 0;
+        while ((line = tail_readline(f, &len)) != NULL) {
+            ln++;
+            if (ln >= n) fwrite(line, 1, len, stdout);
+            free(line);
+        }
+        return 0;
+    }
+    if (n <= 0) return 0;                    /* -n 0: nothing */
+    char **lines = NULL;
+    size_t *lens = NULL;
+    long cap = 0, fill = 0, start = 0;
+    while ((line = tail_readline(f, &len)) != NULL) {
+        if (fill < n) {                     /* filling phase: array grows up to n */
+            if (fill == cap) {
+                long ncap = cap ? cap * 2 : 16;
+                if (ncap > n) ncap = n;
+                char **nl = realloc(lines, (size_t)ncap * sizeof(char *));
+                if (!nl) {
+                    for (long k = 0; k < fill; k++) free(lines[k]);
+                    free(lines); free(lens); free(line); return 1;
+                }
+                lines = nl;
+                size_t *nn = realloc(lens, (size_t)ncap * sizeof(size_t));
+                if (!nn) {
+                    for (long k = 0; k < fill; k++) free(lines[k]);
+                    free(lines); free(lens); free(line); return 1;
+                }
+                lens = nn;
+                cap = ncap;
+            }
+            lines[fill] = line;
+            lens[fill] = len;
+            fill++;
+        } else {                            /* full: overwrite oldest (ring) */
+            free(lines[start]);
+            lines[start] = line;
+            lens[start] = len;
+            start = (start + 1) % n;
+        }
+    }
+    for (long k = 0; k < fill; k++) {
+        long idx = (fill == n) ? (start + k) % n : k;
+        fwrite(lines[idx], 1, lens[idx], stdout);
+    }
+    for (long k = 0; k < fill; k++) free(lines[k]);
+    free(lines);
+    free(lens);
+    return 0;
+}
+
+static int a_tail(int argc, char **argv) {
+    long count = 10;
+    int from_start = 0;
+    int end_opts = 0;
+    char **files = malloc((size_t)(argc > 0 ? argc : 1) * sizeof(char *));
+    if (!files) { fprintf(stderr, "tail: memory exhausted\n"); return 1; }
+    int nfiles = 0;
+    for (int i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!end_opts && arg[0] == '-' && arg[1] != '\0') {
+            if (strcmp(arg, "--") == 0) { end_opts = 1; continue; }
+            if (arg[1] == 'n') {
+                const char *spec;
+                if (arg[2] != '\0') {
+                    spec = arg + 2;             /* -nN / -n+K */
+                } else {
+                    if (i + 1 >= argc) {
+                        fprintf(stderr, "tail: option requires an argument -- 'n'\n");
+                        free(files); return 1;
+                    }
+                    spec = argv[++i];           /* -n N */
+                }
+                if (tail_parsecount(spec, &count, &from_start) != 0) {
+                    fprintf(stderr, "tail: invalid number of lines: '%s'\n", spec);
+                    free(files); return 1;
+                }
+            } else if (isdigit((unsigned char)arg[1])) {
+                if (tail_parsecount(arg + 1, &count, &from_start) != 0) {  /* -N */
+                    fprintf(stderr, "tail: invalid number of lines: '%s'\n", arg + 1);
+                    free(files); return 1;
+                }
+            } else {
+                fprintf(stderr, "tail: invalid option -- '%c'\n", arg[1]);
+                free(files); return 1;
+            }
+        } else {
+            files[nfiles++] = arg;
+        }
+    }
+
+    int ret = 0;
+    int multi = nfiles > 1;
+    if (nfiles == 0) {
+        ret = tail_stream(stdin, count, from_start);
+    } else {
+        int printed_header = 0;
+        for (int fi = 0; fi < nfiles; fi++) {
+            const char *fn = files[fi];
+            FILE *f;
+            int is_stdin = 0;
+            if (strcmp(fn, "-") == 0) { f = stdin; is_stdin = 1; }
+            else {
+                f = fopen(fn, "r");
+                if (!f) {
+                    fprintf(stderr, "tail: cannot open '%s' for reading: %s\n",
+                            fn, strerror(errno));
+                    ret = 1;
+                    continue;
+                }
+            }
+            if (multi) {
+                printf("%s==> %s <==\n", printed_header ? "\n" : "",
+                       is_stdin ? "standard input" : fn);
+                printed_header = 1;
+            }
+            if (tail_stream(f, count, from_start) != 0) ret = 1;
+            if (!is_stdin) fclose(f);
+        }
+    }
+    free(files);
+    return ret;
+}
+
+/* ---- cut ---- */
+static int cut_selected(int pos, const int *los, const int *his, int nr)
+{
+    int k;
+    for (k = 0; k < nr; k++)
+        if (pos >= los[k] && pos <= his[k])
+            return 1;
+    return 0;
+}
+
+static int cut_optis(const char *opt, size_t olen, const char *name)
+{
+    return olen == strlen(name) && strncmp(opt, name, olen) == 0;
+}
+
+static int cut_parse_list(const char *name, const char *spec,
+                          int **plos, int **phis)
+{
+    const char *p;
+    int cap = 1, cnt = 0;
+    int *los, *his;
+
+    for (p = spec; *p; p++)
+        if (*p == ',')
+            cap++;
+    los = malloc(sizeof(int) * cap);
+    his = malloc(sizeof(int) * cap);
+    if (!los || !his) {
+        free(los);
+        free(his);
+        fprintf(stderr, "%s: memory exhausted\n", name);
+        return -1;
+    }
+
+    p = spec;
+    if (*p == '\0') {
+        fprintf(stderr, "%s: invalid byte, character or field list\n", name);
+        free(los);
+        free(his);
+        return -1;
+    }
+
+    while (*p) {
+        long lo = 0, hi = 0, L, H;
+        int haslo = 0, hashi = 0, dash = 0;
+
+        while (isdigit((unsigned char)*p)) {
+            lo = lo * 10 + (*p - '0');
+            if (lo > INT_MAX)
+                lo = INT_MAX;
+            haslo = 1;
+            p++;
+        }
+        if (*p == '-') {
+            dash = 1;
+            p++;
+            while (isdigit((unsigned char)*p)) {
+                hi = hi * 10 + (*p - '0');
+                if (hi > INT_MAX)
+                    hi = INT_MAX;
+                hashi = 1;
+                p++;
+            }
+        }
+
+        if (dash) {
+            if (!haslo && !hashi) {
+                fprintf(stderr, "%s: invalid range with no endpoint: -\n", name);
+                free(los);
+                free(his);
+                return -1;
+            }
+            L = haslo ? lo : 1;
+            H = hashi ? hi : INT_MAX;
+        } else {
+            if (!haslo) {
+                fprintf(stderr, "%s: invalid byte, character or field list\n", name);
+                free(los);
+                free(his);
+                return -1;
+            }
+            L = lo;
+            H = lo;
+        }
+
+        if (L == 0 || H == 0) {
+            fprintf(stderr, "%s: fields and positions are numbered from 1\n", name);
+            free(los);
+            free(his);
+            return -1;
+        }
+        if (L > H) {
+            fprintf(stderr, "%s: invalid decreasing range\n", name);
+            free(los);
+            free(his);
+            return -1;
+        }
+
+        los[cnt] = (int)L;
+        his[cnt] = (int)H;
+        cnt++;
+
+        if (*p == ',') {
+            p++;
+            continue;
+        } else if (*p == '\0') {
+            break;
+        } else {
+            fprintf(stderr, "%s: invalid byte, character or field list\n", name);
+            free(los);
+            free(his);
+            return -1;
+        }
+    }
+
+    *plos = los;
+    *phis = his;
+    return cnt;
+}
+
+static void cut_stream(FILE *f, int mode, char delim, int only_delim,
+                       const int *los, const int *his, int nr)
+{
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+
+    while ((n = getline(&line, &cap, f)) != -1) {
+        size_t len = (size_t)n;
+        if (len > 0 && line[len - 1] == '\n')
+            len--;
+
+        if (mode == 'f') {
+            size_t j;
+            int has = 0;
+            for (j = 0; j < len; j++)
+                if (line[j] == delim) {
+                    has = 1;
+                    break;
+                }
+            if (!has) {
+                if (!only_delim) {
+                    fwrite(line, 1, len, stdout);
+                    putchar('\n');
+                }
+            } else {
+                int fieldnum = 0, printed = 0;
+                size_t start = 0;
+                for (j = 0; j <= len; j++) {
+                    if (j == len || line[j] == delim) {
+                        fieldnum++;
+                        if (cut_selected(fieldnum, los, his, nr)) {
+                            if (printed)
+                                putchar(delim);
+                            fwrite(line + start, 1, j - start, stdout);
+                            printed = 1;
+                        }
+                        start = j + 1;
+                    }
+                }
+                putchar('\n');
+            }
+        } else {
+            size_t j;
+            for (j = 0; j < len; j++)
+                if (cut_selected((int)(j + 1), los, his, nr))
+                    putchar(line[j]);
+            putchar('\n');
+        }
+    }
+    free(line);
+}
+
+static int a_cut(int argc, char **argv)
+{
+    int mode = 0;
+    char delim = '\t';
+    int delim_set = 0, only_delim = 0;
+    char *list_str = NULL;
+    int i, rc = 0, nfiles = 0, end_opts = 0, nr;
+    int *los = NULL, *his = NULL;
+    char **files;
+
+    files = malloc(sizeof(char *) * (argc + 1));
+    if (!files) {
+        fprintf(stderr, "%s: memory exhausted\n", argv[0]);
+        return 1;
+    }
+
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!end_opts && arg[0] == '-' && arg[1] != '\0') {
+            if (arg[1] == '-') {
+                char *opt = arg + 2, *val = NULL, *eq;
+                size_t olen;
+                if (*opt == '\0') {
+                    end_opts = 1;
+                    continue;
+                }
+                eq = strchr(opt, '=');
+                if (eq) {
+                    olen = (size_t)(eq - opt);
+                    val = eq + 1;
+                } else {
+                    olen = strlen(opt);
+                }
+
+                if (cut_optis(opt, olen, "fields") ||
+                    cut_optis(opt, olen, "characters") ||
+                    cut_optis(opt, olen, "bytes") ||
+                    cut_optis(opt, olen, "delimiter")) {
+                    char *v;
+                    if (val) {
+                        v = val;
+                    } else {
+                        i++;
+                        if (i >= argc) {
+                            fprintf(stderr,
+                                    "%s: option '--%.*s' requires an argument\n",
+                                    argv[0], (int)olen, opt);
+                            free(files);
+                            return 1;
+                        }
+                        v = argv[i];
+                    }
+                    if (cut_optis(opt, olen, "delimiter")) {
+                        if (strlen(v) != 1) {
+                            fprintf(stderr,
+                                    "%s: the delimiter must be a single character\n",
+                                    argv[0]);
+                            free(files);
+                            return 1;
+                        }
+                        delim = v[0];
+                        delim_set = 1;
+                    } else {
+                        int m = cut_optis(opt, olen, "fields") ? 'f' : 'c';
+                        if (mode && mode != m) {
+                            fprintf(stderr,
+                                    "%s: only one type of list may be specified\n",
+                                    argv[0]);
+                            free(files);
+                            return 1;
+                        }
+                        mode = m;
+                        list_str = v;
+                    }
+                } else if (cut_optis(opt, olen, "only-delimited")) {
+                    only_delim = 1;
+                } else {
+                    fprintf(stderr, "%s: unrecognized option '--%.*s'\n",
+                            argv[0], (int)olen, opt);
+                    free(files);
+                    return 1;
+                }
+                continue;
+            } else {
+                char *p = arg + 1;
+                while (*p) {
+                    char c = *p;
+                    if (c == 's') {
+                        only_delim = 1;
+                        p++;
+                        continue;
+                    }
+                    if (c == 'n') {
+                        p++;
+                        continue;
+                    }
+                    if (c == 'c' || c == 'f' || c == 'b' || c == 'd') {
+                        char *val;
+                        if (*(p + 1)) {
+                            val = p + 1;
+                        } else {
+                            i++;
+                            if (i >= argc) {
+                                fprintf(stderr,
+                                        "%s: option requires an argument -- '%c'\n",
+                                        argv[0], c);
+                                free(files);
+                                return 1;
+                            }
+                            val = argv[i];
+                        }
+                        if (c == 'd') {
+                            if (strlen(val) != 1) {
+                                fprintf(stderr,
+                                        "%s: the delimiter must be a single character\n",
+                                        argv[0]);
+                                free(files);
+                                return 1;
+                            }
+                            delim = val[0];
+                            delim_set = 1;
+                        } else {
+                            int m = (c == 'f') ? 'f' : 'c';
+                            if (mode && mode != m) {
+                                fprintf(stderr,
+                                        "%s: only one type of list may be specified\n",
+                                        argv[0]);
+                                free(files);
+                                return 1;
+                            }
+                            mode = m;
+                            list_str = val;
+                        }
+                        break;
+                    }
+                    fprintf(stderr, "%s: invalid option -- '%c'\n", argv[0], c);
+                    free(files);
+                    return 1;
+                }
+            }
+        } else {
+            files[nfiles++] = arg;
+        }
+    }
+
+    if (mode == 0) {
+        fprintf(stderr,
+                "%s: you must specify a list of bytes, characters, or fields\n",
+                argv[0]);
+        free(files);
+        return 1;
+    }
+    if (delim_set && mode != 'f') {
+        fprintf(stderr,
+                "%s: an input delimiter may be specified only when operating on fields\n",
+                argv[0]);
+        free(files);
+        return 1;
+    }
+    if (only_delim && mode != 'f') {
+        fprintf(stderr,
+                "%s: suppressing non-delimited lines makes sense\n"
+                "\tonly when operating on fields\n",
+                argv[0]);
+        free(files);
+        return 1;
+    }
+
+    nr = cut_parse_list(argv[0], list_str, &los, &his);
+    if (nr < 0) {
+        free(files);
+        return 1;
+    }
+
+    if (nfiles == 0) {
+        cut_stream(stdin, mode, delim, only_delim, los, his, nr);
+    } else {
+        int k;
+        for (k = 0; k < nfiles; k++) {
+            FILE *f;
+            if (strcmp(files[k], "-") == 0) {
+                f = stdin;
+            } else {
+                f = fopen(files[k], "r");
+                if (!f) {
+                    fprintf(stderr, "%s: %s: %s\n", argv[0], files[k],
+                            strerror(errno));
+                    rc = 1;
+                    continue;
+                }
+            }
+            cut_stream(f, mode, delim, only_delim, los, his, nr);
+            if (f != stdin)
+                fclose(f);
+        }
+    }
+
+    free(los);
+    free(his);
+    free(files);
+    return rc;
+}
+
+/* ---- rev ---- */
+static int rev_stream(const char *name, FILE *f)
+{
+    char *buf = NULL;
+    size_t cap = 0, len = 0;
+    int c, rc = 0;
+
+    for (;;) {
+        c = getc(f);
+        if (c == '\n' || c == EOF) {
+            /* reverse buf[0..len) in place, byte-wise */
+            if (len) {
+                size_t i = 0, j = len - 1;
+                while (i < j) {
+                    char t = buf[i];
+                    buf[i] = buf[j];
+                    buf[j] = t;
+                    i++;
+                    j--;
+                }
+                fwrite(buf, 1, len, stdout);
+            }
+            if (c == '\n')
+                putchar('\n');
+            len = 0;
+            if (c == EOF)
+                break;
+        } else {
+            if (len + 1 > cap) {
+                size_t ncap = cap ? cap * 2 : 128;
+                char *nb = realloc(buf, ncap);
+                if (!nb) {
+                    free(buf);
+                    fprintf(stderr, "rev: memory exhausted\n");
+                    return 1;
+                }
+                buf = nb;
+                cap = ncap;
+            }
+            buf[len++] = (char)c;
+        }
+    }
+
+    free(buf);
+    if (ferror(f)) {
+        fprintf(stderr, "rev: %s: %s\n", name, strerror(errno));
+        rc = 1;
+    }
+    return rc;
+}
+
+static int a_rev(int argc, char **argv)
+{
+    int rc = 0, i;
+
+    if (argc < 2)
+        return rev_stream("stdin", stdin);
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-") == 0) {
+            if (rev_stream("stdin", stdin))
+                rc = 1;
+            continue;
+        }
+        FILE *f = fopen(argv[i], "r");
+        if (!f) {
+            fprintf(stderr, "rev: cannot open %s: %s\n", argv[i], strerror(errno));
+            rc = 1;
+            continue;
+        }
+        if (rev_stream(argv[i], f))
+            rc = 1;
+        fclose(f);
+    }
+    return rc;
+}
+
+/* ---- uniq ---- */
+static void uniq_write(FILE *out, int cflag, int print_uniq, int print_dup,
+                       const char *line, size_t len, unsigned long gcount)
+{
+    if (gcount == 1UL ? print_uniq : print_dup) {
+        if (cflag)
+            fprintf(out, "%7lu ", gcount);
+        fwrite(line, 1, len, out);
+    }
+}
+
+static int a_uniq(int argc, char **argv)
+{
+    int cflag = 0, dflag = 0, uflag = 0;
+    int i = 1;
+
+    for (; i < argc; i++) {
+        char *a = argv[i];
+        if (a[0] != '-' || a[1] == '\0')
+            break;                     /* non-option or "-" (stdin) */
+        if (strcmp(a, "--") == 0) { i++; break; }
+        if (a[1] == '-') {             /* long option */
+            if (strcmp(a, "--count") == 0) cflag = 1;
+            else if (strcmp(a, "--repeated") == 0) dflag = 1;
+            else if (strcmp(a, "--unique") == 0) uflag = 1;
+            else {
+                fprintf(stderr, "uniq: unrecognized option '%s'\n", a);
+                return 1;
+            }
+            continue;
+        }
+        for (char *p = a + 1; *p; p++) {
+            switch (*p) {
+            case 'c': cflag = 1; break;
+            case 'd': dflag = 1; break;
+            case 'u': uflag = 1; break;
+            default:
+                fprintf(stderr, "uniq: invalid option -- '%c'\n", *p);
+                return 1;
+            }
+        }
+    }
+
+    const char *infile = NULL, *outfile = NULL;
+    if (i < argc) infile = argv[i++];
+    if (i < argc) outfile = argv[i++];
+    if (i < argc) {
+        fprintf(stderr, "uniq: extra operand '%s'\n", argv[i]);
+        return 1;
+    }
+
+    FILE *in = stdin, *out = stdout;
+    if (infile && strcmp(infile, "-") != 0) {
+        in = fopen(infile, "r");
+        if (!in) {
+            fprintf(stderr, "uniq: %s: %s\n", infile, strerror(errno));
+            return 1;
+        }
+    }
+    if (outfile && strcmp(outfile, "-") != 0) {
+        out = fopen(outfile, "w");
+        if (!out) {
+            fprintf(stderr, "uniq: %s: %s\n", outfile, strerror(errno));
+            if (in != stdin) fclose(in);
+            return 1;
+        }
+    }
+
+    int print_uniq = !dflag;   /* print groups that occur exactly once */
+    int print_dup  = !uflag;   /* print groups that occur more than once */
+
+    char *prev = NULL, *cur = NULL;
+    size_t prevcap = 0, curcap = 0;
+    ssize_t prevlen, curlen;
+    unsigned long count = 0;   /* additional matches after the first in a group */
+    int rc = 0;
+
+    prevlen = getline(&prev, &prevcap, in);
+    if (prevlen >= 0) {
+        while ((curlen = getline(&cur, &curcap, in)) >= 0) {
+            if (curlen == prevlen && memcmp(cur, prev, (size_t)curlen) == 0) {
+                count++;
+            } else {
+                uniq_write(out, cflag, print_uniq, print_dup,
+                           prev, (size_t)prevlen, count + 1);
+                char *tb = prev; prev = cur; cur = tb;
+                size_t tc = prevcap; prevcap = curcap; curcap = tc;
+                prevlen = curlen;
+                count = 0;
+            }
+        }
+        uniq_write(out, cflag, print_uniq, print_dup,
+                   prev, (size_t)prevlen, count + 1);
+    }
+
+    free(prev);
+    free(cur);
+
+    if (ferror(in)) {
+        fprintf(stderr, "uniq: %s: %s\n", infile ? infile : "-", strerror(errno));
+        rc = 1;
+    }
+    if (fflush(out) != 0 || ferror(out)) {
+        fprintf(stderr, "uniq: write error: %s\n", strerror(errno));
+        rc = 1;
+    }
+
+    if (in != stdin) fclose(in);
+    if (out != stdout) fclose(out);
+    return rc;
+}
+
+/* ---- mkdir ---- */
+static int mkdir_one(char *buf, mode_t mode, int parents)
+{
+    if (parents) {
+        char *p = buf;
+        if (*p == '/') p++;
+        for (; *p; p++) {
+            if (*p == '/') {
+                *p = '\0';
+                if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                    fprintf(stderr, "mkdir: cannot create directory '%s': %s\n",
+                            buf, strerror(errno));
+                    return 1;
+                }
+                *p = '/';
+                while (p[1] == '/') p++;
+            }
+        }
+    }
+    if (mkdir(buf, mode) != 0) {
+        if (parents && errno == EEXIST) {
+            struct stat st;
+            if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode))
+                return 0;
+        }
+        fprintf(stderr, "mkdir: cannot create directory '%s': %s\n",
+                buf, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int a_mkdir(int argc, char **argv)
+{
+    int parents = 0;
+    int i = 1;
+
+    for (; i < argc; i++) {
+        char *arg = argv[i];
+        if (arg[0] != '-' || arg[1] == '\0')
+            break;
+        if (strcmp(arg, "--") == 0) { i++; break; }
+        if (strcmp(arg, "--parents") == 0) { parents = 1; continue; }
+        for (char *c = arg + 1; *c; c++) {
+            if (*c == 'p') {
+                parents = 1;
+            } else {
+                fprintf(stderr, "mkdir: invalid option -- '%c'\n", *c);
+                fprintf(stderr, "Try 'mkdir --help' for more information.\n");
+                return 1;
+            }
+        }
+    }
+
+    if (i >= argc) {
+        fprintf(stderr, "mkdir: missing operand\n");
+        return 1;
+    }
+
+    int rc = 0;
+    for (; i < argc; i++) {
+        if (mkdir_one(argv[i], 0777, parents) != 0)
+            rc = 1;
+    }
+    return rc;
+}
+
+/* ---- rmdir ---- */
+static void rmdir_strip(char *p) {
+    size_t len = strlen(p);
+    while (len > 1 && p[len - 1] == '/') { p[len - 1] = '\0'; len--; }
+}
+
+static int rmdir_parents_fn(char *dir, int verbose, int ignore_ne) {
+    char *slash;
+    rmdir_strip(dir);
+    while ((slash = strrchr(dir, '/')) != NULL) {
+        while (slash > dir && *slash == '/') --slash;
+        slash[1] = '\0';
+        if (verbose)
+            printf("rmdir: removing directory, '%s'\n", dir);
+        if (rmdir(dir) != 0) {
+            if (ignore_ne && (errno == ENOTEMPTY || errno == EEXIST))
+                return 1;
+            fprintf(stderr, "rmdir: failed to remove '%s': %s\n", dir, strerror(errno));
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int a_rmdir(int argc, char **argv) {
+    int parents = 0, verbose = 0, ignore_ne = 0;
+    int i, ok = 1, endopts = 0, nops = 0;
+    char **ops = malloc(sizeof(char *) * (argc > 0 ? (size_t)argc : 1));
+
+    if (!ops) {
+        fprintf(stderr, "rmdir: memory exhausted\n");
+        return 1;
+    }
+
+    for (i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopts && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-') {
+                char *o = a + 2;
+                if (*o == '\0') { endopts = 1; continue; }
+                if (!strcmp(o, "parents")) parents = 1;
+                else if (!strcmp(o, "verbose")) verbose = 1;
+                else if (!strcmp(o, "ignore-fail-on-non-empty")) ignore_ne = 1;
+                else {
+                    fprintf(stderr, "rmdir: unrecognized option '%s'\n", a);
+                    fprintf(stderr, "Try 'rmdir --help' for more information.\n");
+                    free(ops);
+                    return 1;
+                }
+            } else {
+                char *c;
+                for (c = a + 1; *c; c++) {
+                    switch (*c) {
+                        case 'p': parents = 1; break;
+                        case 'v': verbose = 1; break;
+                        default:
+                            fprintf(stderr, "rmdir: invalid option -- '%c'\n", *c);
+                            fprintf(stderr, "Try 'rmdir --help' for more information.\n");
+                            free(ops);
+                            return 1;
+                    }
+                }
+            }
+        } else {
+            ops[nops++] = a;
+        }
+    }
+
+    if (nops == 0) {
+        fprintf(stderr, "rmdir: missing operand\n");
+        fprintf(stderr, "Try 'rmdir --help' for more information.\n");
+        free(ops);
+        return 1;
+    }
+
+    for (i = 0; i < nops; i++) {
+        char *dir = ops[i];
+        if (verbose)
+            printf("rmdir: removing directory, '%s'\n", dir);
+        if (rmdir(dir) != 0) {
+            if (ignore_ne && (errno == ENOTEMPTY || errno == EEXIST))
+                continue;
+            fprintf(stderr, "rmdir: failed to remove '%s': %s\n", dir, strerror(errno));
+            ok = 0;
+        } else if (parents) {
+            if (!rmdir_parents_fn(dir, verbose, ignore_ne))
+                ok = 0;
+        }
+    }
+
+    free(ops);
+    return ok ? 0 : 1;
+}
+
+/* ---- rm ---- */
+/* Is the last path component "." or ".."? (trailing slashes ignored) */
+static int rm_is_dot(const char *p) {
+    size_t len = strlen(p);
+    while (len > 1 && p[len-1] == '/') len--;       /* ignore trailing '/' */
+    size_t start = len;
+    while (start > 0 && p[start-1] != '/') start--; /* start of last comp */
+    size_t clen = len - start;
+    if (clen == 1 && p[start] == '.') return 1;
+    if (clen == 2 && p[start] == '.' && p[start+1] == '.') return 1;
+    return 0;
+}
+
+/* Remove one path. recursive/force control -r/-f. Returns 0 ok, 1 on error. */
+static int rm_do(const char *path, int recursive, int force) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (force && errno == ENOENT) return 0;
+        fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        if (!recursive) {
+            fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(EISDIR));
+            return 1;
+        }
+        DIR *d = opendir(path);
+        if (!d) {
+            if (force && errno == ENOENT) return 0;
+            fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
+            return 1;
+        }
+        int fail = 0;
+        size_t plen = strlen(path);
+        int slash = (plen > 0 && path[plen-1] == '/');
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            size_t need = plen + 1 + strlen(e->d_name) + 1;
+            char *child = malloc(need);
+            if (!child) { fprintf(stderr, "rm: memory exhausted\n"); fail = 1; continue; }
+            if (slash) snprintf(child, need, "%s%s", path, e->d_name);
+            else       snprintf(child, need, "%s/%s", path, e->d_name);
+            if (rm_do(child, recursive, force) != 0) fail = 1;
+            free(child);
+        }
+        closedir(d);
+        if (fail) return 1;                          /* dir not emptied */
+        if (rmdir(path) != 0) {
+            if (force && errno == ENOENT) return 0;
+            fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
+            return 1;
+        }
+        return 0;
+    }
+    if (unlink(path) != 0) {
+        if (force && errno == ENOENT) return 0;
+        fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int a_rm(int argc, char **argv) {
+    int recursive = 0, force = 0, endopt = 0, status = 0, nfiles = 0;
+    char **files = malloc((size_t)argc * sizeof *files);
+    if (!files) { fprintf(stderr, "rm: memory exhausted\n"); return 1; }
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopt && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-' && a[2] == '\0') { endopt = 1; continue; }  /* -- */
+            if (a[1] == '-') {                                          /* long */
+                if (!strcmp(a, "--recursive")) { recursive = 1; continue; }
+                if (!strcmp(a, "--force"))     { force = 1; continue; }
+                fprintf(stderr, "rm: unrecognized option '%s'\n", a);
+                fprintf(stderr, "Try 'rm --help' for more information.\n");
+                free(files); return 1;
+            }
+            for (char *p = a + 1; *p; p++) {                            /* short */
+                if (*p == 'r' || *p == 'R') recursive = 1;
+                else if (*p == 'f') force = 1;
+                else {
+                    fprintf(stderr, "rm: invalid option -- '%c'\n", *p);
+                    fprintf(stderr, "Try 'rm --help' for more information.\n");
+                    free(files); return 1;
+                }
+            }
+            continue;
+        }
+        files[nfiles++] = a;
+    }
+    if (nfiles == 0) {
+        if (!force) {
+            fprintf(stderr, "rm: missing operand\n");
+            fprintf(stderr, "Try 'rm --help' for more information.\n");
+            status = 1;
+        }
+        free(files);
+        return status;
+    }
+    for (int i = 0; i < nfiles; i++) {
+        if (rm_is_dot(files[i])) {
+            fprintf(stderr, "rm: refusing to remove '.' or '..' directory: skipping '%s'\n", files[i]);
+            status = 1;
+            continue;
+        }
+        if (rm_do(files[i], recursive, force) != 0) status = 1;
+    }
+    free(files);
+    return status;
+}
+
+/* ---- cp ---- */
+static char *cp_join(const char *dir, const char *name) {
+    size_t dl = strlen(dir), nl = strlen(name);
+    int slash = (dl > 0 && dir[dl - 1] == '/') ? 0 : 1;
+    char *p = malloc(dl + slash + nl + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dl);
+    if (slash) p[dl] = '/';
+    memcpy(p + dl + slash, name, nl);
+    p[dl + slash + nl] = '\0';
+    return p;
+}
+
+static char *cp_basedup(const char *path) {
+    size_t len = strlen(path), i, start = 0, blen;
+    char *b;
+    while (len > 1 && path[len - 1] == '/') len--;
+    for (i = 0; i < len; i++)
+        if (path[i] == '/') start = i + 1;
+    blen = len - start;
+    b = malloc(blen + 1);
+    if (!b) return NULL;
+    memcpy(b, path + start, blen);
+    b[blen] = '\0';
+    return b;
+}
+
+static int cp_copy_reg(const char *src, const char *dst, mode_t mode) {
+    int in, out, rc = 0;
+    char buf[65536];
+    ssize_t n;
+    in = open(src, O_RDONLY);
+    if (in < 0) {
+        fprintf(stderr, "cp: cannot open '%s' for reading: %s\n", src, strerror(errno));
+        return 1;
+    }
+    out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
+    if (out < 0) {
+        fprintf(stderr, "cp: cannot create regular file '%s': %s\n", dst, strerror(errno));
+        close(in);
+        return 1;
+    }
+    while ((n = read(in, buf, sizeof buf)) > 0) {
+        ssize_t off = 0, w;
+        while (off < n) {
+            w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                fprintf(stderr, "cp: error writing '%s': %s\n", dst, strerror(errno));
+                rc = 1;
+                goto done;
+            }
+            off += w;
+        }
+    }
+    if (n < 0) {
+        fprintf(stderr, "cp: error reading '%s': %s\n", src, strerror(errno));
+        rc = 1;
+    }
+done:
+    (void)fchmod(out, mode & 0777);
+    close(in);
+    close(out);
+    return rc;
+}
+
+static int cp_one(const char *src, const char *dst, int recursive);
+
+static int cp_dir(const char *src, const char *dst, mode_t mode, int recursive) {
+    struct stat dsst;
+    DIR *d;
+    struct dirent *de;
+    int rc = 0;
+    if (stat(dst, &dsst) == 0) {
+        if (!S_ISDIR(dsst.st_mode)) {
+            fprintf(stderr, "cp: cannot overwrite non-directory '%s' with directory '%s'\n", dst, src);
+            return 1;
+        }
+    } else if (mkdir(dst, mode & 0777) != 0) {
+        fprintf(stderr, "cp: cannot create directory '%s': %s\n", dst, strerror(errno));
+        return 1;
+    }
+    d = opendir(src);
+    if (!d) {
+        fprintf(stderr, "cp: cannot open directory '%s': %s\n", src, strerror(errno));
+        return 1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        char *sp, *dp;
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        sp = cp_join(src, de->d_name);
+        dp = cp_join(dst, de->d_name);
+        if (!sp || !dp) {
+            fprintf(stderr, "cp: memory exhausted\n");
+            free(sp); free(dp);
+            rc = 1;
+            continue;
+        }
+        if (cp_one(sp, dp, recursive) != 0) rc = 1;
+        free(sp);
+        free(dp);
+    }
+    closedir(d);
+    return rc;
+}
+
+static int cp_one(const char *src, const char *dst, int recursive) {
+    struct stat st, dstat;
+    if (stat(src, &st) != 0) {
+        fprintf(stderr, "cp: cannot stat '%s': %s\n", src, strerror(errno));
+        return 1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        if (!recursive) {
+            fprintf(stderr, "cp: -r not specified; omitting directory '%s'\n", src);
+            return 1;
+        }
+        return cp_dir(src, dst, st.st_mode, recursive);
+    }
+    if (stat(dst, &dstat) == 0 && dstat.st_dev == st.st_dev && dstat.st_ino == st.st_ino) {
+        fprintf(stderr, "cp: '%s' and '%s' are the same file\n", src, dst);
+        return 1;
+    }
+    return cp_copy_reg(src, dst, st.st_mode);
+}
+
+static int a_cp(int argc, char **argv) {
+    int recursive = 0, endopts = 0, nops = 0, nsrc, i, rc = 0, dest_is_dir;
+    char **ops, *dest;
+    struct stat dst_st;
+
+    ops = malloc(sizeof(char *) * (argc > 0 ? argc : 1));
+    if (!ops) {
+        fprintf(stderr, "cp: memory exhausted\n");
+        return 1;
+    }
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!endopts && arg[0] == '-' && arg[1] != '\0') {
+            int j;
+            if (strcmp(arg, "--") == 0) { endopts = 1; continue; }
+            if (strcmp(arg, "--recursive") == 0) { recursive = 1; continue; }
+            for (j = 1; arg[j]; j++) {
+                if (arg[j] == 'r' || arg[j] == 'R') {
+                    recursive = 1;
+                } else {
+                    fprintf(stderr, "cp: invalid option -- '%c'\n", arg[j]);
+                    free(ops);
+                    return 1;
+                }
+            }
+        } else {
+            ops[nops++] = arg;
+        }
+    }
+    if (nops == 0) {
+        fprintf(stderr, "cp: missing file operand\n");
+        free(ops);
+        return 1;
+    }
+    if (nops == 1) {
+        fprintf(stderr, "cp: missing destination file operand after '%s'\n", ops[0]);
+        free(ops);
+        return 1;
+    }
+    dest = ops[nops - 1];
+    nsrc = nops - 1;
+    dest_is_dir = (stat(dest, &dst_st) == 0 && S_ISDIR(dst_st.st_mode));
+
+    if (dest_is_dir) {
+        for (i = 0; i < nsrc; i++) {
+            char *b = cp_basedup(ops[i]);
+            char *target;
+            if (!b) { fprintf(stderr, "cp: memory exhausted\n"); rc = 1; continue; }
+            target = cp_join(dest, b);
+            free(b);
+            if (!target) { fprintf(stderr, "cp: memory exhausted\n"); rc = 1; continue; }
+            if (cp_one(ops[i], target, recursive) != 0) rc = 1;
+            free(target);
+        }
+    } else {
+        if (nsrc > 1) {
+            fprintf(stderr, "cp: target '%s' is not a directory\n", dest);
+            free(ops);
+            return 1;
+        }
+        if (cp_one(ops[0], dest, recursive) != 0) rc = 1;
+    }
+    free(ops);
+    return rc;
+}
+
+/* ---- mv ---- */
+static char *mv_join(const char *dir, const char *name) {
+    size_t dl = strlen(dir);
+    int slash = (dl > 0 && dir[dl - 1] == '/') ? 0 : 1;
+    char *p = malloc(dl + (size_t)slash + strlen(name) + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dl);
+    if (slash) p[dl] = '/';
+    strcpy(p + dl + slash, name);
+    return p;
+}
+
+static char *mv_base(const char *path) {
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    size_t start = 0, i;
+    for (i = 0; i < len; i++)
+        if (path[i] == '/') start = i + 1;
+    size_t blen = len - start;
+    char *b = malloc(blen + 1);
+    if (!b) return NULL;
+    memcpy(b, path + start, blen);
+    b[blen] = '\0';
+    return b;
+}
+
+static void mv_preserve_times(const char *path, struct stat *st) {
+    struct utimbuf t;
+    t.actime = st->st_atime;
+    t.modtime = st->st_mtime;
+    if (utime(path, &t)) {}
+}
+
+static int mv_copy_reg(const char *src, const char *dst, struct stat *st) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) {
+        fprintf(stderr, "mv: cannot open '%s' for reading: %s\n", src, strerror(errno));
+        return 1;
+    }
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st->st_mode & 07777);
+    if (out < 0) {
+        fprintf(stderr, "mv: cannot create regular file '%s': %s\n", dst, strerror(errno));
+        close(in);
+        return 1;
+    }
+    char buf[65536];
+    ssize_t n;
+    int rc = 0;
+    while ((n = read(in, buf, sizeof buf)) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                fprintf(stderr, "mv: error writing '%s': %s\n", dst, strerror(errno));
+                rc = 1;
+                break;
+            }
+            off += w;
+        }
+        if (rc) break;
+    }
+    if (n < 0) {
+        fprintf(stderr, "mv: error reading '%s': %s\n", src, strerror(errno));
+        rc = 1;
+    }
+    if (fchown(out, st->st_uid, st->st_gid)) {}
+    if (fchmod(out, st->st_mode & 07777)) {}
+    if (close(out) != 0) {
+        fprintf(stderr, "mv: error closing '%s': %s\n", dst, strerror(errno));
+        rc = 1;
+    }
+    close(in);
+    if (rc == 0) mv_preserve_times(dst, st);
+    return rc;
+}
+
+static int mv_copy_tree(const char *src, const char *dst) {
+    struct stat st;
+    if (lstat(src, &st) != 0) {
+        fprintf(stderr, "mv: cannot stat '%s': %s\n", src, strerror(errno));
+        return 1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        mode_t dmode = (st.st_mode & 07777) | S_IRWXU;
+        if (mkdir(dst, dmode) != 0 && errno != EEXIST) {
+            fprintf(stderr, "mv: cannot create directory '%s': %s\n", dst, strerror(errno));
+            return 1;
+        }
+        DIR *d = opendir(src);
+        if (!d) {
+            fprintf(stderr, "mv: cannot access '%s': %s\n", src, strerror(errno));
+            return 1;
+        }
+        int rc = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            char *sp = mv_join(src, e->d_name);
+            char *dp = mv_join(dst, e->d_name);
+            if (!sp || !dp) { free(sp); free(dp); rc = 1; continue; }
+            if (mv_copy_tree(sp, dp) != 0) rc = 1;
+            free(sp);
+            free(dp);
+        }
+        closedir(d);
+        if (chown(dst, st.st_uid, st.st_gid)) {}
+        if (chmod(dst, st.st_mode & 07777)) {}
+        mv_preserve_times(dst, &st);
+        return rc;
+    } else if (S_ISLNK(st.st_mode)) {
+        char buf[4096];
+        ssize_t n = readlink(src, buf, sizeof(buf) - 1);
+        if (n < 0) {
+            fprintf(stderr, "mv: cannot read symbolic link '%s': %s\n", src, strerror(errno));
+            return 1;
+        }
+        buf[n] = '\0';
+        if (unlink(dst) != 0 && errno != ENOENT) {
+            fprintf(stderr, "mv: cannot remove '%s': %s\n", dst, strerror(errno));
+            return 1;
+        }
+        if (symlink(buf, dst) != 0) {
+            fprintf(stderr, "mv: cannot create symbolic link '%s': %s\n", dst, strerror(errno));
+            return 1;
+        }
+        if (lchown(dst, st.st_uid, st.st_gid)) {}
+        return 0;
+    } else if (S_ISREG(st.st_mode)) {
+        return mv_copy_reg(src, dst, &st);
+    } else {
+        if (unlink(dst) != 0 && errno != ENOENT) {
+            fprintf(stderr, "mv: cannot remove '%s': %s\n", dst, strerror(errno));
+            return 1;
+        }
+        if (mknod(dst, st.st_mode, st.st_rdev) != 0) {
+            fprintf(stderr, "mv: cannot create special file '%s': %s\n", dst, strerror(errno));
+            return 1;
+        }
+        if (chown(dst, st.st_uid, st.st_gid)) {}
+        if (chmod(dst, st.st_mode & 07777)) {}
+        mv_preserve_times(dst, &st);
+        return 0;
+    }
+}
+
+static int mv_rm_tree(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        fprintf(stderr, "mv: cannot remove '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d) {
+            fprintf(stderr, "mv: cannot access '%s': %s\n", path, strerror(errno));
+            return 1;
+        }
+        int rc = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            char *p = mv_join(path, e->d_name);
+            if (!p) { rc = 1; continue; }
+            if (mv_rm_tree(p) != 0) rc = 1;
+            free(p);
+        }
+        closedir(d);
+        if (rmdir(path) != 0) {
+            fprintf(stderr, "mv: cannot remove '%s': %s\n", path, strerror(errno));
+            rc = 1;
+        }
+        return rc;
+    }
+    if (unlink(path) != 0) {
+        fprintf(stderr, "mv: cannot remove '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int mv_one(const char *src, const char *dst,
+                  int interactive, int noclobber, int verbose) {
+    struct stat ss, ds;
+    if (lstat(src, &ss) != 0) {
+        fprintf(stderr, "mv: cannot stat '%s': %s\n", src, strerror(errno));
+        return 1;
+    }
+    int have_ds = (lstat(dst, &ds) == 0);
+    if (have_ds) {
+        if (noclobber) return 0;
+        if (ss.st_dev == ds.st_dev && ss.st_ino == ds.st_ino) {
+            fprintf(stderr, "mv: '%s' and '%s' are the same file\n", src, dst);
+            return 1;
+        }
+        if (interactive) {
+            int c, first;
+            fprintf(stderr, "mv: overwrite '%s'? ", dst);
+            c = getchar();
+            first = c;
+            while (c != '\n' && c != EOF) c = getchar();
+            if (first != 'y' && first != 'Y') return 0;
+        }
+    }
+    if (rename(src, dst) == 0) {
+        if (verbose) printf("renamed '%s' -> '%s'\n", src, dst);
+        return 0;
+    }
+    if (errno == EXDEV) {
+        if (mv_copy_tree(src, dst) != 0) return 1;
+        if (mv_rm_tree(src) != 0) return 1;
+        if (verbose) printf("renamed '%s' -> '%s'\n", src, dst);
+        return 0;
+    }
+    fprintf(stderr, "mv: cannot move '%s' to '%s': %s\n", src, dst, strerror(errno));
+    return 1;
+}
+
+static int mv_into_dir(const char *dir, char **srcs, int n,
+                       int interactive, int noclobber, int verbose) {
+    int rc = 0, i;
+    for (i = 0; i < n; i++) {
+        char *base = mv_base(srcs[i]);
+        char *dst = base ? mv_join(dir, base) : NULL;
+        if (!base || !dst) {
+            fprintf(stderr, "mv: memory exhausted\n");
+            free(base);
+            free(dst);
+            rc = 1;
+            continue;
+        }
+        if (mv_one(srcs[i], dst, interactive, noclobber, verbose) != 0) rc = 1;
+        free(base);
+        free(dst);
+    }
+    return rc;
+}
+
+static int a_mv(int argc, char **argv) {
+    int interactive = 0, noclobber = 0, verbose = 0, no_target_dir = 0;
+    char *target_dir = NULL;
+    char **ops = malloc(sizeof(char *) * (size_t)(argc > 0 ? argc : 1));
+    int nops = 0, end_opts = 0, rc = 0, i;
+    if (!ops) {
+        fprintf(stderr, "mv: memory exhausted\n");
+        return 1;
+    }
+    for (i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!end_opts && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-' && a[2] == '\0') { end_opts = 1; continue; }
+            if (a[1] == '-') {
+                if (!strcmp(a, "--force")) { interactive = 0; noclobber = 0; }
+                else if (!strcmp(a, "--interactive")) { interactive = 1; noclobber = 0; }
+                else if (!strcmp(a, "--no-clobber")) { noclobber = 1; interactive = 0; }
+                else if (!strcmp(a, "--verbose")) verbose = 1;
+                else if (!strcmp(a, "--no-target-directory")) no_target_dir = 1;
+                else if (!strncmp(a, "--target-directory=", 19)) target_dir = a + 19;
+                else if (!strcmp(a, "--target-directory")) {
+                    if (i + 1 < argc) target_dir = argv[++i];
+                    else {
+                        fprintf(stderr, "mv: option '--target-directory' requires an argument\n");
+                        rc = 1;
+                        goto done;
+                    }
+                } else {
+                    fprintf(stderr, "mv: unrecognized option '%s'\n", a);
+                    rc = 1;
+                    goto done;
+                }
+            } else {
+                int j = 1;
+                while (a[j]) {
+                    char c = a[j];
+                    if (c == 'f') { interactive = 0; noclobber = 0; }
+                    else if (c == 'i') { interactive = 1; noclobber = 0; }
+                    else if (c == 'n') { noclobber = 1; interactive = 0; }
+                    else if (c == 'v') verbose = 1;
+                    else if (c == 'T') no_target_dir = 1;
+                    else if (c == 't') {
+                        if (a[j + 1]) target_dir = &a[j + 1];
+                        else if (i + 1 < argc) target_dir = argv[++i];
+                        else {
+                            fprintf(stderr, "mv: option requires an argument -- 't'\n");
+                            rc = 1;
+                            goto done;
+                        }
+                        break;
+                    } else {
+                        fprintf(stderr, "mv: invalid option -- '%c'\n", c);
+                        rc = 1;
+                        goto done;
+                    }
+                    j++;
+                }
+            }
+        } else {
+            ops[nops++] = a;
+        }
+    }
+
+    if (target_dir) {
+        if (nops == 0) {
+            fprintf(stderr, "mv: missing file operand\n");
+            rc = 1;
+            goto done;
+        }
+        rc = mv_into_dir(target_dir, ops, nops, interactive, noclobber, verbose);
+    } else {
+        if (nops == 0) {
+            fprintf(stderr, "mv: missing file operand\n");
+            rc = 1;
+            goto done;
+        }
+        if (nops == 1) {
+            fprintf(stderr, "mv: missing destination file operand after '%s'\n", ops[0]);
+            rc = 1;
+            goto done;
+        }
+        char *dest = ops[nops - 1];
+        if (no_target_dir) {
+            if (nops > 2) {
+                fprintf(stderr, "mv: extra operand '%s'\n", ops[2]);
+                rc = 1;
+                goto done;
+            }
+            rc = mv_one(ops[0], dest, interactive, noclobber, verbose);
+        } else {
+            struct stat dst_st;
+            int dest_is_dir = (stat(dest, &dst_st) == 0 && S_ISDIR(dst_st.st_mode));
+            if (dest_is_dir) {
+                rc = mv_into_dir(dest, ops, nops - 1, interactive, noclobber, verbose);
+            } else {
+                if (nops > 2) {
+                    fprintf(stderr, "mv: target '%s' is not a directory\n", dest);
+                    rc = 1;
+                    goto done;
+                }
+                rc = mv_one(ops[0], dest, interactive, noclobber, verbose);
+            }
+        }
+    }
+done:
+    free(ops);
+    return rc;
+}
+
+/* ---- ln ---- */
+/* ---- basename of TARGET (malloc'd), stripping trailing slashes ---- */
+static char *ln_base(const char *p) {
+    size_t len = strlen(p);
+    while (len > 1 && p[len-1] == '/') len--;
+    size_t s = len;
+    while (s > 0 && p[s-1] != '/') s--;
+    char *out = malloc(len - s + 1);
+    if (out) { memcpy(out, p + s, len - s); out[len - s] = '\0'; }
+    return out;
+}
+
+/* ---- join DIR "/" BASE into a malloc'd path, avoiding a double slash ---- */
+static char *ln_join(const char *dir, const char *base) {
+    size_t dl = strlen(dir);
+    int slash = (dl > 0 && dir[dl-1] == '/') ? 0 : 1;
+    char *out = malloc(dl + slash + strlen(base) + 1);
+    if (!out) return NULL;
+    memcpy(out, dir, dl);
+    if (slash) out[dl] = '/';
+    strcpy(out + dl + slash, base);
+    return out;
+}
+
+/* ---- create one link src -> dest; force removes an existing dest first ---- */
+static int ln_make(const char *src, const char *dest, int sym, int force) {
+    int r = sym ? symlink(src, dest) : link(src, dest);
+    if (r != 0 && force && errno == EEXIST) {
+        struct stat a, b;
+        if (stat(src, &a) == 0 && lstat(dest, &b) == 0 &&
+            a.st_dev == b.st_dev && a.st_ino == b.st_ino) {
+            fprintf(stderr, "ln: '%s' and '%s' are the same file\n", src, dest);
+            return 1;
+        }
+        if (unlink(dest) == 0)
+            r = sym ? symlink(src, dest) : link(src, dest);
+    }
+    if (r != 0) {
+        if (sym)
+            fprintf(stderr, "ln: failed to create symbolic link '%s': %s\n",
+                    dest, strerror(errno));
+        else
+            fprintf(stderr, "ln: failed to create hard link '%s' => '%s': %s\n",
+                    dest, src, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+/* ln [-sf] TARGET LINKNAME  |  ln [-sf] TARGET... DIR */
+static int a_ln(int argc, char **argv) {
+    int sym = 0, force = 0, i = 1;
+    for (; i < argc; i++) {
+        char *a = argv[i];
+        if (a[0] != '-' || a[1] == '\0') break;          /* operand or "-" */
+        if (a[1] == '-') {                                /* "--" or long opt */
+            if (a[2] == '\0') { i++; break; }
+            if (!strcmp(a, "--symbolic")) sym = 1;
+            else if (!strcmp(a, "--force")) force = 1;
+            else { fprintf(stderr, "ln: unrecognized option '%s'\n", a); return 1; }
+            continue;
+        }
+        for (int j = 1; a[j]; j++) {
+            if (a[j] == 's') sym = 1;
+            else if (a[j] == 'f') force = 1;
+            else { fprintf(stderr, "ln: invalid option -- '%c'\n", a[j]); return 1; }
+        }
+    }
+
+    int n = argc - i;
+    char **op = argv + i;
+    if (n == 0) {
+        fprintf(stderr, "ln: missing file operand\n");
+        return 1;
+    }
+
+    if (n == 1) {                                         /* ln TARGET */
+        char *base = ln_base(op[0]);
+        if (!base) { fprintf(stderr, "ln: memory exhausted\n"); return 1; }
+        int rc = ln_make(op[0], base, sym, force);
+        free(base);
+        return rc;
+    }
+
+    /* n >= 2: is the last operand a directory? */
+    struct stat st;
+    int lastdir = (stat(op[n-1], &st) == 0 && S_ISDIR(st.st_mode));
+
+    if (!lastdir) {
+        if (n > 2) {
+            fprintf(stderr, "ln: target '%s' is not a directory\n", op[n-1]);
+            return 1;
+        }
+        return ln_make(op[0], op[1], sym, force);         /* ln TARGET LINKNAME */
+    }
+
+    /* ln TARGET... DIR */
+    const char *dir = op[n-1];
+    int rc = 0;
+    for (int k = 0; k < n - 1; k++) {
+        char *base = ln_base(op[k]);
+        char *dest = base ? ln_join(dir, base) : NULL;
+        if (!dest) { fprintf(stderr, "ln: memory exhausted\n"); free(base); rc = 1; continue; }
+        rc |= ln_make(op[k], dest, sym, force);
+        free(base);
+        free(dest);
+    }
+    return rc;
+}
+
+/* ---- touch ---- */
+static int a_touch(int argc, char **argv)
+{
+    int no_create = 0, a_flag = 0, m_flag = 0;
+    int i, status = 0, end_opts = 0, nfiles = 0;
+    struct timespec ts[2];
+
+    /* Pass 1: collect options (getopt-style: options may follow operands). */
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (end_opts)
+            continue;
+        if (strcmp(arg, "--") == 0) { end_opts = 1; continue; }
+        if (arg[0] == '-' && arg[1] != '\0') {
+            char *p = arg + 1;
+            while (*p) {
+                if (*p == 'c')      no_create = 1;
+                else if (*p == 'a') a_flag = 1;
+                else if (*p == 'm') m_flag = 1;
+                else if (*p == 't' || *p == 'd' || *p == 'r') {
+                    /* option takes an argument (ignored); consume it */
+                    if (p[1] == '\0')
+                        i++;
+                    break;
+                }
+                /* other options are ignored */
+                p++;
+            }
+        }
+    }
+
+    if (!a_flag && !m_flag) { a_flag = 1; m_flag = 1; }
+    ts[0].tv_sec = 0; ts[0].tv_nsec = a_flag ? UTIME_NOW : UTIME_OMIT;
+    ts[1].tv_sec = 0; ts[1].tv_nsec = m_flag ? UTIME_NOW : UTIME_OMIT;
+
+    /* Pass 2: process file operands. */
+    end_opts = 0;
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+
+        if (!end_opts) {
+            if (strcmp(arg, "--") == 0) { end_opts = 1; continue; }
+            if (arg[0] == '-' && arg[1] != '\0') {
+                char *p = arg + 1;
+                while (*p) {
+                    if (*p == 't' || *p == 'd' || *p == 'r') {
+                        if (p[1] == '\0')
+                            i++;
+                        break;
+                    }
+                    p++;
+                }
+                continue;
+            }
+        }
+
+        nfiles++;
+
+        if (utimensat(AT_FDCWD, arg, ts, 0) == 0)
+            continue;
+
+        if (errno == ENOENT) {
+            if (no_create)
+                continue;               /* -c: succeed silently, do not create */
+            int fd = open(arg, O_WRONLY | O_CREAT | O_NONBLOCK, 0666);
+            if (fd < 0) {
+                fprintf(stderr, "%s: cannot touch '%s': %s\n",
+                        argv[0], arg, strerror(errno));
+                status = 1;
+                continue;
+            }
+            close(fd);
+            if (utimensat(AT_FDCWD, arg, ts, 0) != 0) {
+                fprintf(stderr, "%s: setting times of '%s': %s\n",
+                        argv[0], arg, strerror(errno));
+                status = 1;
+            }
+        } else {
+            fprintf(stderr, "%s: cannot touch '%s': %s\n",
+                    argv[0], arg, strerror(errno));
+            status = 1;
+        }
+    }
+
+    if (nfiles == 0) {
+        fprintf(stderr, "%s: missing file operand\n", argv[0]);
+        return 1;
+    }
+
+    return status;
+}
+
 /* ------------------------------------------------------------ dispatch ---- */
 struct applet { const char *name; int (*fn)(int, char **); };
 static const struct applet applets[] = {
     {"true",a_true},{"false",a_false},{"echo",a_echo},{"cat",a_cat},{"pwd",a_pwd},
     {"whoami",a_whoami},{"nproc",a_nproc},{"yes",a_yes},{"basename",a_basename},
-    {"dirname",a_dirname},{"head",a_head},{"wc",a_wc},{"seq",a_seq},{NULL,NULL}
+    {"dirname",a_dirname},{"head",a_head},{"wc",a_wc},{"seq",a_seq},
+    {"ls",a_ls},{"tail",a_tail},{"cut",a_cut},{"rev",a_rev},{"uniq",a_uniq},{"mkdir",a_mkdir},{"rmdir",a_rmdir},{"rm",a_rm},{"cp",a_cp},{"mv",a_mv},{"ln",a_ln},{"touch",a_touch},{NULL,NULL}
 };
 
 static int list_applets(void) {
