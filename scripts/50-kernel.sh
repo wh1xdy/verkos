@@ -35,6 +35,13 @@ build_kernel() {
                      --enable TIMERFD --enable EPOLL --enable NET \
                      --enable SYSFS --enable PROC_FS --enable FHANDLE \
                      --enable AUTOFS_FS --enable TMPFS_POSIX_ACL
+    # Graphics: virtio-gpu KMS + fbdev emulation so /dev/fb0 exists (VerkOS' first
+    # GUI draws straight to it). Built-in, not modules, so it's up at boot. Also
+    # virtio-input + evdev for keyboard/mouse into a future compositor. This is
+    # what the arm64 defconfig was missing (DRM was a module, no virtio-gpu/input).
+    ./scripts/config --enable DRM --enable DRM_VIRTIO_GPU --enable DRM_FBDEV_EMULATION \
+                     --enable FB --enable FB_CORE --enable FRAMEBUFFER_CONSOLE \
+                     --enable VIRTIO_INPUT --enable INPUT_EVDEV
     make olddefconfig
 
     make -j"$JOBS"

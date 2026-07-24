@@ -164,6 +164,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vhex/vhex.c" "$ROOTFS/sources/vhex.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vtree/vtree.c" "$ROOTFS/sources/vtree.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vpager/vpager.c" "$ROOTFS/sources/vpager.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vgzip/vgzip.c" "$ROOTFS/sources/vgzip.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vzip/vzip.c" "$ROOTFS/sources/vzip.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vtar/vtar.c" "$ROOTFS/sources/vtar.c" 2>/dev/null || true
@@ -801,6 +802,11 @@ say "vpager (VerkOS pager — our own less/more/pg)"
 gcc -O2 -o /usr/bin/vpager /sources/vpager.c
 cd /sources; mark vpager
 fi
+if need vfb; then
+say "vfb (VerkOS framebuffer splash — first GUI)"
+gcc -O2 -o /usr/bin/vfb /sources/vfb.c
+cd /sources; mark vfb
+fi
 if need vgzip; then
 say "vgzip (VerkOS gzip/gunzip/zcat — own DEFLATE)"
 gcc -O2 -o /usr/bin/vgzip /sources/vgzip.c
@@ -1144,7 +1150,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vdate 0.1; reg vstat 0.1
     reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
     reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1; reg vbzip2 0.1
-    reg vpager 0.1
+    reg vpager 0.1; reg vfb 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
