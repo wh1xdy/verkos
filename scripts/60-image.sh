@@ -17,15 +17,20 @@ build_ext4_image() {
     # has room to be used/written after boot.
     # Generous free space: rootfs + VERK_IMAGE_HEADROOM_MB (default 4 GiB), so
     # there's room to build/install packages with vpk on the running system.
+    # The rootfs has root-owned 0700 dirs (/root, /var/lib/sshd, ...); reading them
+    # (du) and preserving ownership (mkfs -d) needs root. When the build runs as a
+    # normal user (e.g. on a build server) use sudo; when already root (container)
+    # sudo isn't needed.
+    local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
     local kb size_mb
-    kb=$(du -sk "$ROOTFS" | cut -f1)
+    kb=$($SUDO du -sk "$ROOTFS" | cut -f1)
     size_mb=$(( kb / 1024 + ${VERK_IMAGE_HEADROOM_MB:-4096} ))
     [ "$size_mb" -lt 4096 ] && size_mb=4096
 
-    rm -f "$img"
+    $SUDO rm -f "$img"
     log "creating ${size_mb} MiB ext4 image from $ROOTFS"
     # -d populates the fs from a directory; run as root so ownership is preserved.
-    mkfs.ext4 -q -F -L VERKROOT -m 1 -d "$ROOTFS" "$img" "${size_mb}M"
+    $SUDO mkfs.ext4 -q -F -L VERKROOT -m 1 -d "$ROOTFS" "$img" "${size_mb}M"
     ok "root image → $img ($(du -h "$img" | cut -f1))"
 }
 
