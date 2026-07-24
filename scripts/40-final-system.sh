@@ -610,16 +610,9 @@ cd /sources
 mark curl
 fi
 
-# procps-ng — ps, top, free
-if need procps; then
-say "procps-ng ${PROCPS_VERSION}"
-d=$(unpack procps-ng-${PROCPS_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --disable-static --disable-kill
-make
-make install
-cd /sources
-mark procps
-fi
+# procps-ng — removed: our own vmon (ps/top/free/vmstat/uptime) and vsys
+# (pgrep/pkill/pidof/…) take over every name it provided, so building it is
+# dead weight. The name takeovers live near the end of this script.
 
 # less — pager
 if need less; then
@@ -1117,8 +1110,7 @@ reg dbus "$DBUS_VERSION";          reg systemd "$SYSTEMD_VERSION"
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
 reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
-reg procps-ng "$PROCPS_VERSION";   reg less "$LESS_VERSION"
-reg nano "$NANO_VERSION"
+reg less "$LESS_VERSION";          reg nano "$NANO_VERSION"
 
 # verkbox applets take over from GNU coreutils for these tool names. Done last, so
 # the build above used GNU's tools while the shipped image runs VerkOS' own.

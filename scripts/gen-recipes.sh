@@ -73,11 +73,6 @@ emit curl "curl-${CURL_VERSION}.tar.xz" CURL_SHA256 "openssl zlib" \
     make
     make DESTDIR="$DESTDIR" install'
 
-emit procps-ng "procps-ng-${PROCPS_VERSION}.tar.xz" PROCPS_SHA256 "ncurses" \
-'    ./configure --prefix=/usr --disable-static --disable-kill
-    make
-    make DESTDIR="$DESTDIR" install'
-
 emit iproute2 "iproute2-${IPROUTE2_VERSION}.tar.xz" IPROUTE2_SHA256 "" \
 '    ./configure
     make
