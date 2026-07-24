@@ -790,6 +790,16 @@ for u in systemd-oom:996 systemd-network:995 systemd-resolve:994; do
     grep -q "^$name:" /etc/group || echo "$name:x:$uid:" >> /etc/group
 done
 
+# systemd-vconsole-setup runs when /dev/tty0 exists and calls loadkeys/setfont from
+# the kbd package, which our minimal base doesn't ship yet — so it failed and left
+# systemd 'degraded'. Gate it on loadkeys being present: without kbd the unit is
+# cleanly SKIPPED (not failed); installing kbd later re-enables it automatically.
+mkdir -p /usr/lib/systemd/system/systemd-vconsole-setup.service.d
+cat > /usr/lib/systemd/system/systemd-vconsole-setup.service.d/10-verkos.conf <<'VC'
+[Unit]
+ConditionPathExists=/usr/bin/loadkeys
+VC
+
 # --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
 # --- as a swappable option (first concrete step toward replacing systemd bits).
 mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/network
