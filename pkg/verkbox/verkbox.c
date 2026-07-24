@@ -3689,10 +3689,20 @@ static int grep_wholeline(grep_pat *pats, int np, const char *line, size_t len, 
     return 0;
 }
 
+/* emit one line for -A/-B/-C context: sep is ':' for a match, '-' for context */
+static void grep_emit(const char *disp, int show_fn, int nflag, long ln,
+                      const char *text, char sep)
+{
+    if (show_fn) { fputs(disp, stdout); fputc(sep, stdout); }
+    if (nflag) printf("%ld%c", ln, sep);
+    fputs(text, stdout); fputc('\n', stdout);
+}
+
 static int a_grep(int argc, char **argv)
 {
     int iflag = 0, vflag = 0, cflag = 0, nflag = 0, lflag = 0, oflag = 0;
     int wflag = 0, xflag = 0, qflag = 0, hflag = 0, Hflag = 0, Eflag = 0, Fflag = 0;
+    int aCtx = 0, bCtx = 0;   /* -A after, -B before, -C both */
     const char **raw = NULL; int nraw = 0, rawcap = 0;
     const char **files = NULL; int nfile = 0, filecap = 0;
     int nomore = 0;
@@ -3720,6 +3730,18 @@ static int a_grep(int argc, char **argv)
                 else if (LMATCH("with-filename")) Hflag = 1;
                 else if (LMATCH("extended-regexp")) Eflag = 1;
                 else if (LMATCH("fixed-strings")) Fflag = 1;
+                else if (LMATCH("after-context")) {
+                    if (!val) { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    aCtx = atoi(val); if (aCtx < 0) aCtx = 0;
+                }
+                else if (LMATCH("before-context")) {
+                    if (!val) { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    bCtx = atoi(val); if (bCtx < 0) bCtx = 0;
+                }
+                else if (LMATCH("context")) {
+                    if (!val) { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    aCtx = bCtx = atoi(val); if (aCtx < 0) { aCtx = 0; bCtx = 0; }
+                }
                 else if (LMATCH("regexp")) {
                     if (!val) { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
                     if (nraw >= rawcap) { rawcap = rawcap ? rawcap * 2 : 8; raw = realloc(raw, rawcap * sizeof(*raw)); }
@@ -3747,6 +3769,14 @@ static int a_grep(int argc, char **argv)
                 case 'H': Hflag = 1; break;
                 case 'E': Eflag = 1; break;
                 case 'F': Fflag = 1; break;
+                case 'A': case 'B': case 'C': {
+                    char wc = *p; const char *val;
+                    if (p[1]) val = p + 1;
+                    else { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    int nctx = atoi(val); if (nctx < 0) nctx = 0;
+                    if (wc == 'A') aCtx = nctx; else if (wc == 'B') bCtx = nctx; else aCtx = bCtx = nctx;
+                    stop = 1; break;
+                }
                 case 'e': {
                     const char *val;
                     if (p[1]) val = p + 1;
@@ -3796,6 +3826,7 @@ static int a_grep(int argc, char **argv)
     }
 
     int show_fn = hflag ? 0 : (Hflag ? 1 : ((nfile > 1) ? 1 : 0));
+    int ctx_mode = (aCtx || bCtx) && !cflag && !lflag && !oflag && !qflag;
 
     int any_match = 0, had_error = 0;
     int ninputs = nfile > 0 ? nfile : 1;
@@ -3829,6 +3860,9 @@ static int a_grep(int argc, char **argv)
 
         long lineno = 0;
         long count = 0;
+        char **bbuf = NULL; long *bln = NULL; int bcount = 0;   /* -B ring buffer */
+        if (ctx_mode && bCtx > 0) { bbuf = calloc(bCtx, sizeof *bbuf); bln = calloc(bCtx, sizeof *bln); }
+        int after = 0; long last_out = -1; int emitted = 0;
         ssize_t nread;
         while ((nread = getline(&buf, &bufcap, in)) != -1) {
             lineno++;
@@ -3853,7 +3887,18 @@ static int a_grep(int argc, char **argv)
                     fputs(disp, stdout); fputc('\n', stdout);
                     break; /* stop this file */
                 }
-                if (cflag) { count++; }
+                if (ctx_mode) {
+                    long first_ln = bcount > 0 ? bln[0] : lineno;
+                    if (emitted && last_out >= 0 && first_ln > last_out + 1) puts("--");
+                    for (int b = 0; b < bcount; b++) {
+                        grep_emit(disp, show_fn, nflag, bln[b], bbuf[b], '-');
+                        last_out = bln[b]; free(bbuf[b]);
+                    }
+                    bcount = 0;
+                    grep_emit(disp, show_fn, nflag, lineno, buf, ':');
+                    last_out = lineno; after = aCtx; emitted = 1;
+                }
+                else if (cflag) { count++; }
                 else if (oflag) {
                     if (!vflag) {
                         if (xflag) {
@@ -3879,8 +3924,21 @@ static int a_grep(int argc, char **argv)
                     fputc('\n', stdout);
                 }
             }
+            else if (ctx_mode) {                     /* non-matching line: after- or before-context */
+                if (after > 0) { grep_emit(disp, show_fn, nflag, lineno, buf, '-'); last_out = lineno; after--; }
+                else if (bCtx > 0) {
+                    if (bcount == bCtx) {
+                        free(bbuf[0]);
+                        memmove(bbuf, bbuf + 1, (bCtx - 1) * sizeof *bbuf);
+                        memmove(bln, bln + 1, (bCtx - 1) * sizeof *bln);
+                        bcount--;
+                    }
+                    bbuf[bcount] = strdup(buf); bln[bcount] = lineno; bcount++;
+                }
+            }
             buf[clen] = saved;
         }
+        if (ctx_mode) { for (int b = 0; b < bcount; b++) free(bbuf[b]); free(bbuf); free(bln); }
 
         if (!lflag && cflag && !qflag) {
             if (show_fn) { fputs(disp, stdout); fputc(':', stdout); }
@@ -4966,6 +5024,27 @@ static int a_sleep(int argc, char **argv) {
 }
 
 
+/* ---- which ---- */
+static int a_which(int argc, char **argv)
+{
+    const char *path = getenv("PATH"); if (!path) path = "/usr/bin:/bin";
+    int allflag = 0, ret = 0, start = 1;
+    if (argc > 1 && strcmp(argv[1], "-a") == 0) { allflag = 1; start = 2; }
+    for (int i = start; i < argc; i++) {
+        int found = 0;
+        char *pcopy = strdup(path);
+        if (!pcopy) return 2;
+        for (char *dir = strtok(pcopy, ":"); dir; dir = strtok(NULL, ":")) {
+            char full[4096];
+            snprintf(full, sizeof full, "%s/%s", dir, argv[i]);
+            if (access(full, X_OK) == 0) { printf("%s\n", full); found = 1; if (!allflag) break; }
+        }
+        free(pcopy);
+        if (!found) ret = 1;
+    }
+    return ret;
+}
+
 /* ------------------------------------------------------------ dispatch ---- */
 struct applet { const char *name; int (*fn)(int, char **); };
 static const struct applet applets[] = {
@@ -4974,7 +5053,7 @@ static const struct applet applets[] = {
     {"dirname",a_dirname},{"head",a_head},{"wc",a_wc},{"seq",a_seq},
     {"ls",a_ls},{"tail",a_tail},{"cut",a_cut},{"rev",a_rev},{"uniq",a_uniq},{"mkdir",a_mkdir},{"rmdir",a_rmdir},{"rm",a_rm},{"cp",a_cp},{"mv",a_mv},{"ln",a_ln},{"touch",a_touch},
     {"sort",a_sort},{"tr",a_tr},{"nl",a_nl},{"tac",a_tac},{"tee",a_tee},{"fold",a_fold},{"comm",a_comm},{"paste",a_paste},
-    {"grep",a_grep},{"chmod",a_chmod},{"du",a_du},{"printf",a_printf},{"uname",a_uname},{"realpath",a_realpath},{"env",a_env},{"sleep",a_sleep},{NULL,NULL}
+    {"grep",a_grep},{"chmod",a_chmod},{"du",a_du},{"printf",a_printf},{"uname",a_uname},{"realpath",a_realpath},{"env",a_env},{"sleep",a_sleep},{"which",a_which},{NULL,NULL}
 };
 
 static int list_applets(void) {

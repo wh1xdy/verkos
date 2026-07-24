@@ -150,6 +150,9 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vping/vping.c" "$ROOTFS/sources/vping.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vtrace/vtrace.c" "$ROOTFS/sources/vtrace.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vss/vss.c" "$ROOTFS/sources/vss.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vnetcat/vnetcat.c" "$ROOTFS/sources/vnetcat.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vmon/vmon.c" "$ROOTFS/sources/vmon.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vget/vget.c" "$ROOTFS/sources/vget.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -710,6 +713,27 @@ cd /sources
 mark vss
 fi
 
+# 12j/k/l. vnetcat (nc), vmon (procps: free/uptime/vmstat/ps/top, multi-call),
+# and vget (curl/wget over HTTP + HTTPS via OpenSSL).
+if need vnetcat; then
+say "vnetcat (VerkOS netcat)"
+gcc -O2 -o /usr/bin/vnetcat /sources/vnetcat.c
+cd /sources
+mark vnetcat
+fi
+if need vmon; then
+say "vmon (VerkOS process/system monitors)"
+gcc -O2 -o /usr/bin/vmon /sources/vmon.c
+cd /sources
+mark vmon
+fi
+if need vget; then
+say "vget (VerkOS HTTP/HTTPS fetcher)"
+gcc -O2 -o /usr/bin/vget /sources/vget.c -lssl -lcrypto
+cd /sources
+mark vget
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -1018,6 +1042,7 @@ if [ -x /usr/bin/verkbox ]; then
     done
     reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1; reg vip 0.1; reg vdig 0.1
     reg vping 0.1; reg vtrace 0.1; reg vss 0.1
+    reg vnetcat 0.1; reg vmon 0.1; reg vget 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1038,6 +1063,12 @@ if [ -x /usr/bin/vip ]; then
     netln dig vdig
     netln host vdig
     netln nslookup vdig
+    netln nc vnetcat
+    netln netcat vnetcat
+    netln curl vget
+    netln wget vget
+    # vmon is multi-call (dispatches on argv[0]) — link each monitor name to it.
+    for m in free uptime vmstat ps top; do netln "$m" vmon; done
 fi
 
 echo
