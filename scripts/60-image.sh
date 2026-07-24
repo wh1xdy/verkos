@@ -31,6 +31,9 @@ build_ext4_image() {
     log "creating ${size_mb} MiB ext4 image from $ROOTFS"
     # -d populates the fs from a directory; run as root so ownership is preserved.
     $SUDO mkfs.ext4 -q -F -L VERKROOT -m 1 -d "$ROOTFS" "$img" "${size_mb}M"
+    # mkfs ran as root, so the image is root-owned; hand it back to the build user
+    # so `make run`/QEMU (unprivileged) can open it read-write to boot.
+    [ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" "$img"
     ok "root image → $img ($(du -h "$img" | cut -f1))"
 }
 
