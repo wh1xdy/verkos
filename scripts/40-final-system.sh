@@ -745,9 +745,9 @@ cd /sources
 mark vget
 fi
 
-# 12m-q. ved (vi editor), vwhois, vsed, vfind, vxargs. vsed is a subset that
-# can't safely replace GNU sed for autoconf builds, so it ships as `vsed` only;
-# vfind/vxargs are build-verified and do take over find/xargs (below).
+# 12m-q. ved (vi editor), vwhois, vsed, vfind, vxargs. vsed is a full sed engine
+# (hold space, N/D/P, branching, y, a/i/c, ...) and is build-verified — hello
+# builds from source with it as `sed` — so it takes over the name (below).
 if need ved; then
 say "ved (VerkOS vi)"
 gcc -O2 -o /usr/bin/ved /sources/ved.c
@@ -1150,6 +1150,7 @@ if [ -x /usr/bin/vip ]; then
     netln whois vwhois
     netln find vfind
     netln xargs vxargs
+    netln sed vsed        # full engine, build-verified (hello configure passes)
     netln date vdate      # build-verified
     netln stat vstat      # build-verified
     for t in df dmesg pgrep pkill killall pidof watch; do netln "$t" vsys; done

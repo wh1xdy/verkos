@@ -59,7 +59,8 @@ int main(int argc, char **argv) {
     char *base[256]; int nb = 0;
     int i = 1;
     for (; i < argc; i++) {
-        if (!strcmp(argv[i], "-0")) nul = 1;
+        if (!strcmp(argv[i], "-0") || !strcmp(argv[i], "--null")) nul = 1;
+        else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--no-run-if-empty")) ;  /* our default already skips empty */
         else if (!strncmp(argv[i], "-n", 2)) maxn = atoi(argv[i][2] ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : "0"));
         else if (!strncmp(argv[i], "-I", 2)) { repl = argv[i][2] ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : "{}"); maxn = 1; }
         else break;
