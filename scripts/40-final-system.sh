@@ -1020,13 +1020,24 @@ if [ -x /usr/bin/verkbox ]; then
     reg vping 0.1; reg vtrace 0.1; reg vss 0.1
 fi
 
-# vip takes over the `ip` name: it covers addr/link/route/neigh (show + config)
-# and tolerates ip-style global flags, which is the bulk of `ip` usage here.
-# iproute2's binary stays installed (as `ip` is only a symlink to vip); revert by
-# pointing /usr/bin/ip back at it if a missing feature is ever needed.
+# The network tools take over the FAMILIAR command names, the same way verkbox
+# owns `ls`/`cp` (not `vls`/`vcp`): the vX binary is the real file, and the
+# everyday name (ip, ping, dig, ...) is a symlink to it, so muscle memory just
+# works. Any pre-existing real binary is kept as <name>.orig to revert to.
 if [ -x /usr/bin/vip ]; then
-    [ -e /usr/bin/ip ] && [ ! -L /usr/bin/ip ] && mv /usr/bin/ip /usr/bin/ip.iproute2
-    ln -sf vip /usr/bin/ip
+    netln() {   # netln FAMILIAR-NAME  OUR-TOOL
+        local p; p=$(command -v "$1" 2>/dev/null || true)
+        [ -n "$p" ] && [ ! -L "$p" ] && mv "$p" "$p.orig"
+        ln -sf "/usr/bin/$2" "${p:-/usr/bin/$1}"
+    }
+    netln ip vip
+    netln ping vping
+    netln traceroute vtrace
+    netln ss vss
+    netln netstat vss
+    netln dig vdig
+    netln host vdig
+    netln nslookup vdig
 fi
 
 echo
