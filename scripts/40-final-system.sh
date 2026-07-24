@@ -160,6 +160,9 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vxargs/vxargs.c" "$ROOTFS/sources/vxargs.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vdate/vdate.c" "$ROOTFS/sources/vdate.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vstat/vstat.c" "$ROOTFS/sources/vstat.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vsys/vsys.c" "$ROOTFS/sources/vsys.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vhex/vhex.c" "$ROOTFS/sources/vhex.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vtree/vtree.c" "$ROOTFS/sources/vtree.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -779,6 +782,21 @@ say "vstat (VerkOS stat)"
 gcc -O2 -o /usr/bin/vstat /sources/vstat.c
 cd /sources; mark vstat
 fi
+if need vsys; then
+say "vsys (VerkOS df/dmesg/pgrep/pkill/killall/pidof/watch)"
+gcc -O2 -o /usr/bin/vsys /sources/vsys.c
+cd /sources; mark vsys
+fi
+if need vhex; then
+say "vhex (VerkOS hexdump/xxd)"
+gcc -O2 -o /usr/bin/vhex /sources/vhex.c
+cd /sources; mark vhex
+fi
+if need vtree; then
+say "vtree (VerkOS tree)"
+gcc -O2 -o /usr/bin/vtree /sources/vtree.c
+cd /sources; mark vtree
+fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
@@ -1091,6 +1109,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vnetcat 0.1; reg vmon 0.1; reg vget 0.1
     reg ved 0.1; reg vwhois 0.1; reg vsed 0.1; reg vfind 0.1; reg vxargs 0.1
     reg vdate 0.1; reg vstat 0.1
+    reg vsys 0.1; reg vhex 0.1; reg vtree 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1127,6 +1146,10 @@ if [ -x /usr/bin/vip ]; then
     netln xargs vxargs
     netln date vdate      # build-verified
     netln stat vstat      # build-verified
+    for t in df dmesg pgrep pkill killall pidof watch; do netln "$t" vsys; done
+    netln hexdump vhex
+    netln xxd vhex
+    netln tree vtree
 fi
 
 echo
