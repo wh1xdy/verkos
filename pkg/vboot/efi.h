@@ -99,12 +99,16 @@ typedef struct _EFI_BOOT_SERVICES {
     /* event & timer */
     void *CreateEvent; void *SetTimer; void *WaitForEvent; void *SignalEvent;
     void *CloseEvent; void *CheckEvent;
-    /* protocol handlers */
-    void *InstallProtocolInterface; void *ReinstallProtocolInterface; void *UninstallProtocolInterface;
+    /* protocol handlers. InterfaceType is an enum (32-bit) in the spec; UINTN
+     * here keeps the ABI identical while avoiding a forward declaration. */
+    EFI_STATUS (EFIAPI *InstallProtocolInterface)(EFI_HANDLE*, EFI_GUID*, UINTN, void*);
+    void *ReinstallProtocolInterface;
+    EFI_STATUS (EFIAPI *UninstallProtocolInterface)(EFI_HANDLE, EFI_GUID*, void*);
     EFI_STATUS (EFIAPI *HandleProtocol)(EFI_HANDLE, EFI_GUID*, void**);
     void *Reserved; void *RegisterProtocolNotify;
     EFI_STATUS (EFIAPI *LocateHandle)(UINTN, EFI_GUID*, void*, UINTN*, EFI_HANDLE*);
-    void *LocateDevicePath; void *InstallConfigurationTable;
+    EFI_STATUS (EFIAPI *LocateDevicePath)(EFI_GUID*, void**, EFI_HANDLE*);
+    void *InstallConfigurationTable;
     /* image */
     EFI_STATUS (EFIAPI *LoadImage)(BOOLEAN, EFI_HANDLE, void*, void*, UINTN, EFI_HANDLE*);
     EFI_STATUS (EFIAPI *StartImage)(EFI_HANDLE, UINTN*, CHAR16**);
@@ -167,6 +171,37 @@ typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
     UINT64 Revision;
     EFI_STATUS (EFIAPI *OpenVolume)(struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL*, EFI_FILE_PROTOCOL**);
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
+/* ---- Device paths + LoadFile2 (how a modern kernel takes its initrd) ------
+ * Linux >= 5.8 no longer reads initrd= off the command line in the EFI stub.
+ * Instead it looks for an EFI_LOAD_FILE2_PROTOCOL sitting on a handle whose
+ * device path is the vendor-media node below, and calls it to pull the initrd
+ * into memory. vboot installs exactly that (same as systemd-boot does). */
+#define EFI_DEVICE_PATH_PROTOCOL_GUID \
+    { 0x09576e91,0x6d3f,0x11d2,{0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b} }
+#define EFI_LOAD_FILE2_PROTOCOL_GUID \
+    { 0x4006c0c1,0xfcb3,0x403e,{0x99,0x6d,0x4a,0x6c,0x87,0x24,0xe0,0x6d} }
+#define LINUX_EFI_INITRD_MEDIA_GUID \
+    { 0x5568e427,0x68fc,0x4f3d,{0xac,0x74,0xca,0x55,0x52,0x31,0xcc,0x68} }
+
+typedef struct { UINT8 Type, SubType; UINT8 Length[2]; } EFI_DEVICE_PATH_PROTOCOL;
+#define MEDIA_DEVICE_PATH        0x04
+#define MEDIA_VENDOR_DP          0x03
+#define END_DEVICE_PATH_TYPE     0x7F
+#define END_ENTIRE_DEVICE_PATH   0xFF
+
+typedef struct {
+    EFI_DEVICE_PATH_PROTOCOL Header;
+    EFI_GUID Guid;
+} __attribute__((packed)) VENDOR_DEVICE_PATH;
+
+struct _EFI_LOAD_FILE2_PROTOCOL;
+typedef struct _EFI_LOAD_FILE2_PROTOCOL {
+    EFI_STATUS (EFIAPI *LoadFile)(struct _EFI_LOAD_FILE2_PROTOCOL*,
+                                  EFI_DEVICE_PATH_PROTOCOL*, BOOLEAN, UINTN*, void*);
+} EFI_LOAD_FILE2_PROTOCOL;
+
+typedef enum { EFI_NATIVE_INTERFACE } EFI_INTERFACE_TYPE;
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;

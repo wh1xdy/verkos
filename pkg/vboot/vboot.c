@@ -27,6 +27,7 @@
 typedef struct {
     CHAR16 title[TITLE_MAX];
     CHAR16 kernel[PATH_MAX];
+    CHAR16 initrd[PATH_MAX];
     CHAR16 cmdline[CMDLINE_MAX];
 } entry_t;
 
@@ -92,6 +93,69 @@ static void *read_file(EFI_FILE_PROTOCOL *root, CHAR16 *path, UINTN *out_size) {
     return buf;
 }
 
+/* ---- initrd handoff ------------------------------------------------------
+ * Linux >= 5.8 does not read initrd= from the command line in its EFI stub. It
+ * looks up a handle carrying the Linux initrd media device path and calls
+ * LoadFile2 on it. So we read the initrd into memory, then publish it through
+ * exactly that protocol and let the stub pull it across. */
+static void  *initrd_buf;
+static UINTN  initrd_size;
+
+static VENDOR_DEVICE_PATH initrd_dp_node = {
+    { MEDIA_DEVICE_PATH, MEDIA_VENDOR_DP, { sizeof(VENDOR_DEVICE_PATH), 0 } },
+    LINUX_EFI_INITRD_MEDIA_GUID
+};
+static EFI_DEVICE_PATH_PROTOCOL initrd_dp_end = {
+    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH, { sizeof(EFI_DEVICE_PATH_PROTOCOL), 0 }
+};
+/* the two nodes must be adjacent in memory: node then end-of-path */
+static struct { VENDOR_DEVICE_PATH v; EFI_DEVICE_PATH_PROTOCOL e; } __attribute__((packed))
+initrd_path;
+
+static EFI_STATUS EFIAPI initrd_load_file(EFI_LOAD_FILE2_PROTOCOL *self,
+                                          EFI_DEVICE_PATH_PROTOCOL *path,
+                                          BOOLEAN boot_policy,
+                                          UINTN *bufsize, void *buf) {
+    (void)self; (void)path;
+    if (boot_policy) return EFI_UNSUPPORTED;            /* LoadFile2 semantics */
+    if (!bufsize) return EFI_INVALID_PARAMETER;
+    if (!initrd_buf || !initrd_size) return EFI_NOT_FOUND;
+    if (!buf || *bufsize < initrd_size) { *bufsize = initrd_size; return EFI_BUFFER_TOO_SMALL; }
+    unsigned char *d = buf, *s = initrd_buf;
+    for (UINTN i = 0; i < initrd_size; i++) d[i] = s[i];
+    *bufsize = initrd_size;
+    return EFI_SUCCESS;
+}
+/* NOTE: deliberately left uninitialised. A static initialiser holding a function
+ * pointer would be stored as its link-time address and need a load-time
+ * relocation, and vboot is built with none (see build.sh) — the firmware would
+ * hand the kernel a bogus callback. Filled in at runtime below, where the
+ * compiler computes the address PC-relative. */
+static EFI_LOAD_FILE2_PROTOCOL initrd_lf2;
+
+/* publish initrd_buf to the kernel; returns the handle we created (0 on error) */
+static EFI_HANDLE publish_initrd(void) {
+    EFI_GUID dp_guid  = EFI_DEVICE_PATH_PROTOCOL_GUID;
+    EFI_GUID lf2_guid = EFI_LOAD_FILE2_PROTOCOL_GUID;
+    EFI_HANDLE h = 0;
+    EFI_STATUS st;
+    initrd_lf2.LoadFile = initrd_load_file;      /* PC-relative, no relocation */
+    initrd_path.v = initrd_dp_node;
+    initrd_path.e = initrd_dp_end;
+    st = BS->InstallProtocolInterface(&h, &dp_guid, 0, &initrd_path);
+    if (EFI_ERROR(st)) { fail(L"InstallProtocolInterface(DevicePath)", st); return 0; }
+    st = BS->InstallProtocolInterface(&h, &lf2_guid, 0, &initrd_lf2);
+    if (EFI_ERROR(st)) { fail(L"InstallProtocolInterface(LoadFile2)", st); return 0; }
+
+    /* self-test: resolve it the same way the kernel's EFI stub will */
+    void *probe = &initrd_path;
+    EFI_HANDLE found = 0;
+    st = BS->LocateDevicePath(&lf2_guid, &probe, &found);
+    if (EFI_ERROR(st)) fail(L"LocateDevicePath(self-test)", st);
+    else if (found != h) print(L"  [!!] LocateDevicePath found a different handle\r\n");
+    return h;
+}
+
 /* ---- config parsing (plain ASCII, no libc) ------------------------------- */
 static int is_space(unsigned char c) { return c == ' ' || c == '\t'; }
 /* does line start with word `w`? if so return the offset just past it */
@@ -128,10 +192,12 @@ static void parse_config(unsigned char *buf) {
             if (n_entries < MAX_ENTRIES) {
                 cur = &entries[n_entries++];
                 copy_line(p + off, cur->title, TITLE_MAX);
-                cur->kernel[0] = 0; cur->cmdline[0] = 0;
+                cur->kernel[0] = 0; cur->initrd[0] = 0; cur->cmdline[0] = 0;
             } else cur = 0;
         } else if ((off = keyword(p, "kernel"))  && cur) {
             copy_line(p + off, cur->kernel, PATH_MAX);
+        } else if ((off = keyword(p, "initrd"))  && cur) {
+            copy_line(p + off, cur->initrd, PATH_MAX);
         } else if ((off = keyword(p, "cmdline")) && cur) {
             copy_line(p + off, cur->cmdline, CMDLINE_MAX);
         } else if ((off = keyword(p, "timeout"))) {
@@ -196,6 +262,21 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
     void *kbuf = read_file(root, e->kernel, &ksize);
     if (!kbuf) { fail(L"reading the kernel", EFI_NOT_FOUND); return EFI_NOT_FOUND; }
     print(L"  [ok] kernel loaded, "); print_num(ksize); print(L" bytes\r\n");
+
+    /* optional initrd — published via LoadFile2 for the EFI stub to collect */
+    EFI_HANDLE ih = 0;
+    if (e->initrd[0]) {
+        print(L"  [..] loading "); print(e->initrd); print(L"\r\n");
+        initrd_buf = read_file(root, e->initrd, &initrd_size);
+        if (!initrd_buf) {
+            fail(L"reading the initrd", EFI_NOT_FOUND);
+        } else if (!(ih = publish_initrd())) {
+            fail(L"publishing the initrd", EFI_LOAD_ERROR);
+            initrd_buf = 0; initrd_size = 0;
+        } else {
+            print(L"  [ok] initrd loaded, "); print_num(initrd_size); print(L" bytes\r\n");
+        }
+    }
 
     EFI_HANDLE kimg = 0;
     st = BS->LoadImage(0, image, 0, kbuf, ksize, &kimg);

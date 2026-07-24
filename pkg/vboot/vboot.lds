@@ -25,6 +25,12 @@ SECTIONS
     *(.got.plt) *(.got) *(.dynamic)
     *(.rela) *(.rela.*)
     *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash)
+    /* .bss MUST live inside a loaded section. objcopy only emits PROGBITS, so a
+     * separate NOBITS .bss would fall outside SizeOfImage and every global would
+     * be written to memory the firmware never allocated. Folding it in here
+     * makes ld materialise it as zeros in the image. */
+    *(.bss) *(.bss.*) *(COMMON)
+    . = ALIGN(0x1000);
   }
   . = ALIGN(0x1000);
   .reloc : { *(.reloc) }
