@@ -55,10 +55,32 @@ typedef struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void            *SetMode;
     EFI_TEXT_SETATTR SetAttribute;
     EFI_TEXT_CLEAR   ClearScreen;
-    void            *SetCursorPosition;
-    void            *EnableCursor;
+    EFI_STATUS (EFIAPI *SetCursorPosition)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, UINTN, UINTN);
+    EFI_STATUS (EFIAPI *EnableCursor)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, BOOLEAN);
     void            *Mode;
 } EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+
+/* text attributes: foreground | background << 4 */
+#define EFI_BLACK      0x00
+#define EFI_LIGHTGRAY  0x07
+#define EFI_DARKGRAY   0x08
+#define EFI_CYAN       0x03
+#define EFI_LIGHTCYAN  0x0B
+#define EFI_MAGENTA    0x05
+#define EFI_WHITE      0x0F
+#define EFI_BG(c)      ((c) << 4)
+
+/* ---- Simple Text Input --------------------------------------------------- */
+typedef struct { UINT16 ScanCode; CHAR16 UnicodeChar; } EFI_INPUT_KEY;
+#define SCAN_UP     0x01
+#define SCAN_DOWN   0x02
+#define SCAN_ESC    0x17
+struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *Reset)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL*, BOOLEAN);
+    EFI_STATUS (EFIAPI *ReadKeyStroke)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL*, EFI_INPUT_KEY*);
+    EFI_EVENT WaitForKey;
+} EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 
 /* ---- Boot Services (only the members vboot uses; order matters!) --------- */
 typedef enum { AllocateAnyPages, AllocateMaxAddress, AllocateAddress } EFI_ALLOCATE_TYPE;
@@ -149,7 +171,7 @@ typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     CHAR16 *FirmwareVendor; UINT32 FirmwareRevision;
-    EFI_HANDLE ConsoleInHandle; void *ConIn;
+    EFI_HANDLE ConsoleInHandle; EFI_SIMPLE_TEXT_INPUT_PROTOCOL *ConIn;
     EFI_HANDLE ConsoleOutHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE StandardErrorHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
     void *RuntimeServices;
