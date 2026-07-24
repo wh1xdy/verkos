@@ -144,6 +144,7 @@ stage_sources() {
     sudo cp -a "$VERK_ROOT/pkg/recipes" "$ROOTFS/sources/vpk-recipes" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/verkbox/verkbox.c" "$ROOTFS/sources/verkbox.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vgetty/vgetty.c" "$ROOTFS/sources/vgetty.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vdhcp/vdhcp.c" "$ROOTFS/sources/vdhcp.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -652,6 +653,17 @@ cd /sources
 mark vgetty
 fi
 
+# 12d. vdhcp — VerkOS' own minimal DHCPv4 client (replaces dhcpcd). Raw
+# AF_PACKET handshake so it can lease before an address exists; applies the
+# lease via ioctls and writes /etc/resolv.conf. Second step of making our
+# networking ours (see vdhcp.service below, which supersedes dhcpcd).
+if need vdhcp; then
+say "vdhcp (VerkOS DHCP client)"
+gcc -O2 -o /usr/sbin/vdhcp /sources/vdhcp.c
+cd /sources
+mark vdhcp
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -811,8 +823,9 @@ cat > /usr/lib/systemd/system/systemd-vconsole-setup.service.d/10-verkos.conf <<
 ConditionPathExists=/usr/bin/loadkeys
 VC
 
-# --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
-# --- as a swappable option (first concrete step toward replacing systemd bits).
+# --- Networking: vdhcp is ACTIVE (our own DHCP client). dhcpcd and
+# --- systemd-networkd are both built but left disabled as swappable options —
+# --- concrete steps toward replacing systemd's networking with our own.
 mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/network
 cat > /etc/systemd/network/20-wired.network <<'NET'
 [Match]
@@ -821,13 +834,34 @@ Name=en* eth*
 [Network]
 DHCP=yes
 NET
-# (/etc/resolv.conf already created above; dhcpcd overwrites it at runtime.)
+# (/etc/resolv.conf already created above; vdhcp overwrites it at runtime.)
 
-cat > /etc/systemd/system/dhcpcd.service <<'DH'
+# vdhcp.service — VerkOS' own DHCP client, the active one.
+cat > /etc/systemd/system/vdhcp.service <<'VD'
 [Unit]
-Description=dhcpcd DHCP/DNS client (VerkOS)
+Description=vdhcp DHCP client (VerkOS)
 Wants=network.target
 Before=network.target
+After=systemd-udevd.service
+[Service]
+Type=simple
+ExecStart=/usr/sbin/vdhcp eth0
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+VD
+ln -sf /etc/systemd/system/vdhcp.service \
+       /etc/systemd/system/multi-user.target.wants/vdhcp.service
+
+# dhcpcd.service — kept installed but NOT enabled (swap in by enabling this and
+# disabling vdhcp.service if ever needed).
+cat > /etc/systemd/system/dhcpcd.service <<'DH'
+[Unit]
+Description=dhcpcd DHCP/DNS client (VerkOS, inactive fallback)
+Wants=network.target
+Before=network.target
+Conflicts=vdhcp.service
 [Service]
 Type=simple
 ExecStart=/usr/sbin/dhcpcd -B
@@ -835,8 +869,6 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 DH
-ln -sf /etc/systemd/system/dhcpcd.service \
-       /etc/systemd/system/multi-user.target.wants/dhcpcd.service
 
 # --- SSH: host keys, sshd service, password (root/verkos) + key auth --------
 ssh-keygen -A 2>/dev/null || true
@@ -916,7 +948,7 @@ if [ -x /usr/bin/verkbox ]; then
     for t in $(/usr/bin/verkbox --list | sed -n 's/^applets: *//p'); do
         ln -sf verkbox /usr/bin/"$t"
     done
-    reg verkbox 0.1; reg vgetty 0.1
+    reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1
 fi
 
 echo
