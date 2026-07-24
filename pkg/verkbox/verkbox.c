@@ -2199,7 +2199,7 @@ static char *ln_join(const char *dir, const char *base) {
 }
 
 /* ---- create one link src -> dest; force removes an existing dest first ---- */
-static int ln_make(const char *src, const char *dest, int sym, int force) {
+static int ln_make(const char *src, const char *dest, int sym, int force, int verbose) {
     int r = sym ? symlink(src, dest) : link(src, dest);
     if (r != 0 && force && errno == EEXIST) {
         struct stat a, b;
@@ -2220,12 +2220,13 @@ static int ln_make(const char *src, const char *dest, int sym, int force) {
                     dest, src, strerror(errno));
         return 1;
     }
+    if (verbose) printf("'%s' %s '%s'\n", dest, sym ? "->" : "=>", src);
     return 0;
 }
 
 /* ln [-sf] TARGET LINKNAME  |  ln [-sf] TARGET... DIR */
 static int a_ln(int argc, char **argv) {
-    int sym = 0, force = 0, i = 1;
+    int sym = 0, force = 0, verbose = 0, i = 1;
     for (; i < argc; i++) {
         char *a = argv[i];
         if (a[0] != '-' || a[1] == '\0') break;          /* operand or "-" */
@@ -2233,12 +2234,16 @@ static int a_ln(int argc, char **argv) {
             if (a[2] == '\0') { i++; break; }
             if (!strcmp(a, "--symbolic")) sym = 1;
             else if (!strcmp(a, "--force")) force = 1;
+            else if (!strcmp(a, "--verbose")) verbose = 1;
+            else if (!strcmp(a, "--no-dereference")) { /* accepted; -f already unlinks dest */ }
             else { fprintf(stderr, "ln: unrecognized option '%s'\n", a); return 1; }
             continue;
         }
         for (int j = 1; a[j]; j++) {
             if (a[j] == 's') sym = 1;
             else if (a[j] == 'f') force = 1;
+            else if (a[j] == 'v') verbose = 1;
+            else if (a[j] == 'n') { /* --no-dereference: accepted */ }
             else { fprintf(stderr, "ln: invalid option -- '%c'\n", a[j]); return 1; }
         }
     }
@@ -2253,7 +2258,7 @@ static int a_ln(int argc, char **argv) {
     if (n == 1) {                                         /* ln TARGET */
         char *base = ln_base(op[0]);
         if (!base) { fprintf(stderr, "ln: memory exhausted\n"); return 1; }
-        int rc = ln_make(op[0], base, sym, force);
+        int rc = ln_make(op[0], base, sym, force, verbose);
         free(base);
         return rc;
     }
@@ -2267,7 +2272,7 @@ static int a_ln(int argc, char **argv) {
             fprintf(stderr, "ln: target '%s' is not a directory\n", op[n-1]);
             return 1;
         }
-        return ln_make(op[0], op[1], sym, force);         /* ln TARGET LINKNAME */
+        return ln_make(op[0], op[1], sym, force, verbose);         /* ln TARGET LINKNAME */
     }
 
     /* ln TARGET... DIR */
@@ -2277,7 +2282,7 @@ static int a_ln(int argc, char **argv) {
         char *base = ln_base(op[k]);
         char *dest = base ? ln_join(dir, base) : NULL;
         if (!dest) { fprintf(stderr, "ln: memory exhausted\n"); free(base); rc = 1; continue; }
-        rc |= ln_make(op[k], dest, sym, force);
+        rc |= ln_make(op[k], dest, sym, force, verbose);
         free(base);
         free(dest);
     }
