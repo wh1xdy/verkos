@@ -836,7 +836,22 @@ DHCP=yes
 NET
 # (/etc/resolv.conf already created above; vdhcp overwrites it at runtime.)
 
-# vdhcp.service — VerkOS' own DHCP client, the active one.
+# /etc/vdhcp.conf — vdhcp reads this for the interface list and tunables. With
+# no 'interfaces=' line it defaults to eth0; list several to run one worker per
+# NIC. All keys are optional.
+cat > /etc/vdhcp.conf <<'VC'
+# VerkOS DHCP client configuration. See pkg/vdhcp/vdhcp.c for the full option set.
+# interfaces=eth0 eth1     # NICs to lease on (default: eth0)
+# hostname=verkos          # hostname advertised to the server (default: system hostname)
+# lease=86400              # requested lease time in seconds (option 51)
+# vendor=VerkOS            # vendor class identifier (option 60)
+# fqdn=verkos.local        # FQDN for dynamic DNS (option 81)
+# hook=/etc/vdhcp/hook     # script run on BOUND/RENEW/REBIND/RELEASE/EXPIRE
+# request=26,42,119,121    # extra option codes to request
+VC
+
+# vdhcp.service — VerkOS' own DHCP client, the active one. Config-driven: the
+# interface list (and tunables) come from /etc/vdhcp.conf.
 cat > /etc/systemd/system/vdhcp.service <<'VD'
 [Unit]
 Description=vdhcp DHCP client (VerkOS)
@@ -845,7 +860,7 @@ Before=network.target
 After=systemd-udevd.service
 [Service]
 Type=simple
-ExecStart=/usr/sbin/vdhcp eth0
+ExecStart=/usr/sbin/vdhcp
 Restart=on-failure
 RestartSec=2
 [Install]
