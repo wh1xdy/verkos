@@ -88,10 +88,14 @@ tc_linux_headers() {
 tc_glibc() {
     local d; d="$(extract "glibc-${GLIBC_VERSION}.tar.xz")"
     cd "$d"
-    # LFS creates arch-specific symlinks/dirs; keep it minimal + correct.
-    case "$VERK_ARCH" in
-        x86_64) ln -sfv ../lib/ld-linux-x86-64.so.2 "$ROOTFS/lib64" 2>/dev/null || true ;;
-    esac
+    # No arch-specific ld-linux symlink here. In our merged-/usr layout /lib64 is
+    # a symlink to usr/lib, so `ln -s ../lib/ld-linux-x86-64.so.2 $ROOTFS/lib64`
+    # would drop usr/lib/ld-linux-x86-64.so.2 -> ../lib/ld-linux-x86-64.so.2, which
+    # is a self-loop (../lib resolves back through /lib -> usr/lib) and makes
+    # glibc's install ELOOP ("too many levels of symbolic links"). glibc installs
+    # the real ld.so into /usr/lib (libc_cv_slibdir below) and the x86_64 ELF
+    # interpreter path /lib64/ld-linux-x86-64.so.2 resolves there via the /lib64
+    # symlink — no manual link needed.
     mkdir -p build; cd build
     echo "rootsbindir=/usr/sbin" > configparms
     ../configure                              \
