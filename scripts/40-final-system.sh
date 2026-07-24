@@ -145,6 +145,8 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/verkbox/verkbox.c" "$ROOTFS/sources/verkbox.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vgetty/vgetty.c" "$ROOTFS/sources/vgetty.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vdhcp/vdhcp.c" "$ROOTFS/sources/vdhcp.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vip/vip.c" "$ROOTFS/sources/vip.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vdig/vdig.c" "$ROOTFS/sources/vdig.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -664,6 +666,26 @@ cd /sources
 mark vdhcp
 fi
 
+# 12e. vip — VerkOS' own network config tool (an ip/ifconfig in one binary).
+# Shows/configures interfaces, addresses, and routes via AF_INET ioctls; pairs
+# with vdhcp. Shipped as its own command (iproute2's `ip` stays for the bits vip
+# doesn't cover yet).
+if need vip; then
+say "vip (VerkOS ip/ifconfig)"
+gcc -O2 -o /usr/bin/vip /sources/vip.c
+cd /sources
+mark vip
+fi
+
+# 12f. vdig — VerkOS' own DNS lookup tool (a dig/host/nslookup). Builds DNS
+# queries and parses responses itself over UDP.
+if need vdig; then
+say "vdig (VerkOS DNS lookup)"
+gcc -O2 -o /usr/bin/vdig /sources/vdig.c
+cd /sources
+mark vdig
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -970,7 +992,7 @@ if [ -x /usr/bin/verkbox ]; then
     for t in $(/usr/bin/verkbox --list | sed -n 's/^applets: *//p'); do
         ln -sf verkbox /usr/bin/"$t"
     done
-    reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1
+    reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1; reg vip 0.1; reg vdig 0.1
 fi
 
 echo
