@@ -621,19 +621,73 @@ static void install_from_binpkg(const recipe_t *r, const char *vpk) {
     rmrf(work);
     info("installed %s %s", r->name, r->version);
 }
+/* refresh the shared-library cache so a freshly installed lib is found without a
+ * relogin. Run once after a transaction, best-effort. */
+static void run_ldconfig(void) { if (system("ldconfig >/dev/null 2>&1")) { /* best effort */ } }
+/* read an installed package's recorded version from its db meta (-1 if absent) */
+static int installed_version(const char *name, char *out, size_t n) {
+    char p[512]; snprintf(p,sizeof p,"%s/%s/meta",DB_DIR,name);
+    FILE *f=fopen(p,"r"); if(!f) return -1;
+    char l[128]; int got=-1;
+    while(fgets(l,sizeof l,f)) if(!strncmp(l,"version=",8)){ snprintf(out,n,"%s",l+8); out[strcspn(out,"\r\n")]=0; got=0; }
+    fclose(f); return got;
+}
+/* (re)install a single named package ignoring is_installed — deps are assumed
+ * already present, so no resolve() (that would force-touch the whole graph). */
+static void install_named_forced(const char *name) {
+    recipe_t r; if (recipe_load(name,&r)) die("no recipe for '%s'",name);
+    char vpk[600];
+    if (binpkg_path(&r,vpk,sizeof vpk)==0) install_from_binpkg(&r,vpk);
+    else install_one(&r);
+}
 
 /* ----------------------------------------------------------- commands ----- */
 static void cmd_install(int argc, char **argv) {
     char order[MAXQ][64], seen[MAXQ][64]; int n=0, sn=0;
     for (int i=0;i<argc;i++) resolve(argv[i],order,&n,seen,&sn);
     info("resolved %d package(s) to install", n);
+    int did=0;
     for (int i=0;i<n;i++) {
         if (is_installed(order[i])) { info("%s already installed, skipping",order[i]); continue; }
         recipe_t r; if (recipe_load(order[i],&r)) die("no recipe for '%s'",order[i]);
         char vpk[600];
         if (binpkg_path(&r,vpk,sizeof vpk)==0) install_from_binpkg(&r,vpk);  /* fast path */
         else install_one(&r);                                                /* build from source */
+        did++;
     }
+    if (did) run_ldconfig();
+}
+/* reinstall named packages even if already installed (repair / force) */
+static void cmd_reinstall(int argc, char **argv) {
+    for (int i=0;i<argc;i++) install_named_forced(argv[i]);
+    if (argc) run_ldconfig();
+}
+/* upgrade: reinstall a package when its recipe version differs from what's
+ * installed. With no args, walk every installed package that has a recipe. */
+static void cmd_upgrade(int argc, char **argv) {
+    int did=0;
+    if (argc>0) {
+        for (int i=0;i<argc;i++) {
+            char iv[64]; recipe_t r;
+            if (installed_version(argv[i],iv,sizeof iv)) { info("%s is not installed",argv[i]); continue; }
+            if (recipe_load(argv[i],&r)) { info("%s: no recipe (base package?) — skipping",argv[i]); continue; }
+            if (!strcmp(iv,r.version)) { info("%s %s is up to date",argv[i],iv); continue; }
+            info("upgrading %s %s -> %s",argv[i],iv,r.version); install_named_forced(argv[i]); did++;
+        }
+    } else {
+        DIR *d=opendir(DB_DIR); if(!d) die("no package db");
+        struct dirent *e;
+        while ((e=readdir(d))) {
+            if (e->d_name[0]=='.' || is_base(e->d_name)) continue;
+            char iv[64]; recipe_t r;
+            if (installed_version(e->d_name,iv,sizeof iv)) continue;
+            if (recipe_load(e->d_name,&r)) continue;             /* no recipe -> can't upgrade */
+            if (!strcmp(iv,r.version)) continue;
+            info("upgrading %s %s -> %s",e->d_name,iv,r.version); install_named_forced(e->d_name); did++;
+        }
+        closedir(d);
+    }
+    if (did) run_ldconfig(); else info("nothing to upgrade");
 }
 /* build a binary package (.vpk) without installing — for prebuilding a repo */
 static void cmd_build(int argc, char **argv) {
@@ -725,8 +779,11 @@ static void cmd_update(void) {
 }
 /* list available packages from the index, optional substring filter */
 static void cmd_search(const char *term) {
+    /* prefer the network-refreshed cache, else fall back to the index shipped
+     * with the OS so `vpk search` works offline on a fresh boot */
     FILE *f=fopen(INDEX_PATH,"r");
-    if(!f) die("no index yet — run 'vpk update' first");
+    if(!f) f=fopen(RECIPE_DIR"/INDEX","r");
+    if(!f) die("no index — expected %s or run 'vpk update'", RECIPE_DIR"/INDEX");
     char l[256]; int n=0;
     while (fgets(l,sizeof l,f)) {
         if (l[0]=='#'||l[0]=='\n') continue;
@@ -756,6 +813,9 @@ static void usage(void) {
            "  vpk install <pkg>...   install (fetches recipe from the repo if not\n"
            "                         local; uses a cached binary package if present,\n"
            "                         else builds from source + caches it)\n"
+           "  vpk reinstall <pkg>... reinstall package(s) even if already present\n"
+           "  vpk upgrade [pkg...]   upgrade package(s) whose recipe version changed\n"
+           "                         (no args = every installed package with a recipe)\n"
            "  vpk build   <pkg>...   build a binary package (.vpk) without installing\n"
            "  vpk remove  <pkg>...   remove installed package(s)\n"
            "  vpk list               list installed packages\n"
@@ -768,6 +828,8 @@ int main(int argc, char **argv) {
     mkpath(DB_DIR,0755); mkpath(BUILD_DIR,0755);
     const char *cmd=argv[1];
     if      (!strcmp(cmd,"install")&&argc>2) cmd_install(argc-2,argv+2);
+    else if (!strcmp(cmd,"reinstall")&&argc>2) cmd_reinstall(argc-2,argv+2);
+    else if (!strcmp(cmd,"upgrade"))         cmd_upgrade(argc-2,argv+2);
     else if (!strcmp(cmd,"build")  &&argc>2) cmd_build(argc-2,argv+2);
     else if (!strcmp(cmd,"remove") &&argc>2) cmd_remove(argc-2,argv+2);
     else if (!strcmp(cmd,"update"))          cmd_update();
