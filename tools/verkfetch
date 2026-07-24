@@ -102,7 +102,7 @@ logo_f() { cat <<'EOF'
    ╚████╔╝
     ╚██╔╝
      ╚═╝
-  V E R K O S
+ V E R K O S
 EOF
 }
 logo_g() { cat <<'EOF'
