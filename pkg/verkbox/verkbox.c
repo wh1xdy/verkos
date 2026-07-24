@@ -17,6 +17,8 @@
 #include <ctype.h>
 #include <pwd.h>
 #include <errno.h>
+#include <grp.h>
+#include <time.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -278,186 +280,212 @@ static int a_seq(int c, char **v) {
 
 /* -------------------------------------------------- extended applets --- */
 /* ---- ls ---- */
-static int ls_cmp(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
+struct ls_ent { char *name; struct stat st; char *link; int skip; };
+static int ls_all, ls_almost, ls_lng, ls_recurse, ls_rev, ls_bytime, ls_bysize, ls_dirself, ls_human, ls_class;
 
-static char *ls_dup(const char *s) {
-    size_t n = strlen(s) + 1;
-    char *p = malloc(n);
-    if (p) memcpy(p, s, n);
-    return p;
+static int ls_namecmp(const void *a, const void *b) {
+    const struct ls_ent *x = a, *y = b; int r = strcmp(x->name, y->name);
+    return ls_rev ? -r : r;
 }
-
-/* List a single directory, one entry per line, C-locale (strcmp) sorted.
-   Returns 0 on success, 2 on open/read failure. */
-static int ls_one_dir(const char *dirname, int show_all, int almost) {
-    DIR *dp = opendir(dirname);
-    if (!dp) {
-        fprintf(stderr, "ls: cannot open directory '%s': %s\n", dirname, strerror(errno));
-        return 2;
-    }
-    char **names = NULL;
-    size_t n = 0, cap = 0;
-    int rc = 0;
-    struct dirent *e;
-    errno = 0;
-    while ((e = readdir(dp)) != NULL) {
-        const char *nm = e->d_name;
-        int skip = 0;
-        if (nm[0] == '.') {
-            if (show_all)
-                skip = 0;                 /* -a: include everything, even . and .. */
-            else if (almost)
-                skip = (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')); /* -A: drop . and .. */
-            else
-                skip = 1;                 /* default: drop all dotfiles */
+static int ls_pathcmp(const void *a, const void *b) {   /* sort directory operands */
+    int r = strcmp(*(char *const *)a, *(char *const *)b);
+    return ls_rev ? -r : r;
+}
+static int ls_timecmp(const void *a, const void *b) {
+    const struct ls_ent *x = a, *y = b;
+    /* newest first; compare at nanosecond resolution like GNU (else same-second
+     * entries tie-break differently). */
+    long xs=x->st.st_mtim.tv_sec, ys=y->st.st_mtim.tv_sec;
+    int r = (xs < ys) - (xs > ys);
+    if (!r) { long xn=x->st.st_mtim.tv_nsec, yn=y->st.st_mtim.tv_nsec; r = (xn < yn) - (xn > yn); }
+    if (!r) r = strcmp(x->name, y->name);
+    return ls_rev ? -r : r;
+}
+static int ls_sizecmp(const void *a, const void *b) {
+    const struct ls_ent *x = a, *y = b;
+    int r = (x->st.st_size < y->st.st_size) - (x->st.st_size > y->st.st_size); /* largest first */
+    if (!r) r = strcmp(x->name, y->name);
+    return ls_rev ? -r : r;
+}
+static void ls_sort(struct ls_ent *e, int n) {
+    qsort(e, n, sizeof *e, ls_bytime ? ls_timecmp : ls_bysize ? ls_sizecmp : ls_namecmp);
+}
+static void ls_modestr(mode_t m, char *s) {
+    s[0] = S_ISDIR(m)?'d':S_ISLNK(m)?'l':S_ISCHR(m)?'c':S_ISBLK(m)?'b':S_ISFIFO(m)?'p':S_ISSOCK(m)?'s':'-';
+    s[1]=(m&S_IRUSR)?'r':'-'; s[2]=(m&S_IWUSR)?'w':'-';
+    s[3]=(m&S_ISUID)?((m&S_IXUSR)?'s':'S'):((m&S_IXUSR)?'x':'-');
+    s[4]=(m&S_IRGRP)?'r':'-'; s[5]=(m&S_IWGRP)?'w':'-';
+    s[6]=(m&S_ISGID)?((m&S_IXGRP)?'s':'S'):((m&S_IXGRP)?'x':'-');
+    s[7]=(m&S_IROTH)?'r':'-'; s[8]=(m&S_IWOTH)?'w':'-';
+    s[9]=(m&S_ISVTX)?((m&S_IXOTH)?'t':'T'):((m&S_IXOTH)?'x':'-');
+    s[10]=0;
+}
+static void ls_humansize(long long v, char *out) {
+    static const char u[] = "\0KMGTPE"; double d = v; int i = 0;
+    if (v < 1024) { sprintf(out, "%lld", v); return; }
+    while (d >= 1024 && u[i+1]) { d /= 1024; i++; }
+    if (d < 10) { double r = (double)((long long)(d*10 + 0.99999))/10.0; sprintf(out, "%.1f%c", r, u[i]); }
+    else        { long long r = (long long)(d + 0.99999); sprintf(out, "%lld%c", r, u[i]); }
+}
+static const char *ls_uname(uid_t u){ struct passwd *p=getpwuid(u); static char b[32]; if(p) return p->pw_name; sprintf(b,"%u",(unsigned)u); return b; }
+static const char *ls_gname(gid_t g){ struct group  *p=getgrgid(g); static char b[32]; if(p) return p->gr_name; sprintf(b,"%u",(unsigned)g); return b; }
+static void ls_datestr(time_t t, char *out) {
+    time_t now = time(NULL); struct tm tm; localtime_r(&t, &tm);
+    char mon[8]; strftime(mon, sizeof mon, "%b", &tm);
+    int recent = (now - t < 15778476) && (t - now < 3600);
+    if (recent) sprintf(out, "%s %2d %02d:%02d", mon, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    else        sprintf(out, "%s %2d  %d", mon, tm.tm_mday, tm.tm_year + 1900);
+}
+static char ls_typechar(const struct stat *st) {
+    mode_t m = st->st_mode;
+    if (S_ISDIR(m)) return '/';
+    if (S_ISLNK(m)) return '@';
+    if (S_ISFIFO(m)) return '|';
+    if (S_ISSOCK(m)) return '=';
+    if (m & (S_IXUSR|S_IXGRP|S_IXOTH)) return '*';
+    return 0;
+}
+/* print an already-sorted set of entries. show_total: emit the "total N" line
+ * (directory listings do; a group of file operands does not). */
+static void ls_print(struct ls_ent *e, int n, int show_total) {
+    if (ls_lng) {
+        char modes[n>0?n:1][11]; char nlink[n>0?n:1][16];
+        char sizes[n>0?n:1][32]; char dates[n>0?n:1][40];
+        char *own[n>0?n:1]; char *grp[n>0?n:1];
+        int wn=1, wo=1, wg=1, ws=1; long long total=0;
+        for (int i=0;i<n;i++) {
+            ls_modestr(e[i].st.st_mode, modes[i]);
+            snprintf(nlink[i],sizeof nlink[i],"%lu",(unsigned long)e[i].st.st_nlink);
+            own[i]=strdup(ls_uname(e[i].st.st_uid)); grp[i]=strdup(ls_gname(e[i].st.st_gid));
+            if (ls_human) ls_humansize((long long)e[i].st.st_size, sizes[i]);
+            else snprintf(sizes[i],sizeof sizes[i],"%lld",(long long)e[i].st.st_size);
+            ls_datestr(e[i].st.st_mtime, dates[i]);
+            total += (long long)e[i].st.st_blocks;
+            int l;
+            if ((l=(int)strlen(nlink[i]))>wn) wn=l;
+            if ((l=(int)strlen(own[i]))>wo) wo=l;
+            if ((l=(int)strlen(grp[i]))>wg) wg=l;
+            if ((l=(int)strlen(sizes[i]))>ws) ws=l;
         }
-        if (!skip) {
-            if (n == cap) {
-                size_t ncap = cap ? cap * 2 : 64;
-                char **t = realloc(names, ncap * sizeof *names);
-                if (!t) {
-                    fprintf(stderr, "ls: memory exhausted\n");
-                    for (size_t k = 0; k < n; k++) free(names[k]);
-                    free(names);
-                    closedir(dp);
-                    return 2;
-                }
-                names = t;
-                cap = ncap;
-            }
-            names[n] = ls_dup(nm);
-            if (!names[n]) {
-                fprintf(stderr, "ls: memory exhausted\n");
-                for (size_t k = 0; k < n; k++) free(names[k]);
-                free(names);
-                closedir(dp);
-                return 2;
-            }
-            n++;
+        if (show_total) {
+            if (ls_human) { char tb[32]; ls_humansize((total/2)*1024, tb); printf("total %s\n", tb); }
+            else printf("total %lld\n", total/2);
         }
-        errno = 0;
+        for (int i=0;i<n;i++) {
+            if (e[i].skip) continue;   /* dir operand: counted for width, not printed here */
+            printf("%s %*s %-*s %-*s %*s %s %s", modes[i], wn,nlink[i], wo,own[i], wg,grp[i], ws,sizes[i], dates[i], e[i].name);
+            if (e[i].link) printf(" -> %s", e[i].link);
+            else if (ls_class) { char c=ls_typechar(&e[i].st); if(c&&c!='@') putchar(c); }
+            putchar('\n');
+        }
+        for (int i=0;i<n;i++){ free(own[i]); free(grp[i]); }
+    } else {
+        for (int i=0;i<n;i++) {
+            if (e[i].skip) continue;
+            fputs(e[i].name, stdout);
+            if (ls_class) { char c=ls_typechar(&e[i].st); if(c) putchar(c); }
+            putchar('\n');
+        }
     }
-    if (errno != 0) {
-        fprintf(stderr, "ls: reading directory '%s': %s\n", dirname, strerror(errno));
-        rc = 2;
+}
+/* list a directory. print_header: emit "path:" header. first: is this the first
+ * output block (suppresses the leading blank line before the header). */
+static int ls_dir(const char *path, int print_header, int first) {
+    DIR *d = opendir(path);
+    if (!d) { fprintf(stderr, "ls: cannot open directory '%s': %s\n", path, strerror(errno)); return 2; }
+    struct ls_ent *e = NULL; int n = 0, cap = 0, rc = 0;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        const char *nm = de->d_name;
+        if (nm[0]=='.') {
+            if (ls_all) { }
+            else if (ls_almost) { if (!strcmp(nm,".")||!strcmp(nm,"..")) continue; }
+            else continue;
+        }
+        if (n==cap) { cap=cap?cap*2:32; e=realloc(e,cap*sizeof *e); }
+        char full[8192]; snprintf(full,sizeof full,"%s/%s",path,nm);
+        e[n].name = strdup(nm); e[n].link = NULL; e[n].skip = 0;
+        if (lstat(full,&e[n].st)!=0) memset(&e[n].st,0,sizeof e[n].st);
+        if (S_ISLNK(e[n].st.st_mode) && ls_lng) {
+            char t[4096]; ssize_t k=readlink(full,t,sizeof t-1); if(k>=0){ t[k]=0; e[n].link=strdup(t); }
+        }
+        n++;
     }
-    closedir(dp);
-    if (n > 1)
-        qsort(names, n, sizeof *names, ls_cmp);
-    for (size_t i = 0; i < n; i++) {
-        printf("%s\n", names[i]);
-        free(names[i]);
+    closedir(d);
+    ls_sort(e,n);
+    if (print_header) { if(!first) putchar('\n'); printf("%s:\n", path); }
+    ls_print(e,n,1);
+    if (ls_recurse) {
+        for (int i=0;i<n;i++) {
+            if (!strcmp(e[i].name,".")||!strcmp(e[i].name,"..")) continue;
+            if (S_ISDIR(e[i].st.st_mode)) {
+                char sub[8192]; snprintf(sub,sizeof sub,"%s/%s",path,e[i].name);
+                rc |= ls_dir(sub,1,0) ? 2 : 0;    /* leading blank + header */
+            }
+        }
     }
-    free(names);
+    for (int i=0;i<n;i++){ free(e[i].name); free(e[i].link); }
+    free(e);
     return rc;
 }
-
 static int a_ls(int argc, char **argv) {
-    int show_all = 0, almost = 0;      /* -a / -A (last one wins) */
-    int i, endopts = 0;
-    int status = 0;
-
-    /* Collect operands (non-option args). */
-    char **operands = malloc(sizeof(char *) * (argc > 0 ? (size_t)argc : 1));
-    if (!operands) {
-        fprintf(stderr, "ls: memory exhausted\n");
-        return 2;
-    }
-    int nop = 0;
-
-    for (i = 1; i < argc; i++) {
-        char *arg = argv[i];
-        if (!endopts && arg[0] == '-' && arg[1] != '\0') {
-            if (arg[1] == '-' && arg[2] == '\0') { endopts = 1; continue; } /* "--" */
-            if (arg[1] == '-') {
-                if (strcmp(arg, "--all") == 0)        { show_all = 1; almost = 0; continue; }
-                if (strcmp(arg, "--almost-all") == 0) { almost = 1; show_all = 0; continue; }
-                fprintf(stderr,
-                    "ls: unrecognized option '%s'\nTry 'ls --help' for more information.\n", arg);
-                free(operands);
-                return 2;
+    ls_all=ls_almost=ls_lng=ls_recurse=ls_rev=ls_bytime=ls_bysize=ls_dirself=ls_human=ls_class=0;
+    int i, endopts=0, status=0;
+    char **ops = malloc(sizeof(char*)*(argc>0?argc:1)); int nop=0;
+    for (i=1;i<argc;i++) {
+        char *a=argv[i];
+        if (!endopts && a[0]=='-' && a[1]) {
+            if (a[1]=='-'&&!a[2]) { endopts=1; continue; }
+            if (a[1]=='-') {
+                if(!strcmp(a,"--all"))ls_all=1; else if(!strcmp(a,"--almost-all"))ls_almost=1;
+                else if(!strcmp(a,"--recursive"))ls_recurse=1; else if(!strcmp(a,"--reverse"))ls_rev=1;
+                else if(!strcmp(a,"--human-readable"))ls_human=1; else if(!strcmp(a,"--classify"))ls_class=1;
+                else if(!strncmp(a,"--color",7)) { /* we don't colorize: accept & ignore */ }
+                else { fprintf(stderr,"ls: unrecognized option '%s'\n",a); free(ops); return 2; }
+                continue;
             }
-            for (char *p = arg + 1; *p; p++) {
-                switch (*p) {
-                    case 'a': show_all = 1; almost = 0; break;
-                    case 'A': almost = 1; show_all = 0; break;
-                    case '1': break;               /* one-per-line: already the default */
-                    default:
-                        fprintf(stderr,
-                            "ls: invalid option -- '%c'\nTry 'ls --help' for more information.\n", *p);
-                        free(operands);
-                        return 2;
-                }
+            for (char *p=a+1;*p;p++) switch(*p){
+                case 'a':ls_all=1;break; case 'A':ls_almost=1;break; case 'l':ls_lng=1;break;
+                case 'R':ls_recurse=1;break; case 'r':ls_rev=1;break; case 't':ls_bytime=1;break;
+                case 'S':ls_bysize=1;break; case 'd':ls_dirself=1;break; case 'h':ls_human=1;break;
+                case 'F':ls_class=1;break; case '1':break;
+                default: fprintf(stderr,"ls: invalid option -- '%c'\n",*p); free(ops); return 2;
             }
             continue;
         }
-        operands[nop++] = arg;
+        ops[nop++]=a;
     }
-
-    /* Split operands into non-directories (printed first) and directories. */
-    char **files = malloc(sizeof(char *) * (nop > 0 ? (size_t)nop : 1));
-    char **dirs  = malloc(sizeof(char *) * (nop > 0 ? (size_t)nop : 1));
-    if (!files || !dirs) {
-        fprintf(stderr, "ls: memory exhausted\n");
-        free(operands); free(files); free(dirs);
-        return 2;
+    struct ls_ent *files = malloc(sizeof(struct ls_ent)*(nop?nop:1)); int nf=0;
+    char **dirs = malloc(sizeof(char*)*(nop?nop:1)); int nd=0;
+    if (nop==0) {
+        if (ls_dirself){ files[nf].name=strdup("."); files[nf].link=NULL; files[nf].skip=0; lstat(".",&files[nf].st); nf++; }
+        else dirs[nd++]=".";
     }
-    int nf = 0, nd = 0;
-
-    if (nop == 0) {
-        dirs[nd++] = ".";                 /* no operands: list current directory */
-    } else {
-        for (i = 0; i < nop; i++) {
-            struct stat st;
-            if (lstat(operands[i], &st) != 0) {
-                fprintf(stderr, "ls: cannot access '%s': %s\n", operands[i], strerror(errno));
-                status = 2;
-                continue;
-            }
-            int isdir;
-            if (S_ISLNK(st.st_mode)) {
-                /* Command-line symlink to a directory is dereferenced and listed. */
-                struct stat st2;
-                isdir = (stat(operands[i], &st2) == 0 && S_ISDIR(st2.st_mode));
-            } else {
-                isdir = S_ISDIR(st.st_mode);
-            }
-            if (isdir)
-                dirs[nd++] = operands[i];
-            else
-                files[nf++] = operands[i];
+    for (i=0;i<nop;i++) {
+        struct stat st;
+        if (lstat(ops[i],&st)!=0){ fprintf(stderr,"ls: cannot access '%s': %s\n",ops[i],strerror(errno)); status=2; continue; }
+        int isdir = S_ISDIR(st.st_mode);
+        if (S_ISLNK(st.st_mode)) { struct stat s2; if(stat(ops[i],&s2)==0) isdir=S_ISDIR(s2.st_mode); }
+        files[nf].name=strdup(ops[i]); files[nf].link=NULL; files[nf].st=st;
+        if (isdir && !ls_dirself) {
+            dirs[nd++]=ops[i];        /* listed separately; kept in files[] (skip) so its
+                                         size/nlink still size the file-block columns like GNU */
+            files[nf].skip=1;
+        } else {
+            files[nf].skip=0;
+            if(S_ISLNK(st.st_mode)&&ls_lng){char t[4096];ssize_t k=readlink(ops[i],t,sizeof t-1);if(k>=0){t[k]=0;files[nf].link=strdup(t);}}
         }
+        nf++;
     }
-
-    if (nf > 1) qsort(files, nf, sizeof(char *), ls_cmp);
-    if (nd > 1) qsort(dirs,  nd, sizeof(char *), ls_cmp);
-
-    /* Header printed for each directory unless there is a single operand that
-       resolves to exactly one directory with no listed files (GNU counts the
-       total number of operands, so a failed operand still forces headers). */
-    int print_header = !(nf == 0 && nop <= 1 && nd == 1);
-
-    for (i = 0; i < nf; i++)
-        printf("%s\n", files[i]);
-    if (nf > 0 && nd > 0)
-        putchar('\n');                    /* blank line between files and first dir */
-
-    int first = 1;
-    for (i = 0; i < nd; i++) {
-        if (print_header) {
-            if (!first) putchar('\n');     /* blank line before each subsequent header */
-            printf("%s:\n", dirs[i]);
-            first = 0;
-        }
-        if (ls_one_dir(dirs[i], show_all, almost) != 0)
-            status = 2;
-    }
-
-    free(operands);
-    free(files);
-    free(dirs);
+    ls_sort(files,nf);
+    if (nd > 1) qsort(dirs, nd, sizeof(char*), ls_pathcmp);   /* GNU sorts operands */
+    int nf_real=0; for(i=0;i<nf;i++) if(!files[i].skip) nf_real++;
+    int hdr = (((nf_real?1:0)+nd) > 1) || ls_recurse;
+    if (nf) ls_print(files,nf,0);
+    int first = (nf_real==0);
+    for (i=0;i<nd;i++) { status |= ls_dir(dirs[i], hdr, first) ? 2 : 0; first=0; }
+    for (i=0;i<nf;i++){ free(files[i].name); free(files[i].link); }
+    free(files); free(dirs); free(ops);
     return status;
 }
 
