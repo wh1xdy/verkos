@@ -103,6 +103,49 @@ typedef struct _EFI_BOOT_SERVICES {
     /* ... remainder unused */
 } EFI_BOOT_SERVICES;
 
+/* ---- Loaded Image ------------------------------------------------------- */
+#define EFI_LOADED_IMAGE_PROTOCOL_GUID \
+    { 0x5B1B31A1,0x9562,0x11d2,{0x8E,0x3F,0x00,0xA0,0xC9,0x69,0x72,0x3B} }
+typedef struct {
+    UINT32 Revision;
+    EFI_HANDLE ParentHandle;
+    void *SystemTable;
+    EFI_HANDLE DeviceHandle;        /* the volume we were loaded from */
+    void *FilePath;
+    void *Reserved;
+    UINT32 LoadOptionsSize;         /* kernel command line goes here ... */
+    void *LoadOptions;              /* ... as a CHAR16 string */
+    void *ImageBase;
+    UINT64 ImageSize;
+    EFI_MEMORY_TYPE ImageCodeType, ImageDataType;
+    void *Unload;
+} EFI_LOADED_IMAGE_PROTOCOL;
+
+/* ---- Simple File System + File ------------------------------------------ */
+#define EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID \
+    { 0x964e5b22,0x6459,0x11d2,{0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b} }
+#define EFI_FILE_MODE_READ  0x0000000000000001ULL
+
+struct _EFI_FILE_PROTOCOL;
+typedef struct _EFI_FILE_PROTOCOL {
+    UINT64 Revision;
+    EFI_STATUS (EFIAPI *Open)(struct _EFI_FILE_PROTOCOL*, struct _EFI_FILE_PROTOCOL**, CHAR16*, UINT64, UINT64);
+    EFI_STATUS (EFIAPI *Close)(struct _EFI_FILE_PROTOCOL*);
+    EFI_STATUS (EFIAPI *Delete)(struct _EFI_FILE_PROTOCOL*);
+    EFI_STATUS (EFIAPI *Read)(struct _EFI_FILE_PROTOCOL*, UINTN*, void*);
+    EFI_STATUS (EFIAPI *Write)(struct _EFI_FILE_PROTOCOL*, UINTN*, void*);
+    EFI_STATUS (EFIAPI *GetPosition)(struct _EFI_FILE_PROTOCOL*, UINT64*);
+    EFI_STATUS (EFIAPI *SetPosition)(struct _EFI_FILE_PROTOCOL*, UINT64);
+    EFI_STATUS (EFIAPI *GetInfo)(struct _EFI_FILE_PROTOCOL*, EFI_GUID*, UINTN*, void*);
+    EFI_STATUS (EFIAPI *SetInfo)(struct _EFI_FILE_PROTOCOL*, EFI_GUID*, UINTN, void*);
+    EFI_STATUS (EFIAPI *Flush)(struct _EFI_FILE_PROTOCOL*);
+} EFI_FILE_PROTOCOL;
+
+typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
+    UINT64 Revision;
+    EFI_STATUS (EFIAPI *OpenVolume)(struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL*, EFI_FILE_PROTOCOL**);
+} EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     CHAR16 *FirmwareVendor; UINT32 FirmwareRevision;
