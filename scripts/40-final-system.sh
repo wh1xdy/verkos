@@ -888,13 +888,15 @@ reg nano "$NANO_VERSION"
 # verkbox applets take over from GNU coreutils for these tool names. Done last, so
 # the build above used GNU's tools while the shipped image runs VerkOS' own.
 if [ -x /usr/bin/verkbox ]; then
-    say "verkbox (VerkOS core utilities) — shipped alongside GNU"
-    # verkbox ships and is callable as `verkbox <applet> ...`, but does NOT yet
-    # shadow the GNU coreutils. Boot-verification showed that a wholesale takeover
-    # regresses common flags our applets don't implement yet (e.g. `ls -l`, `cat -n`)
-    # with "unknown option" errors. So takeover is per-tool and gated on each applet
-    # being flag-complete + differentially tested for ALL its common flags — not just
-    # the happy path. Until then GNU stays the default; verkbox is our growing base.
+    say "verkbox (VerkOS core utilities)"
+    # verkbox ships as our own userland. Per-tool takeover: a tool only shadows the
+    # GNU coreutils once its applet is flag-complete AND differentially byte-exact vs
+    # GNU across ALL its common flags (an earlier wholesale takeover regressed e.g.
+    # `ls -l` with "unknown option"). `ls` now qualifies — verified byte-exact for
+    # -l/-a/-A/-1/-R/-r/-t/-S/-d/-h/-F and --color — so it takes over. The other
+    # applets ship (callable as `verkbox <applet>`) but stay GNU-backed until each
+    # clears the same bar.
+    ln -sf verkbox /usr/bin/ls
     reg verkbox 0.1
 fi
 
