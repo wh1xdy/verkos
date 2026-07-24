@@ -51,7 +51,6 @@ fetch_one "openssh-${OPENSSH_VERSION}.tar.gz"         "$OPENSSH_SHA256"
 fetch_one "iproute2-${IPROUTE2_VERSION}.tar.xz"       "$IPROUTE2_SHA256"
 fetch_one "iputils-${IPUTILS_VERSION}.tar.gz"         "$IPUTILS_SHA256"
 fetch_one "curl-${CURL_VERSION}.tar.xz"               "$CURL_SHA256"
-fetch_one "less-${LESS_VERSION}.tar.gz"               "$LESS_SHA256"
 fetch_one "nano-${NANO_VERSION}.tar.xz"               "$NANO_SHA256"
 # Mozilla CA bundle (curl.se) — for HTTPS verification (vpk/curl). Mutable file,
 # so no pinned hash; it's a cert store, not built source.

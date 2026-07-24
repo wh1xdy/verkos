@@ -138,7 +138,6 @@ source_url() {
         iproute2-*)   echo "$URL_IPROUTE2/$pkg" ;;
         iputils-*)    echo "$URL_IPUTILS/${IPUTILS_VERSION}/$pkg" ;;
         curl-*)       echo "$URL_CURL/$pkg" ;;
-        less-*)       echo "$URL_LESS/$pkg" ;;
         nano-*)       echo "$URL_NANO/$pkg" ;;
         cacert.pem)   echo "$URL_CACERT/cacert.pem" ;;
         *)            die "no download URL known for '$pkg' (add it to source_url in common.sh)" ;;

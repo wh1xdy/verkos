@@ -615,16 +615,8 @@ fi
 # (pgrep/pkill/pidof/…) take over every name it provided, so building it is
 # dead weight. The name takeovers live near the end of this script.
 
-# less — pager
-if need less; then
-say "less ${LESS_VERSION}"
-d=$(unpack less-${LESS_VERSION}.tar.gz); cd "$d"
-./configure --prefix=/usr --sysconfdir=/etc
-make
-make install
-cd /sources
-mark less
-fi
+# less — removed: replaced by our own vpager (installed as less/more/pg via
+# netln, near the end of this script). Last non-native base tool retired.
 
 # nano — simple editor
 if need nano; then
@@ -1116,7 +1108,7 @@ reg dbus "$DBUS_VERSION";          reg systemd "$SYSTEMD_VERSION"
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
 reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
-reg less "$LESS_VERSION";          reg nano "$NANO_VERSION"
+reg nano "$NANO_VERSION"
 
 # verkbox applets take over from GNU coreutils for these tool names. Done last, so
 # the build above used GNU's tools while the shipped image runs VerkOS' own.

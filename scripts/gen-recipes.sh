@@ -57,11 +57,6 @@ emit openssl "openssl-${OPENSSL_VERSION}.tar.gz" OPENSSL_SHA256 "zlib" \
     make
     make DESTDIR="$DESTDIR" install_sw install_ssldirs'
 
-emit less "less-${LESS_VERSION}.tar.gz" LESS_SHA256 "ncurses" \
-'    ./configure --prefix=/usr --sysconfdir=/etc
-    make
-    make DESTDIR="$DESTDIR" install'
-
 emit nano "nano-${NANO_VERSION}.tar.xz" NANO_SHA256 "ncurses" \
 '    ./configure --prefix=/usr --sysconfdir=/etc --enable-utf8
     make

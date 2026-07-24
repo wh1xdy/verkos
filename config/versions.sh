@@ -60,7 +60,7 @@ IPROUTE2_VERSION="6.12.0";   IPROUTE2_SHA256="bbd141ef7b5d0127cc2152843ba61f274d
 IPUTILS_VERSION="20240905";  IPUTILS_SHA256="599cda8e3f5f7ce4c612456ab1101369da8f79aa0f83c8e877290a1c7bb56010"
 CURL_VERSION="8.11.0";       CURL_SHA256="db59cf0d671ca6e7f5c2c5ec177084a33a79e04c97e71cf183a5cdea235054eb"
 # procps-ng removed — replaced by our own vmon + vsys (see pkg/vmon, pkg/vsys)
-LESS_VERSION="668";          LESS_SHA256="2819f55564d86d542abbecafd82ff61e819a3eec967faa36cd3e68f1596a44b8"
+# less removed — replaced by our own vpager (see pkg/vpager)
 NANO_VERSION="8.2";          NANO_SHA256="d5ad07dd862facae03051c54c6535e54c7ed7407318783fcad1ad2d7076fffeb"
 
 # --- Init / system layer ---------------------------------------------------
@@ -125,6 +125,5 @@ URL_OPENSSH="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable"
 URL_IPROUTE2="https://www.kernel.org/pub/linux/utils/net/iproute2"
 URL_IPUTILS="https://github.com/iputils/iputils/releases/download"
 URL_CURL="https://curl.se/download"
-URL_LESS="https://www.greenwoodsoftware.com/less"
 URL_NANO="https://www.nano-editor.org/dist/v8"
 URL_CACERT="https://curl.se/ca"
