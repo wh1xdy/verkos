@@ -23,6 +23,9 @@ log "Build helpers:"
 need bison; need flex;  need gawk;  need m4;   need perl
 need python3; need makeinfo "texinfo"; need pkg-config
 need bc "bc";   need cpio "cpio"   # bc: kernel timeconst; cpio: initramfs
+# The kernel's objtool (x86 ORC/stack validation) compiles against <gelf.h>.
+if echo '#include <gelf.h>' | gcc -E - >/dev/null 2>&1; then ok "libelf (gelf.h)"
+else warn "MISSING: libelf headers (gelf.h)  (try installing: libelf-dev / elfutils-devel)"; missing=1; fi
 log "Fetch + hashing:"
 { command -v curl >/dev/null || command -v wget >/dev/null; } \
     && ok "curl/wget" || { warn "MISSING: curl or wget"; missing=1; }
