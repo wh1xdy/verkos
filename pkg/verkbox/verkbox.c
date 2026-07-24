@@ -114,15 +114,59 @@ static int a_echo(int c, char **v) {
 
 /* cat [files...] ; '-' or no args = stdin */
 static int a_cat(int c, char **v) {
-    int rc = 0;
-    if (c < 2) return slurp(stdin);
-    for (int i = 1; i < c; i++) {
-        if (!strcmp(v[i], "-")) { rc |= slurp(stdin); continue; }
-        FILE *f = fopen(v[i], "rb");
-        if (!f) { fprintf(stderr, "cat: %s: %s\n", v[i], strerror(errno)); rc = 1; continue; }
-        rc |= slurp(f);
-        fclose(f);
+    int o_num=0,o_nb=0,o_ends=0,o_tabs=0,o_sq=0,o_np=0, i=1;
+    for (; i<c; i++) {
+        if (v[i][0]!='-' || !v[i][1]) break;          /* operand, or "-" = stdin */
+        if (!strcmp(v[i],"--")) { i++; break; }
+        if (v[i][1]=='-') {
+            char *o=v[i]+2;
+            if(!strcmp(o,"number"))o_num=1; else if(!strcmp(o,"number-nonblank"))o_nb=1;
+            else if(!strcmp(o,"show-ends"))o_ends=1; else if(!strcmp(o,"show-tabs"))o_tabs=1;
+            else if(!strcmp(o,"squeeze-blank"))o_sq=1; else if(!strcmp(o,"show-nonprinting"))o_np=1;
+            else if(!strcmp(o,"show-all")){o_np=o_ends=o_tabs=1;}
+            else { fprintf(stderr,"cat: unrecognized option '%s'\n",v[i]); return 1; }
+            continue;
+        }
+        for (char *p=v[i]+1;*p;p++) switch(*p){
+            case 'n':o_num=1;break; case 'b':o_nb=1;break; case 'E':o_ends=1;break;
+            case 'T':o_tabs=1;break; case 's':o_sq=1;break; case 'v':o_np=1;break;
+            case 'A':o_np=o_ends=o_tabs=1;break; case 'e':o_np=o_ends=1;break;
+            case 't':o_np=o_tabs=1;break; case 'u':break;
+            default: fprintf(stderr,"cat: invalid option -- '%c'\n",*p); return 1;
+        }
     }
+    if (o_nb) o_num=0;                                 /* -b overrides -n */
+    int simple = !(o_num||o_nb||o_ends||o_tabs||o_sq||o_np);
+    int nfiles=c-i, rc=0, k=i;
+    long lineno=1; int bol=1, blank_run=0;             /* state spans all files (like GNU) */
+    do {
+        FILE *f; const char *name;
+        if (nfiles<=0) { f=stdin; name="-"; }
+        else if (!strcmp(v[k],"-")) { f=stdin; name="-"; }
+        else { name=v[k]; f=fopen(v[k],"rb"); if(!f){ fprintf(stderr,"cat: %s: %s\n",v[k],strerror(errno)); rc=1; k++; continue; } }
+        if (simple) { rc|=slurp(f); if(f!=stdin)fclose(f); k++; continue; }
+        int ch;
+        while ((ch=getc(f))!=EOF) {
+            if (bol) {
+                if (o_sq && ch=='\n') { if (++blank_run > 1) continue; }
+                else if (ch!='\n') blank_run=0;
+                if (o_num || (o_nb && ch!='\n')) printf("%6ld\t", lineno++);
+                bol=0;
+            }
+            if (ch=='\n') { if(o_ends) putchar('$'); putchar('\n'); bol=1; continue; }
+            if (ch=='\t') { if(o_tabs){putchar('^');putchar('I');} else putchar('\t'); continue; }
+            if (o_np) {
+                unsigned uc=(unsigned char)ch;
+                if (uc<32) { putchar('^'); putchar(uc+64); }
+                else if (uc==127) { putchar('^'); putchar('?'); }
+                else if (uc>=128) {
+                    putchar('M'); putchar('-'); unsigned d=uc-128;
+                    if (d<32){putchar('^');putchar(d+64);} else if(d==127){putchar('^');putchar('?');} else putchar(d);
+                } else putchar(ch);
+            } else putchar(ch);
+        }
+        (void)name; if (f!=stdin) fclose(f); k++;
+    } while (nfiles>0 && k<c);
     return rc;
 }
 
