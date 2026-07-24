@@ -245,6 +245,12 @@ static int untar(const char *tarfile, const char *dest, int strip) {
         if (fread(hdr,1,512,f)!=512) break;
         int empty=1; for(int i=0;i<512;i++) if(hdr[i]){empty=0;break;}
         if (empty) break;                       /* end of archive */
+        /* verify the ustar header checksum (the 8 chksum bytes counted as spaces).
+         * Accept the unsigned or signed sum for historical compatibility; a bad
+         * checksum means a corrupt/garbage header, not a package we should extract. */
+        { long want=octal((char*)hdr+148,8), us=0, sg=0;
+          for (int i=0;i<512;i++){ int cc=(i>=148&&i<156)?' ':hdr[i]; us+=(unsigned char)cc; sg+=(signed char)cc; }
+          if (want!=us && want!=sg){ fprintf(stderr,"vpk: corrupt tar header (bad checksum)\n"); ret=-1; goto out; } }
         char name[101]; memcpy(name,hdr,100); name[100]=0;
         char linkname[101]; memcpy(linkname,hdr+157,100); linkname[100]=0;
         long size=octal((char*)hdr+124,12);
@@ -427,7 +433,10 @@ static int recipe_load(const char *name, recipe_t *r) {
 
 /* ------------------------------------------------------------------- db --- */
 static int is_installed(const char *name) {
-    char p[512]; snprintf(p,sizeof p,"%s/%s",DB_DIR,name); struct stat st;
+    /* Check the meta file (written LAST by record_and_merge), not just the db dir:
+     * an install that died mid-way leaves a bare dir, which must NOT read as
+     * installed or it would be skipped forever and never completed. */
+    char p[512]; snprintf(p,sizeof p,"%s/%s/meta",DB_DIR,name); struct stat st;
     return stat(p,&st)==0;
 }
 /* read a "key=value" field from a package's db meta file (empty if absent) */
@@ -566,7 +575,15 @@ static void build_into_dest(const recipe_t *r, char *destout, size_t dn) {
     /* save a binary package for fast reinstall next time */
     char pkgdir[512]; snprintf(pkgdir,sizeof pkgdir,"%s/pkg",CACHE_DIR); mkpath(pkgdir,0755);
     char vpk[600]; snprintf(vpk,sizeof vpk,"%s/%s-%s.vpk",pkgdir,r->name,r->version);
-    if (make_binpkg(dest,vpk)==0) info("cached binary package %s-%s.vpk",r->name,r->version);
+    if (make_binpkg(dest,vpk)==0) {
+        info("cached binary package %s-%s.vpk",r->name,r->version);
+        /* write a sha256 sidecar so a later install-from-cache can detect a
+         * corrupted/tampered .vpk before unpacking it as root. */
+        char sum[65]; if (sha256_file(vpk,sum)==0) {
+            char sc[680]; snprintf(sc,sizeof sc,"%s.sha256",vpk);
+            FILE *s=fopen(sc,"w"); if(s){ fprintf(s,"%s\n",sum); fclose(s); }
+        }
+    }
     snprintf(destout,dn,"%s",dest);
 }
 /* install by building from source (then merge + reclaim scratch) */
@@ -580,6 +597,19 @@ static void install_one(const recipe_t *r) {
 /* install directly from a prebuilt .vpk binary package (no building) */
 static void install_from_binpkg(const recipe_t *r, const char *vpk) {
     info("installing %s %s (binary package)", r->name, r->version);
+    /* verify the .vpk against its sha256 sidecar (written when it was built) so a
+     * corrupted cache entry can't be unpacked into / as root. */
+    char sc[680]; snprintf(sc,sizeof sc,"%s.sha256",vpk);
+    FILE *s=fopen(sc,"r");
+    if (s) {
+        char want[128]=""; if (fgets(want,sizeof want,s)) want[strcspn(want,"\r\n")]=0;
+        fclose(s);
+        char got[65];
+        if (want[0] && sha256_file(vpk,got)==0) {
+            if (strcmp(want,got)) die("binary package %s failed integrity check (sha256 mismatch)",r->name);
+            info("verified .vpk sha256");
+        }
+    } else fprintf(stderr,"vpk: WARNING: no sha256 sidecar for cached %s — integrity NOT verified\n",r->name);
     char work[512]; snprintf(work,sizeof work,"%s/%s",BUILD_DIR,r->name);
     rmrf(work); mkpath(work,0755);
     char tar[1024]; snprintf(tar,sizeof tar,"%s/bin.tar",work);
@@ -614,10 +644,36 @@ static void cmd_build(int argc, char **argv) {
         info("built binary package %s-%s.vpk", r.name, r.version);
     }
 }
+static int vpk_strcmp_ptr(const void *a, const void *b){ return strcmp(*(char*const*)a,*(char*const*)b); }
+/* Collect every regular-file path owned by an installed package OTHER than `self`,
+ * sorted, so removal can spare files that another package also owns. Caller frees. */
+static char **owned_by_others(const char *self, int *count) {
+    char **arr=NULL; int n=0, cap=0;
+    DIR *d=opendir(DB_DIR);
+    if (d) { struct dirent *e;
+        while ((e=readdir(d))) {
+            if (e->d_name[0]=='.' || !strcmp(e->d_name,self)) continue;
+            char fp[600]; snprintf(fp,sizeof fp,"%s/%s/files",DB_DIR,e->d_name);
+            FILE *f=fopen(fp,"r"); if(!f) continue;
+            char line[4096];
+            while (fgets(line,sizeof line,f)) {
+                if (line[0]!='f' || line[1]!=' ') continue;
+                char *rel=line+2; rel[strcspn(rel,"\r\n")]=0;
+                if (n==cap){ cap=cap?cap*2:128; arr=realloc(arr,cap*sizeof*arr); }
+                arr[n++]=xstrdup(rel);
+            }
+            fclose(f);
+        }
+        closedir(d);
+    }
+    if (n>1) qsort(arr,n,sizeof*arr,vpk_strcmp_ptr);
+    *count=n; return arr;
+}
 static void cmd_remove(int argc, char **argv) {
     for (int i=0;i<argc;i++) {
         if (!is_installed(argv[i])) { fprintf(stderr,"vpk: %s not installed\n",argv[i]); continue; }
         if (is_base(argv[i])) { fprintf(stderr,"vpk: %s is a base-system package, refusing to remove\n",argv[i]); continue; }
+        int oc=0; char **others=owned_by_others(argv[i],&oc);
         char files[512]; snprintf(files,sizeof files,"%s/%s/files",DB_DIR,argv[i]);
         FILE *f=fopen(files,"r");
         if (f) {
@@ -628,12 +684,16 @@ static void cmd_remove(int argc, char **argv) {
                 char t=line[0]; char *rel=line+2; size_t l=strlen(rel);
                 while(l&&(rel[l-1]=='\n'||rel[l-1]=='\r'))rel[--l]=0;
                 char p[4096]; snprintf(p,sizeof p,"/%s",rel);
-                if (t=='f') unlink(p);
+                if (t=='f') {
+                    char *relp=rel;   /* keep files another installed package owns */
+                    if (!(oc && bsearch(&relp,others,oc,sizeof(char*),vpk_strcmp_ptr))) unlink(p);
+                }
                 else if (t=='d' && nd<4096) snprintf(dirs[nd++],256,"%s",p);
             }
             for (int k=nd-1;k>=0;k--) rmdir(dirs[k]);   /* rmdir empties, deepest first */
             fclose(f);
         }
+        for (int k=0;k<oc;k++) free(others[k]); free(others);
         char dbdir[512]; snprintf(dbdir,sizeof dbdir,"%s/%s",DB_DIR,argv[i]);
         char cmd[600]; snprintf(cmd,sizeof cmd,"%s/files",dbdir); unlink(cmd);
         snprintf(cmd,sizeof cmd,"%s/meta",dbdir); unlink(cmd);
