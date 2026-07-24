@@ -153,6 +153,11 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vnetcat/vnetcat.c" "$ROOTFS/sources/vnetcat.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vmon/vmon.c" "$ROOTFS/sources/vmon.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vget/vget.c" "$ROOTFS/sources/vget.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/ved/ved.c" "$ROOTFS/sources/ved.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vwhois/vwhois.c" "$ROOTFS/sources/vwhois.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vsed/vsed.c" "$ROOTFS/sources/vsed.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vfind/vfind.c" "$ROOTFS/sources/vfind.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vxargs/vxargs.c" "$ROOTFS/sources/vxargs.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -734,6 +739,35 @@ cd /sources
 mark vget
 fi
 
+# 12m-q. ved (vi editor), vwhois, vsed, vfind, vxargs. vsed is a subset that
+# can't safely replace GNU sed for autoconf builds, so it ships as `vsed` only;
+# vfind/vxargs are build-verified and do take over find/xargs (below).
+if need ved; then
+say "ved (VerkOS vi)"
+gcc -O2 -o /usr/bin/ved /sources/ved.c
+cd /sources; mark ved
+fi
+if need vwhois; then
+say "vwhois (VerkOS whois)"
+gcc -O2 -o /usr/bin/vwhois /sources/vwhois.c
+cd /sources; mark vwhois
+fi
+if need vsed; then
+say "vsed (VerkOS sed)"
+gcc -O2 -o /usr/bin/vsed /sources/vsed.c
+cd /sources; mark vsed
+fi
+if need vfind; then
+say "vfind (VerkOS find)"
+gcc -O2 -o /usr/bin/vfind /sources/vfind.c
+cd /sources; mark vfind
+fi
+if need vxargs; then
+say "vxargs (VerkOS xargs)"
+gcc -O2 -o /usr/bin/vxargs /sources/vxargs.c
+cd /sources; mark vxargs
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -1043,6 +1077,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1; reg vip 0.1; reg vdig 0.1
     reg vping 0.1; reg vtrace 0.1; reg vss 0.1
     reg vnetcat 0.1; reg vmon 0.1; reg vget 0.1
+    reg ved 0.1; reg vwhois 0.1; reg vsed 0.1; reg vfind 0.1; reg vxargs 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1069,6 +1104,14 @@ if [ -x /usr/bin/vip ]; then
     netln wget vget
     # vmon is multi-call (dispatches on argv[0]) — link each monitor name to it.
     for m in free uptime vmstat ps top; do netln "$m" vmon; done
+    # vi/vim (no editor but nano before), whois (was missing), and find/xargs
+    # (build-verified). NOT sed: our vsed is a subset that breaks autoconf, so
+    # GNU sed stays and ours is available as `vsed`.
+    netln vi ved
+    netln vim ved
+    netln whois vwhois
+    netln find vfind
+    netln xargs vxargs
 fi
 
 echo
