@@ -871,15 +871,13 @@ reg nano "$NANO_VERSION"
 # verkbox applets take over from GNU coreutils for these tool names. Done last, so
 # the build above used GNU's tools while the shipped image runs VerkOS' own.
 if [ -x /usr/bin/verkbox ]; then
-    say "verkbox applets take over from GNU coreutils"
-    # Text/query tools take over now (byte-exact vs GNU in the differential tests).
-    # The file-MUTATING applets (rm cp mv ln mkdir rmdir touch) ship in verkbox and
-    # are callable as `verkbox rm ...`, but don't yet shadow GNU's — they have the
-    # widest edge-case surface, so we widen the takeover once it's boot-verified.
-    for a in true false echo cat pwd whoami nproc yes basename dirname head tail \
-             wc seq cut rev uniq ls; do
-        ln -sf verkbox /usr/bin/"$a"
-    done
+    say "verkbox (VerkOS core utilities) — shipped alongside GNU"
+    # verkbox ships and is callable as `verkbox <applet> ...`, but does NOT yet
+    # shadow the GNU coreutils. Boot-verification showed that a wholesale takeover
+    # regresses common flags our applets don't implement yet (e.g. `ls -l`, `cat -n`)
+    # with "unknown option" errors. So takeover is per-tool and gated on each applet
+    # being flag-complete + differentially tested for ALL its common flags — not just
+    # the happy path. Until then GNU stays the default; verkbox is our growing base.
     reg verkbox 0.1
 fi
 
