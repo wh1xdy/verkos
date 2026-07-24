@@ -395,47 +395,46 @@ static char ls_typechar(const struct stat *st) {
 /* print an already-sorted set of entries. show_total: emit the "total N" line
  * (directory listings do; a group of file operands does not). */
 static void ls_print(struct ls_ent *e, int n, int show_total) {
-    char ino[n>0?n:1][24]; int wi=1;
-    if (ls_inode) for (int i=0;i<n;i++) {
-        snprintf(ino[i],sizeof ino[i],"%lu",(unsigned long)e[i].st.st_ino);
-        int l=(int)strlen(ino[i]); if(l>wi) wi=l;
-    }
-    if (ls_lng) {
-        char modes[n>0?n:1][11]; char nlink[n>0?n:1][16];
-        char sizes[n>0?n:1][32]; char dates[n>0?n:1][40];
-        char *own[n>0?n:1]; char *grp[n>0?n:1];
-        int wn=1, wo=1, wg=1, ws=1; long long total=0;
-        for (int i=0;i<n;i++) {
-            ls_modestr(e[i].st.st_mode, modes[i]);
-            snprintf(nlink[i],sizeof nlink[i],"%lu",(unsigned long)e[i].st.st_nlink);
-            own[i]=strdup(ls_uname(e[i].st.st_uid)); grp[i]=strdup(ls_gname(e[i].st.st_gid));
-            if (ls_human) ls_humansize((long long)e[i].st.st_size, sizes[i]);
-            else snprintf(sizes[i],sizeof sizes[i],"%lld",(long long)e[i].st.st_size);
-            ls_datestr(e[i].st.st_mtime, dates[i]);
-            total += (long long)e[i].st.st_blocks;
+    /* Two passes with O(1) stack (no per-entry VLAs — those overflow the stack on
+     * a directory with enough entries, and ls is attacker-facing since anyone can
+     * create files). Pass 1: column widths + block total. Pass 2: format each row
+     * into small fixed buffers, resolving owner/group on the fly. */
+    int wi=1, wn=1, wo=1, wg=1, ws=1; long long total=0;
+    char b[64];
+    for (int i=0;i<n;i++) {
+        if (ls_inode) { int l=snprintf(b,sizeof b,"%lu",(unsigned long)e[i].st.st_ino); if(l>wi)wi=l; }
+        if (ls_lng) {
             int l;
-            if ((l=(int)strlen(nlink[i]))>wn) wn=l;
-            if ((l=(int)strlen(own[i]))>wo) wo=l;
-            if ((l=(int)strlen(grp[i]))>wg) wg=l;
-            if ((l=(int)strlen(sizes[i]))>ws) ws=l;
+            l=snprintf(b,sizeof b,"%lu",(unsigned long)e[i].st.st_nlink); if(l>wn)wn=l;
+            l=(int)strlen(ls_uname(e[i].st.st_uid)); if(l>wo)wo=l;
+            l=(int)strlen(ls_gname(e[i].st.st_gid)); if(l>wg)wg=l;
+            if (ls_human) ls_humansize((long long)e[i].st.st_size, b);
+            else snprintf(b,sizeof b,"%lld",(long long)e[i].st.st_size);
+            l=(int)strlen(b); if(l>ws)ws=l;
+            total += (long long)e[i].st.st_blocks;
         }
-        if (show_total) {
-            if (ls_human) { char tb[32]; ls_humansize((total/2)*1024, tb); printf("total %s\n", tb); }
-            else printf("total %lld\n", total/2);
-        }
-        for (int i=0;i<n;i++) {
-            if (e[i].skip) continue;   /* dir operand: counted for width, not printed here */
-            if (ls_inode) printf("%*s ", wi, ino[i]);
-            printf("%s %*s %-*s %-*s %*s %s %s", modes[i], wn,nlink[i], wo,own[i], wg,grp[i], ws,sizes[i], dates[i], e[i].name);
+    }
+    if (ls_lng && show_total) {
+        if (ls_human) { char tb[32]; ls_humansize((total/2)*1024, tb); printf("total %s\n", tb); }
+        else printf("total %lld\n", total/2);
+    }
+    for (int i=0;i<n;i++) {
+        if (e[i].skip) continue;   /* dir operand: counted for width, not printed */
+        if (ls_inode) printf("%*lu ", wi, (unsigned long)e[i].st.st_ino);
+        if (ls_lng) {
+            char modes[11], dates[40], sizes[32];
+            ls_modestr(e[i].st.st_mode, modes);
+            if (ls_human) ls_humansize((long long)e[i].st.st_size, sizes);
+            else snprintf(sizes,sizeof sizes,"%lld",(long long)e[i].st.st_size);
+            ls_datestr(e[i].st.st_mtime, dates);
+            /* owner then group: ls_uname/ls_gname use distinct static buffers, so
+             * both stay valid across one printf. */
+            printf("%s %*lu %-*s ", modes, wn,(unsigned long)e[i].st.st_nlink, wo, ls_uname(e[i].st.st_uid));
+            printf("%-*s %*s %s %s", wg, ls_gname(e[i].st.st_gid), ws, sizes, dates, e[i].name);
             if (e[i].link) printf(" -> %s", e[i].link);
             else if (ls_class) { char c=ls_typechar(&e[i].st); if(c&&c!='@') putchar(c); }
             putchar('\n');
-        }
-        for (int i=0;i<n;i++){ free(own[i]); free(grp[i]); }
-    } else {
-        for (int i=0;i<n;i++) {
-            if (e[i].skip) continue;
-            if (ls_inode) printf("%*s ", wi, ino[i]);
+        } else {
             fputs(e[i].name, stdout);
             if (ls_class) { char c=ls_typechar(&e[i].st); if(c) putchar(c); }
             putchar('\n');
@@ -456,7 +455,13 @@ static int ls_dir(const char *path, int print_header, int first) {
             else if (ls_almost) { if (!strcmp(nm,".")||!strcmp(nm,"..")) continue; }
             else continue;
         }
-        if (n==cap) { cap=cap?cap*2:32; e=realloc(e,cap*sizeof *e); }
+        if (n==cap) {
+            int ncap = cap ? cap*2 : 32;
+            struct ls_ent *ne = realloc(e, (size_t)ncap*sizeof *e);
+            if (!ne) { for(int j=0;j<n;j++){free(e[j].name);free(e[j].link);} free(e); closedir(d);
+                       fprintf(stderr,"ls: out of memory\n"); return 2; }
+            e = ne; cap = ncap;
+        }
         char full[8192]; snprintf(full,sizeof full,"%s/%s",path,nm);
         e[n].name = strdup(nm); e[n].link = NULL; e[n].skip = 0;
         if (lstat(full,&e[n].st)!=0) memset(&e[n].st,0,sizeof e[n].st);
