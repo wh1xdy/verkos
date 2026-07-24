@@ -147,12 +147,6 @@ static EFI_HANDLE publish_initrd(void) {
     st = BS->InstallProtocolInterface(&h, &lf2_guid, 0, &initrd_lf2);
     if (EFI_ERROR(st)) { fail(L"InstallProtocolInterface(LoadFile2)", st); return 0; }
 
-    /* self-test: resolve it the same way the kernel's EFI stub will */
-    void *probe = &initrd_path;
-    EFI_HANDLE found = 0;
-    st = BS->LocateDevicePath(&lf2_guid, &probe, &found);
-    if (EFI_ERROR(st)) fail(L"LocateDevicePath(self-test)", st);
-    else if (found != h) print(L"  [!!] LocateDevicePath found a different handle\r\n");
     return h;
 }
 
