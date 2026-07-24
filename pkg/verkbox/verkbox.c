@@ -1330,7 +1330,8 @@ static int mkdir_one(char *buf, mode_t mode, int parents)
 
 static int a_mkdir(int argc, char **argv)
 {
-    int parents = 0;
+    int parents = 0, mode_set = 0;
+    long mode = 0777;
     int i = 1;
 
     for (; i < argc; i++) {
@@ -1339,12 +1340,14 @@ static int a_mkdir(int argc, char **argv)
             break;
         if (strcmp(arg, "--") == 0) { i++; break; }
         if (strcmp(arg, "--parents") == 0) { parents = 1; continue; }
+        if (!strcmp(arg, "-m") && i + 1 < argc) { mode = strtol(argv[++i], NULL, 8); mode_set = 1; continue; }
+        if (arg[1] == 'm' && arg[2]) { mode = strtol(arg + 2, NULL, 8); mode_set = 1; continue; }  /* -mMODE */
+        if (!strncmp(arg, "--mode=", 7)) { mode = strtol(arg + 7, NULL, 8); mode_set = 1; continue; }
         for (char *c = arg + 1; *c; c++) {
             if (*c == 'p') {
                 parents = 1;
             } else {
                 fprintf(stderr, "mkdir: invalid option -- '%c'\n", *c);
-                fprintf(stderr, "Try 'mkdir --help' for more information.\n");
                 return 1;
             }
         }
@@ -1357,8 +1360,10 @@ static int a_mkdir(int argc, char **argv)
 
     int rc = 0;
     for (; i < argc; i++) {
-        if (mkdir_one(argv[i], 0777, parents) != 0)
+        if (mkdir_one(argv[i], mode_set ? (mode_t)mode : 0777, parents) != 0)
             rc = 1;
+        else if (mode_set)
+            chmod(argv[i], (mode_t)mode);      /* apply the exact -m mode, bypassing umask */
     }
     return rc;
 }
@@ -1596,6 +1601,8 @@ static char *cp_basedup(const char *path) {
     return b;
 }
 
+/* cp flags (-a implies -dpR): preserve attrs, don't dereference symlinks, force. */
+static int cp_preserve, cp_noderef, cp_force;
 static int cp_copy_reg(const char *src, const char *dst, mode_t mode) {
     int in, out, rc = 0;
     char buf[65536];
@@ -1606,6 +1613,10 @@ static int cp_copy_reg(const char *src, const char *dst, mode_t mode) {
         return 1;
     }
     out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
+    if (out < 0 && cp_force && (errno == EACCES || errno == EEXIST)) {
+        unlink(dst);                                    /* -f: replace an unwritable dest */
+        out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
+    }
     if (out < 0) {
         fprintf(stderr, "cp: cannot create regular file '%s': %s\n", dst, strerror(errno));
         close(in);
@@ -1692,24 +1703,49 @@ static int cp_dir(const char *src, const char *dst, mode_t mode, int recursive) 
     return rc;
 }
 
+/* -p/-a: copy src's timestamps + ownership onto dst (ownership is best-effort). */
+static void cp_keep(const char *dst, const struct stat *st) {
+    if (!cp_preserve) return;
+    struct timespec ts[2] = { st->st_atim, st->st_mtim };
+    utimensat(AT_FDCWD, dst, ts, AT_SYMLINK_NOFOLLOW);
+    if (chown(dst, st->st_uid, st->st_gid) != 0) { /* needs privilege; ignore */ }
+}
 static int cp_one(const char *src, const char *dst, int recursive) {
     struct stat st, dstat;
-    if (stat(src, &st) != 0) {
+    if (lstat(src, &st) != 0) {
         fprintf(stderr, "cp: cannot stat '%s': %s\n", src, strerror(errno));
         return 1;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        if (cp_noderef) {                            /* -d/-a/-P: copy the link itself */
+            char t[4096]; ssize_t k = readlink(src, t, sizeof t - 1);
+            if (k < 0) { fprintf(stderr, "cp: cannot read symlink '%s': %s\n", src, strerror(errno)); return 1; }
+            t[k] = 0; if (cp_force) unlink(dst);
+            if (symlink(t, dst) != 0) { fprintf(stderr, "cp: cannot create symlink '%s': %s\n", dst, strerror(errno)); return 1; }
+            if (cp_preserve) { struct timespec ts[2] = { st.st_atim, st.st_mtim };
+                utimensat(AT_FDCWD, dst, ts, AT_SYMLINK_NOFOLLOW); (void)lchown(dst, st.st_uid, st.st_gid); }
+            return 0;
+        }
+        if (stat(src, &st) != 0) {                   /* default: follow it */
+            fprintf(stderr, "cp: cannot stat '%s': %s\n", src, strerror(errno)); return 1;
+        }
     }
     if (S_ISDIR(st.st_mode)) {
         if (!recursive) {
             fprintf(stderr, "cp: -r not specified; omitting directory '%s'\n", src);
             return 1;
         }
-        return cp_dir(src, dst, st.st_mode, recursive);
+        int r = cp_dir(src, dst, st.st_mode, recursive);
+        cp_keep(dst, &st);
+        return r;
     }
     if (stat(dst, &dstat) == 0 && dstat.st_dev == st.st_dev && dstat.st_ino == st.st_ino) {
         fprintf(stderr, "cp: '%s' and '%s' are the same file\n", src, dst);
         return 1;
     }
-    return cp_copy_reg(src, dst, st.st_mode);
+    int r = cp_copy_reg(src, dst, st.st_mode);
+    if (r == 0) cp_keep(dst, &st);
+    return r;
 }
 
 static int a_cp(int argc, char **argv) {
@@ -1722,20 +1758,34 @@ static int a_cp(int argc, char **argv) {
         fprintf(stderr, "cp: memory exhausted\n");
         return 1;
     }
+    cp_preserve = cp_noderef = cp_force = 0;
     for (i = 1; i < argc; i++) {
         char *arg = argv[i];
         if (!endopts && arg[0] == '-' && arg[1] != '\0') {
-            int j;
             if (strcmp(arg, "--") == 0) { endopts = 1; continue; }
-            if (strcmp(arg, "--recursive") == 0) { recursive = 1; continue; }
-            for (j = 1; arg[j]; j++) {
-                if (arg[j] == 'r' || arg[j] == 'R') {
-                    recursive = 1;
-                } else {
+            if (arg[1] == '-') {                                  /* long options */
+                char *o = arg + 2;
+                if      (!strcmp(o, "recursive")) recursive = 1;
+                else if (!strcmp(o, "archive"))   recursive = cp_preserve = cp_noderef = 1;
+                else if (!strcmp(o, "no-dereference")) cp_noderef = 1;
+                else if (!strcmp(o, "dereference"))    cp_noderef = 0;
+                else if (!strcmp(o, "force"))     cp_force = 1;
+                else if (!strncmp(o, "preserve", 8)) cp_preserve = 1;   /* --preserve[=list] */
+                else if (!strcmp(o, "verbose") || !strcmp(o, "interactive")) { /* accept, ignore */ }
+                else { fprintf(stderr, "cp: unrecognized option '%s'\n", arg); free(ops); return 1; }
+                continue;
+            }
+            for (int j = 1; arg[j]; j++) switch (arg[j]) {
+                case 'r': case 'R': recursive = 1; break;
+                case 'a': recursive = cp_preserve = cp_noderef = 1; break;  /* -a == -dpR */
+                case 'p': cp_preserve = 1; break;
+                case 'd': case 'P': cp_noderef = 1; break;
+                case 'L': cp_noderef = 0; break;
+                case 'f': cp_force = 1; break;
+                case 'v': case 'i': case 'n': break;               /* accept, no prompt/verbose */
+                default:
                     fprintf(stderr, "cp: invalid option -- '%c'\n", arg[j]);
-                    free(ops);
-                    return 1;
-                }
+                    free(ops); return 1;
             }
         } else {
             ops[nops++] = arg;

@@ -908,14 +908,12 @@ if [ -x /usr/bin/verkbox ]; then
     # applets ship (callable as `verkbox <applet>`) but stay GNU-backed until each
     # clears the same bar: flag-complete AND differentially byte-exact vs GNU across
     # all common flags (incl. the ones autotools/configure use, like `ls -i`).
-    # The text/query applets take over (all flag-complete + differentially
-    # byte-exact vs GNU, and verified build-safe: hello+tree still build from
-    # source with these shadowing GNU). The file-MUTATING ops (rm cp mv ln mkdir
-    # rmdir touch) and chmod stay GNU-backed — builds lean on them hardest
-    # (cp -a, install, ...) so they wait until each is proven equally safe.
-    for t in ls cat head tail wc grep sort tr cut rev uniq nl tac tee fold comm \
-             paste seq basename dirname pwd whoami nproc yes true false echo \
-             printf uname realpath env sleep du; do
+    # Every applet verkbox ships is flag-complete, differentially byte-exact vs
+    # GNU, AND verified build-safe: hello + tree build AND install from source with
+    # verkbox shadowing GNU (incl. the cp -a / mkdir -p that `make install` leans
+    # on). So the whole set takes over /usr/bin. GNU's coreutils binaries remain
+    # installed; only these names are symlinked to verkbox.
+    for t in $(/usr/bin/verkbox --list | sed -n 's/^applets: *//p'); do
         ln -sf verkbox /usr/bin/"$t"
     done
     reg verkbox 0.1; reg vgetty 0.1
