@@ -95,13 +95,13 @@ logo_e() { cat <<'EOF'
 EOF
 }
 logo_f() { cat <<'EOF'
- __         __
- \ \       / /
-  \ \     / /
-   \ \   / /
-    \ \ / /
-     \ V /
-      \_/
+██╗       ██╗
+╚██╗     ██╔╝
+ ╚██╗   ██╔╝
+  ╚██╗ ██╔╝
+   ╚████╔╝
+    ╚██╔╝
+     ╚═╝
   V E R K O S
 EOF
 }
@@ -130,10 +130,10 @@ case "$logo" in
     c) art=$(logo_c); LOGOW=22 ;;
     d) art=$(logo_d); LOGOW=22 ;;
     e) art=$(logo_e); LOGOW=18 ;;
-    f) art=$(logo_f); LOGOW=17 ;;
+    f) art=$(logo_f); LOGOW=15 ;;
     g) art=$(logo_g); LOGOW=24 ;;
     s) art=$(logo_s); LOGOW=14 ;;
-    *) art=$(logo_f); LOGOW=17 ;;
+    *) art=$(logo_f); LOGOW=15 ;;
 esac
 
 # --- info lines (one per positional param) ---------------------------------
@@ -167,15 +167,20 @@ printf '%s\n' "$art" | { while IFS= read -r line; do
     # pick the li-th colour word (cycles)
     lc=$(printf '%s\n' $colors | sed -n "$(( (li - 1) % 9 + 1 ))p")
     eval "right=\${$li:-}"
-    # pad the plain logo line to LOGOW, then colour it, then the info column
-    printf "%b%-${LOGOW}s%b%b\n" "$lc" "$line" "$RST" "$right"
+    # display width = number of codepoints (every logo glyph, incl. the block
+    # V's box-drawing, is one column): strip UTF-8 continuation bytes 0x80-0xBF
+    # and count the rest. Locale-independent, so it works on a C-locale VerkOS.
+    w=$(printf '%s' "$line" | tr -d '\200-\277' | wc -c)
+    pad=$(( LOGOW - w )); [ "$pad" -lt 0 ] && pad=0
+    # colour the logo line, pad to the info column, then the info line
+    printf "%b%s%*s%b%b\n" "$lc" "$line" "$pad" "" "$RST" "$right"
 done
 # any info lines past the logo height
 la=$(printf '%s\n' "$art" | wc -l)
 i=$((la + 1))
 while [ "$i" -le "$n" ]; do
     eval "right=\${$i:-}"
-    printf "%-${LOGOW}s%b\n" "" "$right"
+    printf "%*s%b\n" "$LOGOW" "" "$right"
     i=$((i + 1))
 done
 }
