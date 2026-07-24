@@ -1,6 +1,11 @@
 /* vboot.lds — linker script for a from-scratch aarch64 UEFI application.
- * Produces a PIE shared object (R_AARCH64_RELATIVE relocs) that objcopy then
- * converts to a PE/COFF efi-app. Keep .rela so objcopy can emit PE .reloc. */
+ * Produces a PIE object that objcopy converts to a PE/COFF efi-app.
+ *
+ * KEY: the first section must start at RVA 0x1000 (SectionAlignment), leaving
+ * the opening page for the PE/COFF headers. A strict EDK2/AAVMF loader rejects
+ * an image whose .text sits at RVA 0 (overlapping the headers) with
+ * EFI_UNSUPPORTED — this is exactly how the distro's systemd-bootaa64.efi is
+ * laid out (.text @ 0x1000, SizeOfHeaders=4096). */
 OUTPUT_FORMAT("elf64-littleaarch64")
 OUTPUT_ARCH(aarch64)
 ENTRY(efi_main)
@@ -8,34 +13,20 @@ SECTIONS
 {
   . = 0;
   ImageBase = .;
-  .text : ALIGN(4096) {
+  . = 0x1000;                    /* reserve the first page for PE/COFF headers */
+  .text : {
     *(.text.head)
-    *(.text)
-    *(.text.*)
-    *(.gnu.linkonce.t.*)
+    *(.text) *(.text.*) *(.gnu.linkonce.t.*)
+    *(.rodata) *(.rodata.*) *(.gnu.linkonce.r.*)   /* fold rodata into R+X text */
   }
-  .rodata : ALIGN(4096) {
-    *(.rodata)
-    *(.rodata.*)
-    *(.gnu.linkonce.r.*)
+  . = ALIGN(0x1000);
+  .data : {
+    *(.sdata) *(.data) *(.data.*) *(.gnu.linkonce.d.*)
+    *(.got.plt) *(.got) *(.dynamic)
+    *(.rela) *(.rela.*)
+    *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash)
   }
-  .data : ALIGN(4096) {
-    *(.sdata)
-    *(.data)
-    *(.data.*)
-    *(.gnu.linkonce.d.*)
-    *(.got.plt)
-    *(.got)
-    *(.dynamic)
-  }
-  .rela : ALIGN(8) {
-    *(.rela.text*) *(.rela.data*) *(.rela.rodata*)
-    *(.rela.got) *(.rela.dyn) *(.rela)
-  }
-  .dynsym : ALIGN(8) { *(.dynsym) }
-  .dynstr : ALIGN(8) { *(.dynstr) }
-  .hash   : ALIGN(8) { *(.hash) *(.gnu.hash) }
-  . = ALIGN(4096);
+  . = ALIGN(0x1000);
   .reloc : { *(.reloc) }
   /DISCARD/ : {
     *(.rel.reloc) *(.eh_frame) *(.note.*) *(.comment) *(.interp)

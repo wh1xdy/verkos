@@ -3,14 +3,18 @@
 # in a bootable GPT+ESP disk for QEMU/AAVMF testing. No gnu-efi: plain gcc +
 # binutils (objcopy --target efi-app-aarch64), which VerkOS' own toolchain has.
 #
-# STATUS (2026-07-24): the EFI app COMPILES to a valid PE32+ EFI application
-# (MZ/PE headers correct, subsystem=10, machine=aarch64, 16 data dirs, ZERO
-# relocations — fully PC-relative), the AAVMF firmware boots, and the GPT+ESP is
-# recognized (FS0 maps, startup.nsh finds \EFI\BOOT\BOOTAA64.EFI). REMAINING:
-# EDK2's LoadImage returns EFI_UNSUPPORTED for our objcopy-produced PE despite a
-# textbook-valid header. Next step: diff against a gnu-efi crt0-built PE to find
-# the discrepancy (likely a section-flag / dummy-.reloc detail EDK2 insists on),
-# then bake the fix into the linker script so no gnu-efi dependency is needed.
+# STATUS (2026-07-24): WORKING. AAVMF auto-boots \EFI\BOOT\BOOTAA64.EFI and
+# vboot prints its banner. Two things were needed to satisfy the strict EDK2
+# loader, both handled below:
+#   1. the first section must start at RVA 0x1000 with page-sized headers
+#      (--file-alignment/--section-alignment 0x1000 + `. = 0x1000` in vboot.lds);
+#      with .text at RVA 0 (overlapping the headers) LoadImage says UNSUPPORTED.
+#   2. IMAGE_FILE_RELOCS_STRIPPED must be cleared (pe-fixup.py) — objcopy sets it
+#      because there is no .reloc, but with ImageBase=0 that means "load at 0,
+#      never move me", which the firmware cannot do. vboot is -fpic with zero
+#      relocations, so it runs at any address.
+# Verified by comparing against the distro's systemd-bootaa64.efi, which has the
+# identical layout (.text @ 0x1000, SizeOfHeaders=4096, no .reloc, flag clear).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-/tmp/vboot-out}"; mkdir -p "$OUT"
@@ -21,9 +25,13 @@ gcc -ffreestanding -fno-stack-protector -fshort-wchar -mgeneral-regs-only \
 ld -nostdlib -znocombreloc -shared -Bsymbolic -T "$HERE/vboot.lds" \
     "$OUT/vboot.o" -o "$OUT/vboot.so"
 
-# 2. convert the ELF to a PE/COFF EFI application (aarch64 uses AAPCS, no ms_abi)
-objcopy -j .text -j .rodata -j .data --target efi-app-aarch64 --subsystem=10 \
+# 2. convert the ELF to a PE/COFF EFI application (aarch64 uses AAPCS, no ms_abi).
+#    Page-sized alignment keeps the headers in their own page ahead of .text.
+objcopy -j .text -j .data -j .reloc --target efi-app-aarch64 --subsystem=10 \
+    --file-alignment 0x1000 --section-alignment 0x1000 \
     "$OUT/vboot.so" "$OUT/BOOTAA64.EFI"
+# 3. clear RELOCS_STRIPPED so the firmware may load the (PC-relative) image anywhere
+python3 "$HERE/pe-fixup.py" "$OUT/BOOTAA64.EFI"
 echo "built $OUT/BOOTAA64.EFI"
 
 # 3. (test only) wrap in a GPT disk with an ESP that has \EFI\BOOT\BOOTAA64.EFI
