@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <grp.h>
 #include <time.h>
+#include <regex.h>
+#include <sys/utsname.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -3525,6 +3527,1373 @@ static int a_paste(int argc, char **argv) {
 }
 
 
+/* ------------------------------------------------- extended applets 3 --- */
+/* ---- grep ---- */
+/* ================= grep ================= */
+
+typedef struct { int fixed; regex_t re; const char *lit; size_t litlen; } grep_pat;
+
+static int grep_wordch(int c) { return isalnum((unsigned char)c) || c == '_'; }
+
+/* find leftmost occurrence of literal in line[pos..len) */
+static int grep_fixfind(const char *line, size_t len, size_t pos,
+                        const char *lit, size_t ll, int icase,
+                        size_t *so, size_t *eo)
+{
+    if (ll == 0) { if (pos > len) return 0; *so = pos; *eo = pos; return 1; }
+    if (pos > len || ll > len) return 0;
+    for (size_t i = pos; i + ll <= len; i++) {
+        size_t j = 0;
+        for (; j < ll; j++) {
+            int a = (unsigned char)line[i + j], b = (unsigned char)lit[j];
+            if (icase) { a = tolower(a); b = tolower(b); }
+            if (a != b) break;
+        }
+        if (j == ll) { *so = i; *eo = i + ll; return 1; }
+    }
+    return 0;
+}
+
+/* leftmost match across all patterns at position >= pos (no -w/-x filtering) */
+static int grep_leftmost(grep_pat *pats, int np, const char *line, size_t len,
+                         size_t pos, int icase, size_t *rso, size_t *reo)
+{
+    int found = 0; size_t bso = 0, beo = 0;
+    for (int k = 0; k < np; k++) {
+        size_t so, eo; int f = 0;
+        if (pats[k].fixed) {
+            f = grep_fixfind(line, len, pos, pats[k].lit, pats[k].litlen, icase, &so, &eo);
+        } else {
+            regmatch_t m;
+            int rc = regexec(&pats[k].re, line + pos, 1, &m, pos > 0 ? REG_NOTBOL : 0);
+            if (rc == 0) { so = pos + (size_t)m.rm_so; eo = pos + (size_t)m.rm_eo; f = 1; }
+        }
+        if (f && (!found || so < bso || (so == bso && eo > beo))) {
+            found = 1; bso = so; beo = eo;
+        }
+    }
+    if (found) { *rso = bso; *reo = beo; }
+    return found;
+}
+
+/* scan for first match at >= start satisfying -w (if wflag) */
+static int grep_scan(grep_pat *pats, int np, const char *line, size_t len,
+                     size_t start, int icase, int wflag, size_t *mso, size_t *meo)
+{
+    size_t pos = start;
+    while (pos <= len) {
+        size_t so, eo;
+        if (!grep_leftmost(pats, np, line, len, pos, icase, &so, &eo)) return 0;
+        if (!wflag) { *mso = so; *meo = eo; return 1; }
+        int okl = (so == 0) || !grep_wordch(line[so - 1]);
+        int okr = (eo == len) || !grep_wordch(line[eo]);
+        if (okl && okr) { *mso = so; *meo = eo; return 1; }
+        pos = so + 1;
+    }
+    return 0;
+}
+
+/* does any pattern match the entire line [0,len) ? (for -x) */
+static int grep_wholeline(grep_pat *pats, int np, const char *line, size_t len, int icase)
+{
+    for (int k = 0; k < np; k++) {
+        if (pats[k].fixed) {
+            if (pats[k].litlen == len) {
+                size_t j; int eq = 1;
+                for (j = 0; j < len; j++) {
+                    int a = (unsigned char)line[j], b = (unsigned char)pats[k].lit[j];
+                    if (icase) { a = tolower(a); b = tolower(b); }
+                    if (a != b) { eq = 0; break; }
+                }
+                if (eq) return 1;
+            }
+        } else {
+            regmatch_t m;
+            if (regexec(&pats[k].re, line, 1, &m, 0) == 0 &&
+                m.rm_so == 0 && (size_t)m.rm_eo == len)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int a_grep(int argc, char **argv)
+{
+    int iflag = 0, vflag = 0, cflag = 0, nflag = 0, lflag = 0, oflag = 0;
+    int wflag = 0, xflag = 0, qflag = 0, hflag = 0, Hflag = 0, Eflag = 0, Fflag = 0;
+    const char **raw = NULL; int nraw = 0, rawcap = 0;
+    const char **files = NULL; int nfile = 0, filecap = 0;
+    int nomore = 0;
+
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!nomore && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-' && a[2] == '\0') { nomore = 1; continue; }
+            if (a[1] == '-') { /* long option */
+                char *opt = a + 2; const char *val = NULL;
+                char *eq = strchr(opt, '=');
+                size_t olen = eq ? (size_t)(eq - opt) : strlen(opt);
+                if (eq) val = eq + 1;
+                #define LMATCH(s) (olen == strlen(s) && strncmp(opt, s, olen) == 0)
+                if (LMATCH("ignore-case")) iflag = 1;
+                else if (LMATCH("invert-match")) vflag = 1;
+                else if (LMATCH("count")) cflag = 1;
+                else if (LMATCH("line-number")) nflag = 1;
+                else if (LMATCH("files-with-matches")) lflag = 1;
+                else if (LMATCH("only-matching")) oflag = 1;
+                else if (LMATCH("word-regexp")) wflag = 1;
+                else if (LMATCH("line-regexp")) xflag = 1;
+                else if (LMATCH("quiet") || LMATCH("silent")) qflag = 1;
+                else if (LMATCH("no-filename")) hflag = 1;
+                else if (LMATCH("with-filename")) Hflag = 1;
+                else if (LMATCH("extended-regexp")) Eflag = 1;
+                else if (LMATCH("fixed-strings")) Fflag = 1;
+                else if (LMATCH("regexp")) {
+                    if (!val) { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    if (nraw >= rawcap) { rawcap = rawcap ? rawcap * 2 : 8; raw = realloc(raw, rawcap * sizeof(*raw)); }
+                    raw[nraw++] = val;
+                } else {
+                    fprintf(stderr, "grep: unrecognized option '%s'\n", a);
+                    goto usage_err;
+                }
+                #undef LMATCH
+                continue;
+            }
+            int stop = 0;
+            for (char *p = a + 1; *p && !stop; p++) {
+                switch (*p) {
+                case 'i': iflag = 1; break;
+                case 'v': vflag = 1; break;
+                case 'c': cflag = 1; break;
+                case 'n': nflag = 1; break;
+                case 'l': lflag = 1; break;
+                case 'o': oflag = 1; break;
+                case 'w': wflag = 1; break;
+                case 'x': xflag = 1; break;
+                case 'q': qflag = 1; break;
+                case 'h': hflag = 1; break;
+                case 'H': Hflag = 1; break;
+                case 'E': Eflag = 1; break;
+                case 'F': Fflag = 1; break;
+                case 'e': {
+                    const char *val;
+                    if (p[1]) val = p + 1;
+                    else { if (i + 1 >= argc) goto usage_err; val = argv[++i]; }
+                    if (nraw >= rawcap) { rawcap = rawcap ? rawcap * 2 : 8; raw = realloc(raw, rawcap * sizeof(*raw)); }
+                    raw[nraw++] = val;
+                    stop = 1; break;
+                }
+                default:
+                    fprintf(stderr, "grep: invalid option -- '%c'\n", *p);
+                    goto usage_err;
+                }
+            }
+        } else {
+            if (nfile >= filecap) { filecap = filecap ? filecap * 2 : 8; files = realloc(files, filecap * sizeof(*files)); }
+            files[nfile++] = a;
+        }
+    }
+
+    if (nraw == 0) {
+        if (nfile == 0) goto usage_err;
+        if (nraw >= rawcap) { rawcap = rawcap ? rawcap * 2 : 8; raw = realloc(raw, rawcap * sizeof(*raw)); }
+        raw[nraw++] = files[0];
+        for (int k = 1; k < nfile; k++) files[k - 1] = files[k];
+        nfile--;
+    }
+
+    /* compile patterns */
+    grep_pat *pats = calloc(nraw, sizeof(*pats));
+    int cflags = (Eflag ? REG_EXTENDED : 0) | (iflag ? REG_ICASE : 0);
+    for (int k = 0; k < nraw; k++) {
+        if (Fflag || raw[k][0] == '\0') {
+            pats[k].fixed = 1;
+            pats[k].lit = raw[k];
+            pats[k].litlen = strlen(raw[k]);
+        } else {
+            int e = regcomp(&pats[k].re, raw[k], cflags);
+            if (e) {
+                char ebuf[256];
+                regerror(e, &pats[k].re, ebuf, sizeof(ebuf));
+                fprintf(stderr, "grep: %s\n", ebuf);
+                for (int j = 0; j < k; j++) if (!pats[j].fixed) regfree(&pats[j].re);
+                free(pats); free(raw); free(files);
+                return 2;
+            }
+        }
+    }
+
+    int show_fn = hflag ? 0 : (Hflag ? 1 : ((nfile > 1) ? 1 : 0));
+
+    int any_match = 0, had_error = 0;
+    int ninputs = nfile > 0 ? nfile : 1;
+    char *buf = NULL; size_t bufcap = 0;
+    int ret = 1;
+
+    for (int fi = 0; fi < ninputs; fi++) {
+        const char *name;
+        const char *disp;
+        FILE *in;
+        if (nfile == 0) { name = "-"; disp = "(standard input)"; in = stdin; }
+        else {
+            name = files[fi];
+            if (strcmp(name, "-") == 0) { disp = "(standard input)"; in = stdin; }
+            else {
+                struct stat st;
+                if (stat(name, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    fflush(stdout);
+                    fprintf(stderr, "grep: %s: Is a directory\n", name);
+                    had_error = 1; continue;
+                }
+                in = fopen(name, "r");
+                if (!in) {
+                    fflush(stdout);
+                    fprintf(stderr, "grep: %s: %s\n", name, strerror(errno));
+                    had_error = 1; continue;
+                }
+                disp = name;
+            }
+        }
+
+        long lineno = 0;
+        long count = 0;
+        ssize_t nread;
+        while ((nread = getline(&buf, &bufcap, in)) != -1) {
+            lineno++;
+            size_t clen = (size_t)nread;
+            int had_nl = (nread > 0 && buf[nread - 1] == '\n');
+            if (had_nl) clen = (size_t)nread - 1;
+            char saved = buf[clen];
+            buf[clen] = '\0';
+
+            int raw_match;
+            if (xflag) raw_match = grep_wholeline(pats, nraw, buf, clen, iflag);
+            else { size_t s, e; raw_match = grep_scan(pats, nraw, buf, clen, 0, iflag, wflag, &s, &e); }
+            int sel = vflag ? !raw_match : raw_match;
+
+            if (sel) {
+                any_match = 1;
+                if (qflag) {
+                    if (in != stdin) fclose(in);
+                    ret = 0; goto done;
+                }
+                if (lflag) {
+                    fputs(disp, stdout); fputc('\n', stdout);
+                    break; /* stop this file */
+                }
+                if (cflag) { count++; }
+                else if (oflag) {
+                    if (!vflag) {
+                        if (xflag) {
+                            if (show_fn) { fputs(disp, stdout); fputc(':', stdout); }
+                            if (nflag) printf("%ld:", lineno);
+                            fwrite(buf, 1, clen, stdout); fputc('\n', stdout);
+                        } else {
+                            size_t pos = 0, s, e;
+                            while (grep_scan(pats, nraw, buf, clen, pos, iflag, wflag, &s, &e)) {
+                                if (e > s) {
+                                    if (show_fn) { fputs(disp, stdout); fputc(':', stdout); }
+                                    if (nflag) printf("%ld:", lineno);
+                                    fwrite(buf + s, 1, e - s, stdout); fputc('\n', stdout);
+                                    pos = e;
+                                } else pos = s + 1;
+                            }
+                        }
+                    }
+                } else {
+                    if (show_fn) { fputs(disp, stdout); fputc(':', stdout); }
+                    if (nflag) printf("%ld:", lineno);
+                    fwrite(buf, 1, clen, stdout);
+                    fputc('\n', stdout);
+                }
+            }
+            buf[clen] = saved;
+        }
+
+        if (!lflag && cflag && !qflag) {
+            if (show_fn) { fputs(disp, stdout); fputc(':', stdout); }
+            printf("%ld\n", count);
+        }
+
+        if (in != stdin && ferror(in)) {
+            fflush(stdout);
+            fprintf(stderr, "grep: %s: %s\n", disp, strerror(errno));
+            had_error = 1;
+        }
+        if (in != stdin) fclose(in);
+    }
+
+    ret = had_error ? 2 : (any_match ? 0 : 1);
+
+done:
+    free(buf);
+    for (int k = 0; k < nraw; k++) if (!pats[k].fixed) regfree(&pats[k].re);
+    free(pats); free(raw); free(files);
+    return ret;
+
+usage_err:
+    fprintf(stderr, "Usage: grep [OPTION]... PATTERNS [FILE]...\n");
+    free(raw); free(files);
+    return 2;
+}
+
+/* ---- chmod ---- */
+/* ---- chmod ---- */
+struct chmod_change {
+    char  op;         /* '+', '-', '='                      */
+    int   flag;       /* 0=ordinary, 1=X-if-any-x, 2=copy    */
+    mode_t affected;  /* who-mask (S_ISUID|S_IRWXU, ...)      */
+    mode_t value;     /* raw perm bits from the permlist     */
+    mode_t mentioned; /* special bits explicitly named       */
+    mode_t copysrc;   /* copy op: source class mask          */
+};
+
+/* Parse MODE into CH[] (capacity CAP). Returns #changes, or -1 on error. */
+static int chmod_compile(const char *s, struct chmod_change *ch, int cap) {
+    int n = 0;
+
+    if (*s >= '0' && *s <= '7') {                 /* octal (absolute) */
+        unsigned long v = 0;
+        const char *p = s;
+        while (*p >= '0' && *p <= '7') { v = v * 8 + (unsigned)(*p - '0'); p++; }
+        if (*p != '\0' || (v & ~07777UL)) return -1;
+        if (cap < 1) return -1;
+        ch[0].op = '='; ch[0].flag = 0; ch[0].affected = 07777;
+        ch[0].value = (mode_t)v; ch[0].mentioned = 07777; ch[0].copysrc = 0;
+        return 1;
+    }
+
+    while (*s) {
+        mode_t affected = 0;
+        int sawwho = 0;
+        for (;; s++) {                            /* who */
+            if      (*s == 'u') affected |= S_ISUID | S_IRWXU;
+            else if (*s == 'g') affected |= S_ISGID | S_IRWXG;
+            else if (*s == 'o') affected |= S_ISVTX | S_IRWXO;
+            else if (*s == 'a') affected |= 07777;
+            else break;
+            sawwho = 1;
+        }
+        if (!sawwho) affected = 07777;            /* empty who == all */
+
+        if (*s != '+' && *s != '-' && *s != '=') return -1;
+
+        while (*s == '+' || *s == '-' || *s == '=') {   /* one or more actions */
+            char op = *s++;
+            int  flag = 0;
+            mode_t value = 0, copysrc = 0, mentioned = 0;
+
+            if (*s == 'u' || *s == 'g' || *s == 'o') {  /* perm-copy */
+                flag = 2;
+                copysrc = (*s == 'u') ? S_IRWXU : (*s == 'g') ? S_IRWXG : S_IRWXO;
+                s++;
+            } else {                                    /* permlist */
+                for (;; s++) {
+                    if      (*s == 'r') value |= 0444;
+                    else if (*s == 'w') value |= 0222;
+                    else if (*s == 'x') value |= 0111;
+                    else if (*s == 'X') flag = 1;
+                    else if (*s == 's') value |= S_ISUID | S_ISGID;
+                    else if (*s == 't') value |= S_ISVTX;
+                    else break;
+                }
+                mentioned = (value & affected) & (S_ISUID | S_ISGID | S_ISVTX);
+            }
+
+            if (n >= cap) return -1;
+            ch[n].op = op; ch[n].flag = flag; ch[n].affected = affected;
+            ch[n].value = value; ch[n].mentioned = mentioned; ch[n].copysrc = copysrc;
+            n++;
+        }
+
+        if (*s == ',') { s++; continue; }
+        if (*s == '\0') break;
+        return -1;
+    }
+    return n > 0 ? n : -1;
+}
+
+/* Apply the compiled changes to OLDMODE (only the low 12 bits matter). */
+static mode_t chmod_adjust(mode_t oldmode, int isdir,
+                           const struct chmod_change *ch, int n) {
+    mode_t newmode = oldmode & 07777;
+    int i;
+    for (i = 0; i < n; i++) {
+        mode_t affected = ch[i].affected;
+        mode_t value = ch[i].value;
+        mode_t mentioned = ch[i].mentioned;
+        mode_t omit, preserved;
+
+        if (ch[i].flag == 2) {                    /* copy existing */
+            mode_t v = ch[i].copysrc & newmode;
+            value = (v & 0444 ? 0444 : 0) | (v & 0222 ? 0222 : 0) | (v & 0111 ? 0111 : 0);
+        } else if (ch[i].flag == 1) {             /* X: exec if dir or any x set */
+            if (isdir || (newmode & 0111)) value |= 0111;
+        }
+
+        value &= affected;
+        omit = (isdir ? 0 : (mode_t)(S_ISUID | S_ISGID)) & ~mentioned;
+        value &= ~omit;
+
+        switch (ch[i].op) {
+        case '=':
+            preserved = ~affected | ((isdir ? (mode_t)(S_ISUID | S_ISGID) : 0) & ~mentioned);
+            newmode = (newmode & preserved) | value;
+            break;
+        case '+':
+            newmode |= value;
+            break;
+        case '-':
+            newmode &= ~value;
+            break;
+        }
+    }
+    return newmode & 07777;
+}
+
+/* Change one path (dereferencing top-level symlinks); recurse when asked. */
+static int chmod_apply(const char *path, int toplevel, int recursive,
+                       const struct chmod_change *ch, int n) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        fprintf(stderr, "chmod: cannot access '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        if (!toplevel) return 0;                  /* never follow symlinks while recursing */
+        if (stat(path, &st) != 0) {
+            fprintf(stderr, "chmod: cannot access '%s': %s\n", path, strerror(errno));
+            return 1;
+        }
+    }
+
+    int rc = 0;
+    int isdir = S_ISDIR(st.st_mode);
+    mode_t oldbits = st.st_mode & 07777;
+    mode_t newbits = chmod_adjust(st.st_mode, isdir, ch, n);
+
+    /* Read child names before touching the directory's own bits. */
+    char **names = NULL;
+    int nnames = 0, cap = 0;
+    if (recursive && isdir) {
+        DIR *d = opendir(path);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                if (nnames >= cap) {
+                    int ncap = cap ? cap * 2 : 16;
+                    char **t = realloc(names, (size_t)ncap * sizeof *t);
+                    if (!t) { fprintf(stderr, "chmod: memory exhausted\n"); rc = 1; break; }
+                    names = t; cap = ncap;
+                }
+                names[nnames] = strdup(e->d_name);
+                if (!names[nnames]) { fprintf(stderr, "chmod: memory exhausted\n"); rc = 1; break; }
+                nnames++;
+            }
+            closedir(d);
+        } else {
+            fprintf(stderr, "chmod: cannot read directory '%s': %s\n", path, strerror(errno));
+            rc = 1;
+        }
+    }
+
+    if (newbits != oldbits) {
+        if (chmod(path, newbits) != 0) {
+            fprintf(stderr, "chmod: changing permissions of '%s': %s\n", path, strerror(errno));
+            rc = 1;
+        }
+    }
+
+    if (nnames > 0) {
+        size_t plen = strlen(path);
+        int slash = (plen > 0 && path[plen - 1] == '/');
+        int j;
+        for (j = 0; j < nnames; j++) {
+            size_t need = plen + 1 + strlen(names[j]) + 1;
+            char *child = malloc(need);
+            if (child) {
+                if (slash) snprintf(child, need, "%s%s", path, names[j]);
+                else       snprintf(child, need, "%s/%s", path, names[j]);
+                if (chmod_apply(child, 0, recursive, ch, n) != 0) rc = 1;
+                free(child);
+            } else {
+                fprintf(stderr, "chmod: memory exhausted\n"); rc = 1;
+            }
+            free(names[j]);
+        }
+    }
+    free(names);
+    return rc;
+}
+
+static int a_chmod(int argc, char **argv) {
+    int recursive = 0;
+    int i = 1;
+    char *modestr = NULL;
+
+    for (; i < argc; i++) {
+        char *a = argv[i];
+        if (a[0] != '-' || a[1] == '\0') { modestr = a; i++; break; }   /* operand -> MODE */
+        if (a[1] == '-') {
+            if (a[2] == '\0') {                        /* "--" */
+                i++;
+                if (i < argc) { modestr = argv[i]; i++; }
+                break;
+            }
+            if (!strcmp(a, "--recursive")) { recursive = 1; continue; }
+            if (!strcmp(a, "--changes") || !strcmp(a, "--verbose") ||
+                !strcmp(a, "--quiet")   || !strcmp(a, "--silent")  ||
+                !strcmp(a, "--no-preserve-root") || !strcmp(a, "--preserve-root")) continue;
+            fprintf(stderr, "chmod: unrecognized option '%s'\n", a);
+            fprintf(stderr, "Try 'chmod --help' for more information.\n");
+            return 1;
+        }
+        {   /* single dash: option bundle only if every char is an option letter */
+            int isopt = 1;
+            char *c;
+            for (c = a + 1; *c; c++)
+                if (!strchr("RcvfHLP", *c)) { isopt = 0; break; }
+            if (!isopt) { modestr = a; i++; break; }   /* looks like a leading-dash MODE */
+            for (c = a + 1; *c; c++)
+                if (*c == 'R') recursive = 1;          /* c,v,f,H,L,P accepted, no-op */
+        }
+    }
+
+    if (!modestr) {
+        fprintf(stderr, "chmod: missing operand\n");
+        fprintf(stderr, "Try 'chmod --help' for more information.\n");
+        return 1;
+    }
+    if (i >= argc) {
+        fprintf(stderr, "chmod: missing operand after '%s'\n", modestr);
+        fprintf(stderr, "Try 'chmod --help' for more information.\n");
+        return 1;
+    }
+
+    size_t cap = strlen(modestr) + 2;
+    struct chmod_change *ch = malloc(cap * sizeof *ch);
+    if (!ch) { fprintf(stderr, "chmod: memory exhausted\n"); return 1; }
+    int n = chmod_compile(modestr, ch, (int)cap);
+    if (n < 0) {
+        fprintf(stderr, "chmod: invalid mode: '%s'\n", modestr);
+        fprintf(stderr, "Try 'chmod --help' for more information.\n");
+        free(ch);
+        return 1;
+    }
+
+    int rc = 0;
+    for (; i < argc; i++)
+        if (chmod_apply(argv[i], 1, recursive, ch, n) != 0) rc = 1;
+
+    free(ch);
+    return rc;
+}
+
+/* ---- du ---- */
+/* du — estimate file space usage in 1024-byte blocks.
+ *
+ * Sizes are accumulated as raw st_blocks (512-byte units). GNU du keeps the
+ * disk-usage total in bytes and converts once, at print time, to the output
+ * block size (1024) using human_readable() whose default rounding mode is
+ * human_ceiling (opts == 0). So blocks_1024 = ceil(total_512 / 2) = (n+1)/2,
+ * applied to the SUM (not per file). For -h we reuse ls_humansize(), which is
+ * the same 1024-based, ceiling-rounded formatter GNU's human_readable drives.
+ * Traversal is physical (lstat, no symlink deref) and post-order: a directory's
+ * own line is emitted after all of its children, in raw readdir order (this is
+ * what fts with a NULL comparator yields). Files with st_nlink>1 are counted
+ * only once across the whole run, matching GNU's hard-link de-duplication. */
+
+static int du_a, du_s, du_h, du_status;
+static struct du_hl { dev_t dev; ino_t ino; } *du_hls;
+static size_t du_hlcnt, du_hlcap;
+
+/* Return 1 if (dev,ino) was already recorded; otherwise record it and return 0.
+ * Only called for non-directory files with a link count above one. */
+static int du_dup(dev_t dev, ino_t ino) {
+    for (size_t i = 0; i < du_hlcnt; i++)
+        if (du_hls[i].dev == dev && du_hls[i].ino == ino) return 1;
+    if (du_hlcnt == du_hlcap) {
+        du_hlcap = du_hlcap ? du_hlcap * 2 : 64;
+        du_hls = realloc(du_hls, du_hlcap * sizeof *du_hls);
+    }
+    du_hls[du_hlcnt].dev = dev;
+    du_hls[du_hlcnt].ino = ino;
+    du_hlcnt++;
+    return 0;
+}
+
+/* Join dir and name with a single '/', unless dir already ends in one. */
+static char *du_join(const char *dir, const char *name) {
+    size_t dl = strlen(dir), nl = strlen(name);
+    int slash = (dl > 0 && dir[dl - 1] == '/') ? 0 : 1;
+    char *p = malloc(dl + slash + nl + 1);
+    memcpy(p, dir, dl);
+    if (slash) p[dl] = '/';
+    memcpy(p + dl + slash, name, nl);
+    p[dl + slash + nl] = 0;
+    return p;
+}
+
+/* Emit one "<size>\t<path>" line for a subtotal given in 512-byte blocks. */
+static void du_emit(long long blk512, const char *path) {
+    if (du_h) {
+        char b[32];
+        ls_humansize(blk512 * 512, b);
+        printf("%s\t%s\n", b, path);
+    } else {
+        printf("%lld\t%s\n", (blk512 + 1) / 2, path);   /* ceil to 1024-blocks */
+    }
+}
+
+/* Recurse into path, return its total disk usage in 512-byte blocks, and print
+ * lines as the flags dictate. depth 0 is a command-line operand. */
+static long long du_walk(const char *path, int depth) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        fprintf(stderr, "du: cannot access '%s': %s\n", path, strerror(errno));
+        du_status = 1;
+        return 0;
+    }
+    long long total = (long long) st.st_blocks;   /* this node's own blocks */
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d) {
+            fprintf(stderr, "du: cannot read directory '%s': %s\n", path, strerror(errno));
+            du_status = 1;
+        } else {
+            struct dirent *de;
+            while ((de = readdir(d))) {
+                const char *nm = de->d_name;
+                if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0)))
+                    continue;
+                char *child = du_join(path, nm);
+                total += du_walk(child, depth + 1);
+                free(child);
+            }
+            closedir(d);
+        }
+        /* Directories always get a line unless -s suppresses interior lines. */
+        if (!du_s || depth == 0) du_emit(total, path);
+    } else {
+        /* Skip hard-linked files already counted elsewhere. */
+        if (st.st_nlink > 1 && du_dup(st.st_dev, st.st_ino)) return 0;
+        /* Files: always printed as an operand; otherwise only with -a. */
+        if (depth == 0 || du_a) du_emit(total, path);
+    }
+    return total;
+}
+
+static int a_du(int argc, char **argv) {
+    du_a = du_s = du_h = du_status = 0;
+    du_hls = NULL; du_hlcnt = du_hlcap = 0;
+    int c_flag = 0, endopt = 0;
+
+    char **ops = malloc(sizeof(char *) * (argc + 1));
+    int nops = 0;
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopt && a[0] == '-' && a[1]) {
+            if (a[1] == '-' && a[2] == 0) { endopt = 1; continue; }
+            for (int j = 1; a[j]; j++) {
+                switch (a[j]) {
+                    case 's': du_s = 1; break;
+                    case 'h': du_h = 1; break;
+                    case 'a': du_a = 1; break;
+                    case 'c': c_flag = 1; break;
+                    default:
+                        fprintf(stderr, "du: invalid option -- '%c'\n"
+                                        "Try 'du --help' for more information.\n", a[j]);
+                        free(ops); free(du_hls);
+                        return 1;
+                }
+            }
+        } else {
+            ops[nops++] = a;
+        }
+    }
+
+    if (du_a && du_s) {
+        fprintf(stderr, "du: cannot both summarize and show all entries\n");
+        free(ops); free(du_hls);
+        return 1;
+    }
+
+    if (nops == 0) ops[nops++] = ".";
+
+    long long grand = 0;
+    for (int i = 0; i < nops; i++) {
+        char *op = strdup(ops[i]);            /* strip trailing slashes, keep "/" */
+        size_t L = strlen(op);
+        while (L > 1 && op[L - 1] == '/') op[--L] = 0;
+        grand += du_walk(op, 0);
+        free(op);
+    }
+
+    if (c_flag) du_emit(grand, "total");
+
+    free(ops); free(du_hls);
+    return du_status;
+}
+
+/* ---- printf ---- */
+/* ---- printf applet ---- */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
+
+static int printf_rc = 0;
+
+/* Interpret one backslash escape. *pp points just past the backslash and is
+ * advanced past the consumed characters. octal0 selects echo-style octal
+ * (\0NNN, a leading 0 is optional) used by %b; the format string uses \NNN. */
+static void printf_esc(const char **pp, int octal0) {
+    const char *p = *pp;
+    int c = (unsigned char)*p;
+
+    if (c == 'x' && isxdigit((unsigned char)p[1])) {
+        int v = 0, n = 0;
+        p++;
+        while (n < 2 && isxdigit((unsigned char)*p)) {
+            int d = (unsigned char)*p;
+            d = (d >= '0' && d <= '9') ? d - '0'
+                                       : (tolower(d) - 'a' + 10);
+            v = v * 16 + d;
+            p++; n++;
+        }
+        putchar(v);
+        *pp = p; return;
+    }
+    if (c >= '0' && c <= '7') {
+        int v = 0, n = 0;
+        if (octal0 && *p == '0') p++;
+        while (n < 3 && *p >= '0' && *p <= '7') {
+            v = v * 8 + (*p - '0');
+            p++; n++;
+        }
+        putchar(v);
+        *pp = p; return;
+    }
+    switch (c) {
+        case 'a':  putchar('\a');   p++; break;
+        case 'b':  putchar('\b');   p++; break;
+        case 'c':  fflush(stdout); exit(0);
+        case 'e':  putchar(0x1B);   p++; break;
+        case 'f':  putchar('\f');   p++; break;
+        case 'n':  putchar('\n');   p++; break;
+        case 'r':  putchar('\r');   p++; break;
+        case 't':  putchar('\t');   p++; break;
+        case 'v':  putchar('\v');   p++; break;
+        case '\\': putchar('\\');   p++; break;
+        case '"':  putchar('"');    p++; break;
+        case '\'': putchar('\'');   p++; break;
+        case 0:    putchar('\\');        break;   /* trailing backslash */
+        default:   putchar('\\'); putchar(c); p++; break;
+    }
+    *pp = p;
+}
+
+/* Print S interpreting echo-style escapes (for %b). */
+static void printf_b(const char *s) {
+    const char *p = s;
+    while (*p) {
+        if (*p == '\\') { p++; printf_esc(&p, 1); }
+        else            putchar(*p++);
+    }
+}
+
+/* Parse a numeric argument. Supports a leading ' or " (value of next char)
+ * and C-style bases (0x.., 0.., decimal). Flags printf_rc on bad input. */
+static long long printf_sint(const char *s) {
+    char *end;
+    long long v;
+    if (*s == '"' || *s == '\'') {
+        v = (unsigned char)s[1];
+        if (s[1] && s[2])
+            fprintf(stderr, "printf: warning: %s: character(s) following "
+                            "character constant have been ignored\n", s + 1);
+        return v;
+    }
+    v = strtoll(s, &end, 0);
+    if (end == s || *end) {
+        fprintf(stderr, "printf: '%s': expected a numeric value\n", s);
+        printf_rc = 1;
+    }
+    return v;
+}
+static unsigned long long printf_uint(const char *s) {
+    char *end;
+    unsigned long long v;
+    if (*s == '"' || *s == '\'') {
+        v = (unsigned char)s[1];
+        if (s[1] && s[2])
+            fprintf(stderr, "printf: warning: %s: character(s) following "
+                            "character constant have been ignored\n", s + 1);
+        return v;
+    }
+    v = strtoull(s, &end, 0);
+    if (end == s || *end) {
+        fprintf(stderr, "printf: '%s': expected a numeric value\n", s);
+        printf_rc = 1;
+    }
+    return v;
+}
+
+/* Process a single conversion beginning at F (points at '%'). Consumes args
+ * as needed (advancing *argi) and returns a pointer past the conversion. */
+static const char *printf_conv(const char *f, char **args, int nargs, int *argi) {
+    char spec[256];
+    int si = 0;
+    const char *p = f + 1;
+
+    spec[si++] = '%';
+    /* flags */
+    while (*p && strchr("-+ 0#'", *p)) { if (si < 240) spec[si++] = *p; p++; }
+    /* field width */
+    if (*p == '*') {
+        long long w = 0;
+        if (*argi < nargs) { w = printf_sint(args[*argi]); (*argi)++; }
+        si += snprintf(spec + si, sizeof spec - si, "%lld", w);
+        if (si > 240) si = 240;
+        p++;
+    } else {
+        while (isdigit((unsigned char)*p)) { if (si < 240) spec[si++] = *p; p++; }
+    }
+    /* precision */
+    if (*p == '.') {
+        if (si < 240) spec[si++] = '.';
+        p++;
+        if (*p == '*') {
+            long long pr = 0;
+            if (*argi < nargs) { pr = printf_sint(args[*argi]); (*argi)++; }
+            si += snprintf(spec + si, sizeof spec - si, "%lld", pr);
+            if (si > 240) si = 240;
+            p++;
+        } else {
+            while (isdigit((unsigned char)*p)) { if (si < 240) spec[si++] = *p; p++; }
+        }
+    }
+    /* drop any length modifiers the user typed */
+    while (*p && strchr("hlLqjzt", *p)) p++;
+
+    char conv = *p;
+    if (conv) p++;
+
+    const char *arg = (*argi < nargs) ? args[*argi] : NULL;
+
+    switch (conv) {
+        case 'd': case 'i': {
+            long long v = arg ? printf_sint(arg) : 0;
+            if (arg) (*argi)++;
+            spec[si++] = 'l'; spec[si++] = 'l'; spec[si++] = 'd'; spec[si] = 0;
+            printf(spec, v);
+            break;
+        }
+        case 'u': case 'o': case 'x': case 'X': {
+            unsigned long long v = arg ? printf_uint(arg) : 0;
+            if (arg) (*argi)++;
+            spec[si++] = 'l'; spec[si++] = 'l'; spec[si++] = conv; spec[si] = 0;
+            printf(spec, v);
+            break;
+        }
+        case 'c': {
+            int ch = 0;
+            if (arg) { ch = (unsigned char)arg[0]; (*argi)++; }
+            spec[si++] = 'c'; spec[si] = 0;
+            printf(spec, ch);
+            break;
+        }
+        case 's': {
+            const char *s = arg ? arg : "";
+            if (arg) (*argi)++;
+            spec[si++] = 's'; spec[si] = 0;
+            printf(spec, s);
+            break;
+        }
+        case 'b': {
+            const char *s = arg ? arg : "";
+            if (arg) (*argi)++;
+            printf_b(s);
+            break;
+        }
+        case 0:
+            putchar('%');
+            break;
+        default:
+            fprintf(stderr, "printf: %%%c: invalid conversion specification\n", conv);
+            printf_rc = 1;
+            break;
+    }
+    return p;
+}
+
+/* Run the format string once. Returns the number of args consumed. */
+static int printf_run(const char *format, char **args, int nargs, int *argi) {
+    int start = *argi;
+    const char *f = format;
+    while (*f) {
+        if (*f == '\\') { f++; printf_esc(&f, 0); }
+        else if (*f == '%') {
+            if (f[1] == '%') { putchar('%'); f += 2; continue; }
+            f = printf_conv(f, args, nargs, argi);
+        } else putchar(*f++);
+    }
+    return *argi - start;
+}
+
+static int a_printf(int argc, char **argv) {
+    printf_rc = 0;
+
+    int base = 1;
+    if (base < argc && strcmp(argv[base], "--") == 0) base++;
+    if (base >= argc) {
+        fprintf(stderr, "printf: missing operand\n"
+                        "Try 'printf --help' for more information.\n");
+        return 1;
+    }
+
+    const char *format = argv[base];
+    char **args = argv + base + 1;
+    int nargs = argc - base - 1;
+    int argi = 0, used;
+
+    do {
+        used = printf_run(format, args, nargs, &argi);
+    } while (used > 0 && argi < nargs);
+
+    fflush(stdout);
+    return printf_rc;
+}
+
+#pragma GCC diagnostic pop
+
+/* ---- uname ---- */
+static int a_uname(int argc, char **argv)
+{
+	struct utsname u;
+	int f_s = 0, f_n = 0, f_r = 0, f_v = 0, f_m = 0, f_o = 0;
+	int i;
+	int first;
+
+	for (i = 1; i < argc; i++) {
+		char *arg = argv[i];
+		if (arg[0] == '-' && arg[1] != '\0') {
+			char *p;
+			for (p = arg + 1; *p; p++) {
+				switch (*p) {
+				case 's': f_s = 1; break;
+				case 'n': f_n = 1; break;
+				case 'r': f_r = 1; break;
+				case 'v': f_v = 1; break;
+				case 'm': f_m = 1; break;
+				case 'o': f_o = 1; break;
+				case 'a':
+					f_s = f_n = f_r = f_v = f_m = f_o = 1;
+					break;
+				default:
+					fprintf(stderr, "uname: invalid option -- '%c'\n", *p);
+					return 1;
+				}
+			}
+		} else {
+			fprintf(stderr, "uname: extra operand '%s'\n", arg);
+			return 1;
+		}
+	}
+
+	if (!f_s && !f_n && !f_r && !f_v && !f_m && !f_o)
+		f_s = 1;
+
+	if (uname(&u) < 0) {
+		fprintf(stderr, "uname: cannot get system name: %s\n", strerror(errno));
+		return 1;
+	}
+
+	first = 1;
+	if (f_s) { printf("%s%s", first ? "" : " ", u.sysname); first = 0; }
+	if (f_n) { printf("%s%s", first ? "" : " ", u.nodename); first = 0; }
+	if (f_r) { printf("%s%s", first ? "" : " ", u.release); first = 0; }
+	if (f_v) { printf("%s%s", first ? "" : " ", u.version); first = 0; }
+	if (f_m) { printf("%s%s", first ? "" : " ", u.machine); first = 0; }
+	if (f_o) { printf("%s%s", first ? "" : " ", "GNU/Linux"); first = 0; }
+	printf("\n");
+
+	return 0;
+}
+
+/* ---- a_realpath ---- */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* Lexical canonicalization (GNU -s / --no-symlinks): make absolute via cwd and
+ * collapse "."/".." and redundant slashes WITHOUT touching the filesystem.
+ * Result is always absolute. Returns 0 on success, -1 on error (errno set). */
+static int realpath_lexical(const char *name, char *out, size_t outsz) {
+    char in[PATH_MAX * 4];
+    if (name[0] == '/') {
+        if (strlen(name) >= sizeof in) { errno = ENAMETOOLONG; return -1; }
+        strcpy(in, name);
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof cwd)) return -1;
+        if ((size_t)snprintf(in, sizeof in, "%s/%s", cwd, name) >= sizeof in) {
+            errno = ENAMETOOLONG; return -1;
+        }
+    }
+    size_t rlen = 0;
+    out[0] = '\0';
+    char *p = in;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 1 && start[0] == '.') continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (rlen > 0 && out[rlen - 1] != '/') rlen--;
+            if (rlen > 0) rlen--;          /* drop the '/' */
+            out[rlen] = '\0';
+            continue;
+        }
+        if (rlen + 1 + len + 1 > outsz) { errno = ENAMETOOLONG; return -1; }
+        out[rlen++] = '/';
+        memcpy(out + rlen, start, len);
+        rlen += len;
+        out[rlen] = '\0';
+    }
+    if (rlen == 0) { out[0] = '/'; out[1] = '\0'; }
+    return 0;
+}
+
+/* Canonicalize allowing missing components (GNU -m): resolve symlinks for the
+ * parts that exist, and treat everything from the first non-existent component
+ * onward lexically. Returns 0 on success, -1 on error (errno set). */
+static int realpath_missing(const char *name, char *out, size_t outsz) {
+    char todo[PATH_MAX * 4];
+    char res[PATH_MAX * 2];
+    size_t reslen = 0;
+    int links = 0, missing = 0;
+
+    if (name[0] == '/') {
+        if (strlen(name) >= sizeof todo) { errno = ENAMETOOLONG; return -1; }
+        strcpy(todo, name);
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof cwd)) return -1;
+        if ((size_t)snprintf(todo, sizeof todo, "%s/%s", cwd, name) >= sizeof todo) {
+            errno = ENAMETOOLONG; return -1;
+        }
+    }
+    res[0] = '\0';
+
+    char *p = todo;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 1 && start[0] == '.') continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (reslen > 0 && res[reslen - 1] != '/') reslen--;
+            if (reslen > 0) reslen--;
+            res[reslen] = '\0';
+            continue;
+        }
+
+        char cand[PATH_MAX * 2];
+        if (reslen + 1 + len + 1 > sizeof cand) { errno = ENAMETOOLONG; return -1; }
+        memcpy(cand, res, reslen);
+        cand[reslen] = '/';
+        memcpy(cand + reslen + 1, start, len);
+        cand[reslen + 1 + len] = '\0';
+
+        if (!missing) {
+            struct stat st;
+            int r = lstat(cand, &st);
+            if (r == 0 && S_ISLNK(st.st_mode)) {
+                if (++links > 40) { errno = ELOOP; return -1; }
+                char link[PATH_MAX];
+                ssize_t n = readlink(cand, link, sizeof link - 1);
+                if (n < 0) return -1;
+                link[n] = '\0';
+                char next[PATH_MAX * 4];
+                if (link[0] == '/') { reslen = 0; res[0] = '\0'; }
+                if ((size_t)snprintf(next, sizeof next, "%s%s", link, p) >= sizeof next) {
+                    errno = ENAMETOOLONG; return -1;
+                }
+                strcpy(todo, next);
+                p = todo;
+                continue;
+            }
+            if (r != 0) missing = 1;      /* from here on treat lexically */
+        }
+
+        if (reslen + 1 + len + 1 > sizeof res) { errno = ENAMETOOLONG; return -1; }
+        res[reslen++] = '/';
+        memcpy(res + reslen, start, len);
+        reslen += len;
+        res[reslen] = '\0';
+    }
+    if (reslen == 0) { res[0] = '/'; res[1] = '\0'; reslen = 1; }
+    if (reslen + 1 > outsz) { errno = ENAMETOOLONG; return -1; }
+    strcpy(out, res);
+    return 0;
+}
+
+static int a_realpath(int argc, char **argv) {
+    int eflag = 0, mflag = 0, sflag = 0, qflag = 0, zflag = 0;
+    (void)eflag;   /* default and -e both require the whole path to exist */
+    char **ops = malloc(sizeof(char *) * (size_t)(argc > 0 ? argc : 1));
+    if (!ops) { fprintf(stderr, "%s: out of memory\n", argv[0]); return 1; }
+    int nops = 0, endopts = 0;
+
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopts && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-') {
+                if (a[2] == '\0') { endopts = 1; continue; }
+                if      (!strcmp(a, "--no-symlinks") || !strcmp(a, "--strip")) sflag = 1;
+                else if (!strcmp(a, "--canonicalize-existing")) eflag = 1;
+                else if (!strcmp(a, "--canonicalize-missing"))  mflag = 1;
+                else if (!strcmp(a, "--quiet") || !strcmp(a, "--silent")) qflag = 1;
+                else if (!strcmp(a, "--zero")) zflag = 1;
+                else if (!strcmp(a, "--help")) {
+                    printf("Usage: %s [OPTION]... FILE...\n"
+                           "Print the resolved absolute file name.\n\n"
+                           "  -e  all components of the path must exist\n"
+                           "  -m  no path components need exist or be a directory\n"
+                           "  -s  don't expand symlinks\n"
+                           "  -q  suppress most error messages\n"
+                           "  -z  end each output line with NUL, not newline\n",
+                           argv[0]);
+                    free(ops); return 0;
+                }
+                else if (!strcmp(a, "--version")) {
+                    printf("realpath (verkbox)\n"); free(ops); return 0;
+                }
+                else {
+                    fprintf(stderr, "%s: unrecognized option '%s'\n"
+                            "Try '%s --help' for more information.\n",
+                            argv[0], a, argv[0]);
+                    free(ops); return 1;
+                }
+            } else {
+                for (char *c = a + 1; *c; c++) {
+                    switch (*c) {
+                        case 'e': eflag = 1; break;
+                        case 'm': mflag = 1; break;
+                        case 's': sflag = 1; break;
+                        case 'q': qflag = 1; break;
+                        case 'z': zflag = 1; break;
+                        default:
+                            fprintf(stderr, "%s: invalid option -- '%c'\n"
+                                    "Try '%s --help' for more information.\n",
+                                    argv[0], *c, argv[0]);
+                            free(ops); return 1;
+                    }
+                }
+            }
+        } else {
+            ops[nops++] = a;
+        }
+    }
+
+    if (nops == 0) {
+        fprintf(stderr, "%s: missing operand\n"
+                "Try '%s --help' for more information.\n", argv[0], argv[0]);
+        free(ops); return 1;
+    }
+
+    int rc = 0;
+    char sep = zflag ? '\0' : '\n';
+    char buf[PATH_MAX * 2];
+
+    for (int k = 0; k < nops; k++) {
+        const char *path = ops[k];
+        int ok;
+        errno = 0;
+        if (path[0] == '\0') { errno = ENOENT; ok = 0; }
+        else if (sflag)      ok = (realpath_lexical(path, buf, sizeof buf) == 0);
+        else if (mflag)      ok = (realpath_missing(path, buf, sizeof buf) == 0);
+        else                 ok = (realpath(path, buf) != NULL);
+
+        if (ok) {
+            fputs(buf, stdout);
+            putchar(sep);
+        } else {
+            rc = 1;
+            if (!qflag) {
+                const char *disp = path[0] ? path : "''";
+                fprintf(stderr, "%s: %s: %s\n", argv[0], disp, strerror(errno));
+            }
+        }
+    }
+    free(ops);
+    return rc;
+}
+
+/* ---- env ---- */
+static int a_env(int argc, char **argv) {
+    extern char **environ;
+    int ignore = 0;
+    char *unset[argc > 0 ? argc : 1];   /* at most argc-1 names to unset */
+    int nunset = 0;
+    int i = 1;
+
+    /* ---- option parsing: options precede operands (getopt '+' style) ------ */
+    while (i < argc) {
+        char *a = argv[i];
+        if (a[0] != '-') break;                                 /* operand */
+        if (a[1] == '\0') { ignore = 1; i++; continue; }        /* "-" => -i */
+        if (a[1] == '-' && a[2] == '\0') { i++; break; }        /* "--" ends */
+        if (a[1] == '-') {                                      /* long option */
+            if (strcmp(a, "--ignore-environment") == 0) { ignore = 1; i++; continue; }
+            if (strncmp(a, "--unset=", 8) == 0) { unset[nunset++] = a + 8; i++; continue; }
+            if (strcmp(a, "--unset") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "env: option '--unset' requires an argument\n");
+                    return 125;
+                }
+                unset[nunset++] = argv[i + 1]; i += 2; continue;
+            }
+            fprintf(stderr, "env: unrecognized option '%s'\n", a);
+            return 125;
+        }
+        /* short-option cluster, e.g. -i, -iu NAME, -uNAME */
+        {
+            char *p = a + 1;
+            int consumed_next = 0;
+            int bad = 0;
+            while (*p) {
+                if (*p == 'i') { ignore = 1; p++; continue; }
+                if (*p == 'u') {
+                    p++;
+                    if (*p) { unset[nunset++] = p; }
+                    else {
+                        if (i + 1 >= argc) {
+                            fprintf(stderr, "env: option requires an argument -- 'u'\n");
+                            return 125;
+                        }
+                        unset[nunset++] = argv[i + 1]; consumed_next = 1;
+                    }
+                    break;                            /* rest of arg is the name */
+                }
+                fprintf(stderr, "env: invalid option -- '%c'\n", *p);
+                bad = 1; break;
+            }
+            if (bad) return 125;
+            i += consumed_next ? 2 : 1;
+        }
+    }
+
+    /* ---- apply environment modifications in order ------------------------- */
+    if (ignore) clearenv();
+    for (int k = 0; k < nunset; k++) unsetenv(unset[k]);
+
+    /* leading operands containing '=' are NAME=VALUE assignments */
+    while (i < argc && strchr(argv[i], '=') != NULL) {
+        char *a = argv[i];
+        char *eq = strchr(a, '=');
+        size_t nlen = (size_t)(eq - a);
+        char *nm = (char *)malloc(nlen + 1);
+        if (nm) {
+            memcpy(nm, a, nlen);
+            nm[nlen] = '\0';
+            setenv(nm, eq + 1, 1);
+            free(nm);
+        }
+        i++;
+    }
+
+    /* ---- run command, or print the environment --------------------------- */
+    if (i < argc) {
+        execvp(argv[i], &argv[i]);
+        int ec = (errno == ENOENT) ? 127 : 126;   /* only reached on failure */
+        fprintf(stderr, "env: '%s': %s\n", argv[i], strerror(errno));
+        return ec;
+    }
+
+    for (char **e = environ; e && *e; ++e) {
+        fputs(*e, stdout);
+        putchar('\n');
+    }
+    return 0;
+}
+
+/* ---- sleep ---- */
+static int a_sleep(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "sleep: missing operand\n");
+        return 1;
+    }
+
+    double total = 0.0;
+    int ok = 1;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        char *endp;
+        errno = 0;
+        double s = strtod(arg, &endp);
+        double mult = 1.0;
+        int good = 1;
+
+        if (endp == arg || s < 0.0) {
+            /* no numeric conversion, or a negative interval */
+            good = 0;
+        } else if (endp[0] != '\0' && endp[1] != '\0') {
+            /* more than a single trailing suffix character */
+            good = 0;
+        } else {
+            switch (endp[0]) {
+                case '\0':
+                case 's': mult = 1.0;     break;
+                case 'm': mult = 60.0;    break;
+                case 'h': mult = 3600.0;  break;
+                case 'd': mult = 86400.0; break;
+                default:  good = 0;       break;
+            }
+        }
+
+        if (!good) {
+            fprintf(stderr, "sleep: invalid time interval '%s'\n", arg);
+            ok = 0;
+        } else {
+            total += s * mult;
+        }
+    }
+
+    if (!ok)
+        return 1;
+
+    if (total <= 0.0)
+        return 0;
+
+    struct timespec ts;
+    ts.tv_sec = (time_t) total;
+    double frac = total - (double) ts.tv_sec;
+    if (frac < 0.0) frac = 0.0;
+    long nsec = (long) (frac * 1e9);
+    if (nsec < 0L) nsec = 0L;
+    if (nsec > 999999999L) nsec = 999999999L;
+    ts.tv_nsec = nsec;
+
+    /* nanosleep updates ts with the remaining time when interrupted */
+    while (nanosleep(&ts, &ts) != 0) {
+        if (errno == EINTR)
+            continue;
+        fprintf(stderr, "sleep: cannot read realtime clock: %s\n", strerror(errno));
+        return 1;
+    }
+
+    return 0;
+}
+
+
 /* ------------------------------------------------------------ dispatch ---- */
 struct applet { const char *name; int (*fn)(int, char **); };
 static const struct applet applets[] = {
@@ -3532,7 +4901,8 @@ static const struct applet applets[] = {
     {"whoami",a_whoami},{"nproc",a_nproc},{"yes",a_yes},{"basename",a_basename},
     {"dirname",a_dirname},{"head",a_head},{"wc",a_wc},{"seq",a_seq},
     {"ls",a_ls},{"tail",a_tail},{"cut",a_cut},{"rev",a_rev},{"uniq",a_uniq},{"mkdir",a_mkdir},{"rmdir",a_rmdir},{"rm",a_rm},{"cp",a_cp},{"mv",a_mv},{"ln",a_ln},{"touch",a_touch},
-    {"sort",a_sort},{"tr",a_tr},{"nl",a_nl},{"tac",a_tac},{"tee",a_tee},{"fold",a_fold},{"comm",a_comm},{"paste",a_paste},{NULL,NULL}
+    {"sort",a_sort},{"tr",a_tr},{"nl",a_nl},{"tac",a_tac},{"tee",a_tee},{"fold",a_fold},{"comm",a_comm},{"paste",a_paste},
+    {"grep",a_grep},{"chmod",a_chmod},{"du",a_du},{"printf",a_printf},{"uname",a_uname},{"realpath",a_realpath},{"env",a_env},{"sleep",a_sleep},{NULL,NULL}
 };
 
 static int list_applets(void) {
