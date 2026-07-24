@@ -143,7 +143,7 @@ stage_sources() {
     sudo rm -rf "$ROOTFS/sources/vpk-recipes"
     sudo cp -a "$VERK_ROOT/pkg/recipes" "$ROOTFS/sources/vpk-recipes" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/verkbox/verkbox.c" "$ROOTFS/sources/verkbox.c" 2>/dev/null || true
-    sudo cp "$VERK_ROOT/pkg/verkgetty/verkgetty.c" "$ROOTFS/sources/verkgetty.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vgetty/vgetty.c" "$ROOTFS/sources/vgetty.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -642,14 +642,14 @@ cd /sources
 mark verkbox
 fi
 
-# 12c. verkgetty — VerkOS' own getty (replaces agetty for the console login).
+# 12c. vgetty — VerkOS' own getty (replaces agetty for the console login).
 # A leaf process systemd execs on the console; hands off to /bin/login. First
 # step of making our init userland ours (see serial-getty autologin drop-in).
-if need verkgetty; then
-say "verkgetty (VerkOS getty)"
-gcc -O2 -o /usr/bin/verkgetty /sources/verkgetty.c
+if need vgetty; then
+say "vgetty (VerkOS getty)"
+gcc -O2 -o /usr/bin/vgetty /sources/vgetty.c
 cd /sources
-mark verkgetty
+mark vgetty
 fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
@@ -760,7 +760,7 @@ mkdir -p /etc/systemd/system/serial-getty@.service.d
 cat > /etc/systemd/system/serial-getty@.service.d/autologin.conf <<'AL'
 [Service]
 ExecStart=
-ExecStart=-/usr/bin/verkgetty --autologin root --keep-baud %I 115200,38400,9600 $TERM
+ExecStart=-/usr/bin/vgetty --autologin root --keep-baud %I 115200,38400,9600 $TERM
 AL
 
 # D-Bus system bus. Our dbus is built WITHOUT systemd integration (that would
@@ -909,7 +909,7 @@ if [ -x /usr/bin/verkbox ]; then
     # clears the same bar: flag-complete AND differentially byte-exact vs GNU across
     # all common flags (incl. the ones autotools/configure use, like `ls -i`).
     for t in ls cat head tail wc; do ln -sf verkbox /usr/bin/"$t"; done
-    reg verkbox 0.1; reg verkgetty 0.1
+    reg verkbox 0.1; reg vgetty 0.1
 fi
 
 echo
