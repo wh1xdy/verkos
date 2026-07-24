@@ -16,7 +16,7 @@ DISK="$OUT/verkos-aarch64.ext4"
 # virtio-gpu-device gives the guest a KMS GPU -> /dev/fb0 (VerkOS' GUI draws to it);
 # virtio-keyboard/tablet feed evdev for a future compositor. Set VERK_QMP=<path>
 # for a QMP control socket (used to `screendump` the framebuffer headlessly).
-GPU_ARGS=(-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device)
+GPU_ARGS=(-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci)
 QMP_ARGS=()
 [ -n "${VERK_QMP:-}" ] && QMP_ARGS=(-qmp "unix:${VERK_QMP},server,nowait")
 exec "$QEMU_BIN" \
