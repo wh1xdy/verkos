@@ -1650,6 +1650,8 @@ static int cp_dir(const char *src, const char *dst, mode_t mode, int recursive) 
         fprintf(stderr, "cp: cannot create directory '%s': %s\n", dst, strerror(errno));
         return 1;
     }
+    struct stat dstst;
+    stat(dst, &dstst);                          /* for the copy-into-itself guard */
     d = opendir(src);
     if (!d) {
         fprintf(stderr, "cp: cannot open directory '%s': %s\n", src, strerror(errno));
@@ -1666,6 +1668,21 @@ static int cp_dir(const char *src, const char *dst, mode_t mode, int recursive) 
             free(sp); free(dp);
             rc = 1;
             continue;
+        }
+        /* lstat the child so we don't follow symlinks during recursion (a symlink
+         * loop like a/self -> . would recurse forever) and skip the destination
+         * itself (cp -r a a/sub would otherwise copy into itself endlessly). */
+        struct stat cst;
+        if (lstat(sp, &cst) == 0) {
+            if (S_ISDIR(cst.st_mode) && cst.st_dev == dstst.st_dev && cst.st_ino == dstst.st_ino) {
+                free(sp); free(dp); continue;                 /* this child IS the dest dir */
+            }
+            if (S_ISLNK(cst.st_mode)) {                       /* copy symlink as a symlink */
+                char t[4096]; ssize_t k = readlink(sp, t, sizeof t - 1);
+                if (k >= 0) { t[k] = 0; unlink(dp); if (symlink(t, dp) != 0) rc = 1; }
+                else rc = 1;
+                free(sp); free(dp); continue;
+            }
         }
         if (cp_one(sp, dp, recursive) != 0) rc = 1;
         free(sp);
