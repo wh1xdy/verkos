@@ -168,6 +168,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vtar/vtar.c" "$ROOTFS/sources/vtar.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vcpio/vcpio.c" "$ROOTFS/sources/vcpio.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vawk/vawk.c" "$ROOTFS/sources/vawk.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vbzip2/vbzip2.c" "$ROOTFS/sources/vbzip2.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -827,6 +828,11 @@ say "vawk (VerkOS awk — own interpreter)"
 gcc -O2 -o /usr/bin/vawk /sources/vawk.c -lm
 cd /sources; mark vawk
 fi
+if need vbzip2; then
+say "vbzip2 (VerkOS bzip2/bunzip2/bzcat — own BWT codec)"
+gcc -O2 -o /usr/bin/vbzip2 /sources/vbzip2.c
+cd /sources; mark vbzip2
+fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
@@ -1140,7 +1146,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg ved 0.1; reg vwhois 0.1; reg vsed 0.1; reg vfind 0.1; reg vxargs 0.1
     reg vdate 0.1; reg vstat 0.1
     reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
-    reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1
+    reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1; reg vbzip2 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1194,6 +1200,11 @@ if [ -x /usr/bin/vip ]; then
     netln cpio vcpio
     netln tar vtar
     netln awk vawk       # own interpreter, build-verified (hello configure passes)
+    # bzip2/bunzip2/bzcat were missing; our BWT codec interops with real bzip2
+    # both ways (compress+decompress verified vs bzip2 and python bz2).
+    netln bzip2 vbzip2
+    netln bunzip2 vbzip2
+    netln bzcat vbzip2
 fi
 
 echo
