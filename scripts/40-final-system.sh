@@ -147,6 +147,9 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vdhcp/vdhcp.c" "$ROOTFS/sources/vdhcp.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vip/vip.c" "$ROOTFS/sources/vip.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vdig/vdig.c" "$ROOTFS/sources/vdig.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vping/vping.c" "$ROOTFS/sources/vping.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vtrace/vtrace.c" "$ROOTFS/sources/vtrace.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vss/vss.c" "$ROOTFS/sources/vss.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -686,6 +689,27 @@ cd /sources
 mark vdig
 fi
 
+# 12g/h/i. vping/vtrace/vss — the rest of the network toolbox: ICMP ping, ICMP
+# traceroute, and an ss/netstat socket lister. Raw sockets + /proc parsing.
+if need vping; then
+say "vping (VerkOS ping)"
+gcc -O2 -o /usr/bin/vping /sources/vping.c
+cd /sources
+mark vping
+fi
+if need vtrace; then
+say "vtrace (VerkOS traceroute)"
+gcc -O2 -o /usr/bin/vtrace /sources/vtrace.c
+cd /sources
+mark vtrace
+fi
+if need vss; then
+say "vss (VerkOS ss/netstat)"
+gcc -O2 -o /usr/bin/vss /sources/vss.c
+cd /sources
+mark vss
+fi
+
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
 cat > /etc/fstab <<'FSTAB'
@@ -993,6 +1017,16 @@ if [ -x /usr/bin/verkbox ]; then
         ln -sf verkbox /usr/bin/"$t"
     done
     reg verkbox 0.1; reg vgetty 0.1; reg vdhcp 0.1; reg vip 0.1; reg vdig 0.1
+    reg vping 0.1; reg vtrace 0.1; reg vss 0.1
+fi
+
+# vip takes over the `ip` name: it covers addr/link/route/neigh (show + config)
+# and tolerates ip-style global flags, which is the bulk of `ip` usage here.
+# iproute2's binary stays installed (as `ip` is only a symlink to vip); revert by
+# pointing /usr/bin/ip back at it if a missing feature is ever needed.
+if [ -x /usr/bin/vip ]; then
+    [ -e /usr/bin/ip ] && [ ! -L /usr/bin/ip ] && mv /usr/bin/ip /usr/bin/ip.iproute2
+    ln -sf vip /usr/bin/ip
 fi
 
 echo

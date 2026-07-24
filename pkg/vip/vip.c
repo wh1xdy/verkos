@@ -75,7 +75,14 @@ static void flags_str(short f, char *out, size_t n) {
         }
 }
 
-static void print_iface(const char *name, int show_addr) {
+static unsigned long long stat_of(const char *name, const char *what) {
+    char p[128]; snprintf(p, sizeof p, "/sys/class/net/%s/statistics/%s", name, what);
+    FILE *f = fopen(p, "r"); if (!f) return 0;
+    unsigned long long v = 0; if (fscanf(f, "%llu", &v) != 1) v = 0; fclose(f);
+    return v;
+}
+
+static void print_iface(const char *name, int show_addr, int stats) {
     struct ifreq ifr; memset(&ifr, 0, sizeof ifr);
     snprintf(ifr.ifr_name, IFNAMSIZ, "%s", name);
     short fl = 0; int mtu = 0;
@@ -92,6 +99,10 @@ static void print_iface(const char *name, int show_addr) {
         else
             printf("    link/ether %02x:%02x:%02x:%02x:%02x:%02x\n", m[0], m[1], m[2], m[3], m[4], m[5]);
     }
+    if (stats)
+        printf("    RX: %llu bytes %llu packets   TX: %llu bytes %llu packets\n",
+               stat_of(name, "rx_bytes"), stat_of(name, "rx_packets"),
+               stat_of(name, "tx_bytes"), stat_of(name, "tx_packets"));
     if (!show_addr) return;
 
     struct ifaddrs *ifa, *p;
@@ -116,12 +127,28 @@ static void print_iface(const char *name, int show_addr) {
     freeifaddrs(ifa);
 }
 
-static int show_all(int show_addr, const char *only) {
+static int show_all(int show_addr, int stats, const char *only) {
     struct if_nameindex *idx = if_nameindex(), *p;
     if (!idx) return die("if_nameindex");
     for (p = idx; p->if_index; p++)
-        if (!only || !strcmp(only, p->if_name)) print_iface(p->if_name, show_addr);
+        if (!only || !strcmp(only, p->if_name)) print_iface(p->if_name, show_addr, stats);
     if_freenameindex(idx);
+    return 0;
+}
+
+/* the ARP/neighbour table from /proc/net/arp */
+static int show_neigh(const char *only) {
+    FILE *f = fopen("/proc/net/arp", "r");
+    if (!f) return die("/proc/net/arp");
+    char line[256];
+    if (!fgets(line, sizeof line, f)) { fclose(f); return 0; }   /* header */
+    while (fgets(line, sizeof line, f)) {
+        char ip[64], hw[64], mask[64], dev[IFNAMSIZ]; unsigned hwtype, flags;
+        if (sscanf(line, "%63s 0x%x 0x%x %63s %63s %15s", ip, &hwtype, &flags, hw, mask, dev) != 6) continue;
+        if (only && strcmp(only, dev)) continue;
+        printf("%s dev %s lladdr %s %s\n", ip, dev, hw, (flags & 0x2) ? "REACHABLE" : "INCOMPLETE");
+    }
+    fclose(f);
     return 0;
 }
 
@@ -185,12 +212,13 @@ static int addr_del(int argc, char **argv) {
 }
 
 static int link_set(int argc, char **argv) {
-    /* link set IF up|down | mtu N */
-    if (argc < 2) { fprintf(stderr, "usage: vip link set IF up|down|mtu N\n"); return 1; }
-    const char *dev = argv[0];
+    /* link set [dev] IF up|down | mtu N */
+    int base = (argc >= 1 && !strcmp(argv[0], "dev")) ? 1 : 0;   /* tolerate the ip 'dev' keyword */
+    if (argc < base + 2) { fprintf(stderr, "usage: vip link set IF up|down|mtu N\n"); return 1; }
+    const char *dev = argv[base];
     struct ifreq ifr; memset(&ifr, 0, sizeof ifr);
     snprintf(ifr.ifr_name, IFNAMSIZ, "%s", dev);
-    for (int i = 1; i < argc; i++) {
+    for (int i = base + 1; i < argc; i++) {
         if (!strcmp(argv[i], "up") || !strcmp(argv[i], "down")) {
             if (ioctl(S, SIOCGIFFLAGS, &ifr) < 0) return die("get flags");
             if (!strcmp(argv[i], "up")) ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
@@ -232,38 +260,59 @@ static int route_mod(int add, int argc, char **argv) {
 static int usage(void) {
     fprintf(stderr,
         "usage:\n"
-        "  vip [addr]                         show interfaces and addresses\n"
+        "  vip [-s] [addr|link|route|neigh] [show] [dev IF]   show state\n"
         "  vip addr add IP[/PREFIX] dev IF    add an address\n"
         "  vip addr del dev IF                remove the address\n"
-        "  vip link                           show interfaces\n"
         "  vip link set IF up|down|mtu N      change link state\n"
-        "  vip route                          show routes\n"
         "  vip route add default via GW [dev IF] [metric N]\n"
         "  vip route add DEST/PREFIX [via GW] dev IF [metric N]\n"
-        "  vip route del ...                  remove a route\n");
+        "  vip route del ...                  remove a route\n"
+        "  vip neigh                          show the ARP/neighbour table\n"
+        "  (accepts and ignores ip-style global flags: -4 -6 -o -br -n -j ...)\n");
     return 1;
+}
+
+/* from the args after an object, skip a leading show/list/ls and return any
+ * 'dev IF' or bare interface name as a filter (NULL if none). */
+static const char *show_filter(int n, char **a) {
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(a[i], "show") || !strcmp(a[i], "list") || !strcmp(a[i], "ls") || !strcmp(a[i], "s")) continue;
+        if (!strcmp(a[i], "dev") && i + 1 < n) return a[i + 1];
+        if (a[i][0] != '-') return a[i];
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv) {
     S = socket(AF_INET, SOCK_DGRAM, 0);
     if (S < 0) return die("socket");
 
-    const char *obj = argc > 1 ? argv[1] : "addr";
-    if (!strcmp(obj, "-h") || !strcmp(obj, "help") || !strcmp(obj, "--help")) return usage();
+    int stats = 0, ai = 1;
+    for (; ai < argc && argv[ai][0] == '-'; ai++) {         /* ip-style global flags */
+        const char *o = argv[ai];
+        if (!strcmp(o, "-s") || !strcmp(o, "-stats")) stats = 1;
+        else if (!strcmp(o, "-h") || !strcmp(o, "--help") || !strcmp(o, "help")) return usage();
+        /* -4 -6 -o -br -brief -n -j -r -d etc.: accepted and ignored for compatibility */
+    }
+    const char *obj = ai < argc ? argv[ai++] : "addr";
+    char **rest = argv + ai; int nrest = argc - ai;
 
+    if (!strcmp(obj, "help") || !strcmp(obj, "--help")) return usage();
     if (!strcmp(obj, "addr") || !strcmp(obj, "a") || !strcmp(obj, "address")) {
-        if (argc > 2 && !strcmp(argv[2], "add")) return addr_add(argc - 3, argv + 3);
-        if (argc > 2 && !strcmp(argv[2], "del")) return addr_del(argc - 3, argv + 3);
-        return show_all(1, argc > 2 ? argv[2] : NULL);
+        if (nrest && !strcmp(rest[0], "add")) return addr_add(nrest - 1, rest + 1);
+        if (nrest && !strcmp(rest[0], "del")) return addr_del(nrest - 1, rest + 1);
+        return show_all(1, stats, show_filter(nrest, rest));
     }
     if (!strcmp(obj, "link") || !strcmp(obj, "l")) {
-        if (argc > 2 && !strcmp(argv[2], "set")) return link_set(argc - 3, argv + 3);
-        return show_all(0, argc > 2 ? argv[2] : NULL);
+        if (nrest && !strcmp(rest[0], "set")) return link_set(nrest - 1, rest + 1);
+        return show_all(0, stats, show_filter(nrest, rest));
     }
-    if (!strcmp(obj, "route") || !strcmp(obj, "r")) {
-        if (argc > 2 && !strcmp(argv[2], "add")) return route_mod(1, argc - 3, argv + 3);
-        if (argc > 2 && !strcmp(argv[2], "del")) return route_mod(0, argc - 3, argv + 3);
+    if (!strcmp(obj, "route") || !strcmp(obj, "r") || !strcmp(obj, "ro")) {
+        if (nrest && !strcmp(rest[0], "add")) return route_mod(1, nrest - 1, rest + 1);
+        if (nrest && !strcmp(rest[0], "del")) return route_mod(0, nrest - 1, rest + 1);
         return show_route();
     }
+    if (!strcmp(obj, "neigh") || !strcmp(obj, "n") || !strcmp(obj, "neighbour") || !strcmp(obj, "neighbor"))
+        return show_neigh(show_filter(nrest, rest));
     return usage();
 }
