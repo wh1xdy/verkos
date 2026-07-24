@@ -895,10 +895,9 @@ if [ -x /usr/bin/verkbox ]; then
     # `ls -l` with "unknown option"). `ls` now qualifies — verified byte-exact for
     # -l/-a/-A/-1/-R/-r/-t/-S/-d/-h/-F and --color — so it takes over. The other
     # applets ship (callable as `verkbox <applet>`) but stay GNU-backed until each
-    # clears the same bar. `ls` and `cat` qualify (both differentially byte-exact
-    # across all common flags); the rest stay GNU-backed for now.
-    ln -sf verkbox /usr/bin/ls
-    ln -sf verkbox /usr/bin/cat
+    # clears the same bar: flag-complete AND differentially byte-exact vs GNU across
+    # all common flags (incl. the ones autotools/configure use, like `ls -i`).
+    for t in ls cat head tail wc; do ln -sf verkbox /usr/bin/"$t"; done
     reg verkbox 0.1
 fi
 
