@@ -1,4 +1,4 @@
-/* verkgetty — VerkOS's own getty.
+/* vgetty — VerkOS's own getty.
  *
  * A getty is a leaf process: systemd starts it as the ExecStart of getty@ /
  * serial-getty@ on a console, and its whole job is to prepare a terminal and
@@ -6,11 +6,11 @@
  * coupling and zero boot risk — the first step of making VerkOS' init userland
  * ours (in the spirit of vpk/verkbox; dhcpcd already replaced networkd).
  *
- * verkgetty opens the tty, makes it the session's controlling terminal, applies
+ * vgetty opens the tty, makes it the session's controlling terminal, applies
  * sane termios, and execs /bin/login (with -f <user> for the autologin path).
  * It accepts agetty-style arguments so the systemd unit reads naturally:
  *
- *   verkgetty [--autologin USER] [--noclear] [--keep-baud] TTY [BAUD_LIST] [TERM]
+ *   vgetty [--autologin USER] [--noclear] [--keep-baud] TTY [BAUD_LIST] [TERM]
  *
  * Unknown options and the baud list are ignored; the first non-option word is
  * the tty (systemd's %I), a following non-numeric word is $TERM.
@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
             term = a;                      /* a bare non-numeric word = $TERM */
         }
     }
-    if (!tty) { fprintf(stderr, "verkgetty: no tty specified\n"); return 1; }
+    if (!tty) { fprintf(stderr, "vgetty: no tty specified\n"); return 1; }
 
     char path[512];
     if (tty[0] == '/') snprintf(path, sizeof path, "%s", tty);
@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
     setsid();
 
     int fd = open(path, O_RDWR | O_NOCTTY);
-    if (fd < 0) { perror("verkgetty: open tty"); return 1; }
+    if (fd < 0) { perror("vgetty: open tty"); return 1; }
 
     ioctl(fd, TIOCSCTTY, 1);               /* claim it as the controlling tty */
 
@@ -85,6 +85,6 @@ int main(int argc, char **argv) {
     if (autologin && user) execl("/bin/login", "login", "-f", user, (char *)NULL);
     else                   execl("/bin/login", "login", (char *)NULL);
 
-    perror("verkgetty: exec /bin/login");
+    perror("vgetty: exec /bin/login");
     return 1;
 }
