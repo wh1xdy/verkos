@@ -163,6 +163,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vsys/vsys.c" "$ROOTFS/sources/vsys.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vhex/vhex.c" "$ROOTFS/sources/vhex.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vtree/vtree.c" "$ROOTFS/sources/vtree.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vgzip/vgzip.c" "$ROOTFS/sources/vgzip.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -797,6 +798,11 @@ say "vtree (VerkOS tree)"
 gcc -O2 -o /usr/bin/vtree /sources/vtree.c
 cd /sources; mark vtree
 fi
+if need vgzip; then
+say "vgzip (VerkOS gzip/gunzip/zcat — own DEFLATE)"
+gcc -O2 -o /usr/bin/vgzip /sources/vgzip.c
+cd /sources; mark vgzip
+fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
@@ -1109,7 +1115,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vnetcat 0.1; reg vmon 0.1; reg vget 0.1
     reg ved 0.1; reg vwhois 0.1; reg vsed 0.1; reg vfind 0.1; reg vxargs 0.1
     reg vdate 0.1; reg vstat 0.1
-    reg vsys 0.1; reg vhex 0.1; reg vtree 0.1
+    reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1150,6 +1156,11 @@ if [ -x /usr/bin/vip ]; then
     netln hexdump vhex
     netln xxd vhex
     netln tree vtree
+    # gzip/gunzip/zcat: our own DEFLATE, build-verified (decompresses source
+    # tarballs; hello builds through it). Interoperates with standard gzip both ways.
+    netln gzip vgzip
+    netln gunzip vgzip
+    netln zcat vgzip
 fi
 
 echo
