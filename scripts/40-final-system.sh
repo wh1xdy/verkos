@@ -158,6 +158,8 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vsed/vsed.c" "$ROOTFS/sources/vsed.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vfind/vfind.c" "$ROOTFS/sources/vfind.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vxargs/vxargs.c" "$ROOTFS/sources/vxargs.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vdate/vdate.c" "$ROOTFS/sources/vdate.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vstat/vstat.c" "$ROOTFS/sources/vstat.c" 2>/dev/null || true
 }
 unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 
@@ -767,6 +769,16 @@ say "vxargs (VerkOS xargs)"
 gcc -O2 -o /usr/bin/vxargs /sources/vxargs.c
 cd /sources; mark vxargs
 fi
+if need vdate; then
+say "vdate (VerkOS date)"
+gcc -O2 -o /usr/bin/vdate /sources/vdate.c
+cd /sources; mark vdate
+fi
+if need vstat; then
+say "vstat (VerkOS stat)"
+gcc -O2 -o /usr/bin/vstat /sources/vstat.c
+cd /sources; mark vstat
+fi
 
 # --- System configuration (LFS ch.9 essentials) ---------------------------
 say "System configuration files"
@@ -1078,6 +1090,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vping 0.1; reg vtrace 0.1; reg vss 0.1
     reg vnetcat 0.1; reg vmon 0.1; reg vget 0.1
     reg ved 0.1; reg vwhois 0.1; reg vsed 0.1; reg vfind 0.1; reg vxargs 0.1
+    reg vdate 0.1; reg vstat 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1112,6 +1125,8 @@ if [ -x /usr/bin/vip ]; then
     netln whois vwhois
     netln find vfind
     netln xargs vxargs
+    netln date vdate      # build-verified
+    netln stat vstat      # build-verified
 fi
 
 echo
