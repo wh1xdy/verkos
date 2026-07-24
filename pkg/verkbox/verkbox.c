@@ -211,26 +211,35 @@ static int a_dirname(int c, char **v) {
 
 /* head [-n N] [files...] — first N lines (default 10) */
 static int a_head(int c, char **v) {
-    long nlines = 10; int i = 1;
+    long count = 10; int bytes = 0, quiet = 0, verbose = 0, i = 1, endopts = 0;
     for (; i < c; i++) {
-        if (!strcmp(v[i], "-n") && i+1 < c) { nlines = atol(v[++i]); }
-        else if (v[i][0] == '-' && v[i][1] == 'n' && v[i][2]) { nlines = atol(v[i]+2); }
-        else if (v[i][0] == '-' && isdigit((unsigned char)v[i][1])) { nlines = atol(v[i]+1); }
-        else break;
+        char *a = v[i];
+        if (endopts || a[0] != '-' || !a[1]) break;
+        if (!strcmp(a,"--")) { i++; break; }
+        else if (!strcmp(a,"-n") && i+1<c) { count=atol(v[++i]); bytes=0; }
+        else if (!strcmp(a,"-c") && i+1<c) { count=atol(v[++i]); bytes=1; }
+        else if (a[1]=='n' && a[2]) { count=atol(a+2); bytes=0; }
+        else if (a[1]=='c' && a[2]) { count=atol(a+2); bytes=1; }
+        else if (isdigit((unsigned char)a[1])) { count=atol(a+1); bytes=0; }
+        else if (!strcmp(a,"-q")||!strcmp(a,"--quiet")||!strcmp(a,"--silent")) quiet=1;
+        else if (!strcmp(a,"-v")||!strcmp(a,"--verbose")) verbose=1;
+        else { fprintf(stderr,"head: invalid option -- '%c'\n",a[1]); return 1; }
     }
     int nfiles = c - i, rc = 0, first = 1;
-    if (nfiles <= 0) {                                   /* stdin */
+    int headers = verbose || (nfiles > 1 && !quiet);
+    if (nfiles <= 0) {
         long k = 0; int ch;
-        while (k < nlines && (ch = getchar()) != EOF) { putchar(ch); if (ch == '\n') k++; }
+        while (k < count && (ch = getchar()) != EOF) { putchar(ch); k += bytes ? 1 : (ch=='\n'); }
         return 0;
     }
     for (; i < c; i++) {
-        FILE *f = fopen(v[i], "rb");
-        if (!f) { fprintf(stderr, "head: %s: %s\n", v[i], strerror(errno)); rc = 1; continue; }
-        if (nfiles > 1) { printf("%s==> %s <==\n", first ? "" : "\n", v[i]); first = 0; }
+        int is_stdin = !strcmp(v[i],"-");
+        FILE *f = is_stdin ? stdin : fopen(v[i], "rb");
+        if (!f) { fprintf(stderr, "head: cannot open '%s' for reading: %s\n", v[i], strerror(errno)); rc = 1; continue; }
+        if (headers) { printf("%s==> %s <==\n", first ? "" : "\n", is_stdin?"standard input":v[i]); first = 0; }
         long k = 0; int ch;
-        while (k < nlines && (ch = getc(f)) != EOF) { putchar(ch); if (ch == '\n') k++; }
-        fclose(f);
+        while (k < count && (ch = getc(f)) != EOF) { putchar(ch); k += bytes ? 1 : (ch=='\n'); }
+        if (!is_stdin) fclose(f);
     }
     return rc;
 }
@@ -239,73 +248,65 @@ static int a_head(int c, char **v) {
  * right-justified to a shared field width = digits of the largest count). */
 static int digits(long x) { int d = 1; if (x < 0) x = -x; while (x >= 10) { x /= 10; d++; } return d; }
 static int a_wc(int c, char **v) {
-    int wl = 0, ww = 0, wc = 0, i = 1;
+    int wl=0, ww=0, wm=0, wc=0, wL=0, i=1;   /* lines words chars bytes max-line */
     for (; i < c; i++) {
         if (v[i][0] != '-' || !v[i][1]) break;
-        int ok = 1; for (char *p = v[i]+1; *p; p++) if (*p!='l'&&*p!='w'&&*p!='c') { ok = 0; break; }
+        int ok = 1; for (char *p=v[i]+1;*p;p++) if (*p!='l'&&*p!='w'&&*p!='c'&&*p!='m'&&*p!='L') { ok=0; break; }
         if (!ok) break;
-        for (char *p = v[i]+1; *p; p++) { if(*p=='l')wl=1; else if(*p=='w')ww=1; else if(*p=='c')wc=1; }
+        for (char *p=v[i]+1;*p;p++){ if(*p=='l')wl=1;else if(*p=='w')ww=1;else if(*p=='c')wc=1;else if(*p=='m')wm=1;else if(*p=='L')wL=1; }
     }
-    if (!wl && !ww && !wc) { wl = ww = wc = 1; }          /* default: all */
-    int nfiles = c - i, rc = 0, n = nfiles > 0 ? nfiles : 1;
-    long *La = calloc(n, sizeof(long)), *Wa = calloc(n, sizeof(long)), *Ca = calloc(n, sizeof(long));
-    const char **lab = calloc(n, sizeof(char*));
-    int *ok = calloc(n, sizeof(int));
-    if (!La||!Wa||!Ca||!lab||!ok) { free(La);free(Wa);free(Ca);free(lab);free(ok); return 1; }
-    long tl = 0, tw = 0, tc = 0, maxv = 0, maxall = 0;
-    for (int k = 0; k < n; k++) {
-        FILE *f = stdin;
-        if (nfiles > 0) {
-            f = fopen(v[i+k], "rb");
-            if (!f) { fprintf(stderr, "wc: %s: %s\n", v[i+k], strerror(errno)); rc = 1; continue; }
-            lab[k] = v[i+k];
+    if (!wl&&!ww&&!wc&&!wm&&!wL) { wl=ww=wc=1; }          /* default: lines words bytes */
+    int nfiles=c-i, rc=0, n=nfiles>0?nfiles:1;
+    long *La=calloc(n,sizeof(long)),*Wa=calloc(n,sizeof(long)),*Ma=calloc(n,sizeof(long)),
+         *Ca=calloc(n,sizeof(long)),*Lm=calloc(n,sizeof(long));
+    const char **lab=calloc(n,sizeof(char*)); int *okf=calloc(n,sizeof(int));
+    if (!La||!Wa||!Ma||!Ca||!Lm||!lab||!okf){ free(La);free(Wa);free(Ma);free(Ca);free(Lm);free(lab);free(okf); return 1; }
+    long tl=0,tw=0,tm=0,tc=0,tL=0, maxv=0, maxall=0;
+    for (int k=0;k<n;k++) {
+        FILE *f=stdin;
+        if (nfiles>0){ f=fopen(v[i+k],"rb"); if(!f){fprintf(stderr,"wc: %s: %s\n",v[i+k],strerror(errno));rc=1;continue;} lab[k]=v[i+k]; }
+        long L=0,W=0,M=0,C=0,LL=0,col=0; int inword=0,ch;
+        while ((ch=getc(f))!=EOF) {
+            C++; M++;                                    /* C locale: one char per byte */
+            if (ch=='\n'){ L++; if(col>LL)LL=col; col=0; }
+            else if (ch=='\t') col=(col/8+1)*8;          /* tab -> next tab stop (GNU -L) */
+            else if (isprint((unsigned char)ch)) col++;  /* other control chars: width 0 */
+            if (isspace(ch)) inword=0; else if(!inword){ inword=1; W++; }
         }
-        long L = 0, W = 0, C = 0; int inword = 0, ch;
-        while ((ch = getc(f)) != EOF) {
-            C++;
-            if (ch == '\n') L++;
-            if (isspace(ch)) inword = 0; else if (!inword) { inword = 1; W++; }
-        }
-        if (nfiles > 0) fclose(f);
-        La[k]=L; Wa[k]=W; Ca[k]=C; ok[k]=1;
-        tl+=L; tw+=W; tc+=C;
-        if (wl && L>maxv) maxv=L;
-        if (ww && W>maxv) maxv=W;
-        if (wc && C>maxv) maxv=C;
-        if (L>maxall) maxall=L;
-        if (W>maxall) maxall=W;
-        if (C>maxall) maxall=C;
+        if (col>LL) LL=col;                              /* final line w/o newline */
+        if (nfiles>0) fclose(f);
+        La[k]=L;Wa[k]=W;Ma[k]=M;Ca[k]=C;Lm[k]=LL;okf[k]=1;
+        tl+=L;tw+=W;tm+=M;tc+=C; if(LL>tL)tL=LL;
+        if(wl&&L>maxv)maxv=L; if(ww&&W>maxv)maxv=W; if(wm&&M>maxv)maxv=M; if(wc&&C>maxv)maxv=C; if(wL&&LL>maxv)maxv=LL;
+        if(L>maxall)maxall=L; if(W>maxall)maxall=W; if(M>maxall)maxall=M; if(C>maxall)maxall=C; if(LL>maxall)maxall=LL;
     }
-    if (nfiles > 1) {
-        if (wl&&tl>maxv) maxv=tl;
-        if (ww&&tw>maxv) maxv=tw;
-        if (wc&&tc>maxv) maxv=tc;
-        if (tl>maxall) maxall=tl;
-        if (tw>maxall) maxall=tw;
-        if (tc>maxall) maxall=tc;
+    if (nfiles>1) {
+        if(wl&&tl>maxv)maxv=tl; if(ww&&tw>maxv)maxv=tw; if(wm&&tm>maxv)maxv=tm; if(wc&&tc>maxv)maxv=tc; if(wL&&tL>maxv)maxv=tL;
+        if(tl>maxall)maxall=tl; if(tw>maxall)maxall=tw; if(tm>maxall)maxall=tm; if(tc>maxall)maxall=tc; if(tL>maxall)maxall=tL;
     }
-    /* GNU: a single column is sized to its own value; multiple columns share the
-     * width of the largest of all three counts (so columns align even when a
-     * count like bytes isn't printed). */
-    int nflags = wl + ww + wc;
-    int width = digits(nflags == 1 ? maxv : maxall);
-    for (int k = 0; k < n; k++) {
-        if (nfiles > 0 && !ok[k]) continue;
-        int first = 1;
-        if (wl) { if(!first)putchar(' '); printf("%*ld", width, La[k]); first=0; }
-        if (ww) { if(!first)putchar(' '); printf("%*ld", width, Wa[k]); first=0; }
-        if (wc) { if(!first)putchar(' '); printf("%*ld", width, Ca[k]); first=0; }
-        if (lab[k]) printf(" %s", lab[k]);
+    int nflags=wl+ww+wm+wc+wL;
+    int width=digits(nflags==1?maxv:maxall);
+    for (int k=0;k<n;k++) {
+        if (nfiles>0 && !okf[k]) continue;
+        int first=1;
+        if(wl){ if(!first)putchar(' '); printf("%*ld",width,La[k]); first=0; }
+        if(ww){ if(!first)putchar(' '); printf("%*ld",width,Wa[k]); first=0; }
+        if(wm){ if(!first)putchar(' '); printf("%*ld",width,Ma[k]); first=0; }
+        if(wc){ if(!first)putchar(' '); printf("%*ld",width,Ca[k]); first=0; }
+        if(wL){ if(!first)putchar(' '); printf("%*ld",width,Lm[k]); first=0; }
+        if(lab[k]) printf(" %s",lab[k]);
         putchar('\n');
     }
-    if (nfiles > 1) {
-        int first = 1;
-        if (wl) { if(!first)putchar(' '); printf("%*ld", width, tl); first=0; }
-        if (ww) { if(!first)putchar(' '); printf("%*ld", width, tw); first=0; }
-        if (wc) { if(!first)putchar(' '); printf("%*ld", width, tc); first=0; }
+    if (nfiles>1) {
+        int first=1;
+        if(wl){ if(!first)putchar(' '); printf("%*ld",width,tl); first=0; }
+        if(ww){ if(!first)putchar(' '); printf("%*ld",width,tw); first=0; }
+        if(wm){ if(!first)putchar(' '); printf("%*ld",width,tm); first=0; }
+        if(wc){ if(!first)putchar(' '); printf("%*ld",width,tc); first=0; }
+        if(wL){ if(!first)putchar(' '); printf("%*ld",width,tL); first=0; }
         printf(" total\n");
     }
-    free(La);free(Wa);free(Ca);free(lab);free(ok);
+    free(La);free(Wa);free(Ma);free(Ca);free(Lm);free(lab);free(okf);
     return rc;
 }
 
@@ -635,9 +636,20 @@ static int tail_stream(FILE *f, long n, int from_start) {
     return 0;
 }
 
+/* emit the last n bytes, or (from_start) from byte n, of stream f */
+static int tail_bytes(FILE *f, long n, int from_start) {
+    int ch;
+    if (from_start) { long pos=0; while((ch=getc(f))!=EOF){ if(++pos>=n) putchar(ch); } return 0; }
+    if (n <= 0) return 0;
+    char *buf = malloc((size_t)n); if(!buf) return 1;
+    long fill=0, start=0;
+    while ((ch=getc(f))!=EOF) { if(fill<n) buf[fill++]=(char)ch; else { buf[start]=(char)ch; start=(start+1)%n; } }
+    for (long k=0;k<fill;k++) putchar(buf[(start+k)%fill]);
+    free(buf); return 0;
+}
 static int a_tail(int argc, char **argv) {
     long count = 10;
-    int from_start = 0;
+    int from_start = 0, bytes = 0, quiet = 0, verbose = 0;
     int end_opts = 0;
     char **files = malloc((size_t)(argc > 0 ? argc : 1) * sizeof(char *));
     if (!files) { fprintf(stderr, "tail: memory exhausted\n"); return 1; }
@@ -646,21 +658,24 @@ static int a_tail(int argc, char **argv) {
         char *arg = argv[i];
         if (!end_opts && arg[0] == '-' && arg[1] != '\0') {
             if (strcmp(arg, "--") == 0) { end_opts = 1; continue; }
-            if (arg[1] == 'n') {
+            if (arg[1] == 'n' || arg[1] == 'c') {
+                int b = (arg[1] == 'c');
                 const char *spec;
-                if (arg[2] != '\0') {
-                    spec = arg + 2;             /* -nN / -n+K */
-                } else {
+                if (arg[2] != '\0') spec = arg + 2;         /* -nN / -cN / -n+K */
+                else {
                     if (i + 1 >= argc) {
-                        fprintf(stderr, "tail: option requires an argument -- 'n'\n");
+                        fprintf(stderr, "tail: option requires an argument -- '%c'\n", arg[1]);
                         free(files); return 1;
                     }
-                    spec = argv[++i];           /* -n N */
+                    spec = argv[++i];                       /* -n N / -c N */
                 }
                 if (tail_parsecount(spec, &count, &from_start) != 0) {
-                    fprintf(stderr, "tail: invalid number of lines: '%s'\n", spec);
+                    fprintf(stderr, "tail: invalid number: '%s'\n", spec);
                     free(files); return 1;
                 }
+                bytes = b;
+            } else if (!strcmp(arg,"-q")||!strcmp(arg,"--quiet")||!strcmp(arg,"--silent")) { quiet=1;
+            } else if (!strcmp(arg,"-v")||!strcmp(arg,"--verbose")) { verbose=1;
             } else if (isdigit((unsigned char)arg[1])) {
                 if (tail_parsecount(arg + 1, &count, &from_start) != 0) {  /* -N */
                     fprintf(stderr, "tail: invalid number of lines: '%s'\n", arg + 1);
@@ -676,9 +691,10 @@ static int a_tail(int argc, char **argv) {
     }
 
     int ret = 0;
-    int multi = nfiles > 1;
+    int headers = verbose || (nfiles > 1 && !quiet);
     if (nfiles == 0) {
-        ret = tail_stream(stdin, count, from_start);
+        if (headers) printf("==> standard input <==\n");
+        ret = bytes ? tail_bytes(stdin, count, from_start) : tail_stream(stdin, count, from_start);
     } else {
         int printed_header = 0;
         for (int fi = 0; fi < nfiles; fi++) {
@@ -695,12 +711,12 @@ static int a_tail(int argc, char **argv) {
                     continue;
                 }
             }
-            if (multi) {
+            if (headers) {
                 printf("%s==> %s <==\n", printed_header ? "\n" : "",
                        is_stdin ? "standard input" : fn);
                 printed_header = 1;
             }
-            if (tail_stream(f, count, from_start) != 0) ret = 1;
+            if ((bytes ? tail_bytes(f, count, from_start) : tail_stream(f, count, from_start)) != 0) ret = 1;
             if (!is_stdin) fclose(f);
         }
     }
