@@ -218,12 +218,15 @@ cd /sources
 
 # pkgconf — provides pkg-config, needed by kmod, dbus, systemd. Built early so
 # it's on PATH for everything after. Zero dependencies beyond a C compiler.
+if need pkgconf; then
 say "pkgconf ${PKGCONF_VERSION}"
 d=$(unpack pkgconf-${PKGCONF_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --disable-static
 make; make install
 ln -sfv pkgconf /usr/bin/pkg-config
 cd /sources
+mark pkgconf
+fi
 
 # 2-4. ncurses + bash + coreutils (native)
 if need core-userland; then
@@ -355,7 +358,11 @@ cd /sources
 mark util-linux
 fi
 
-# 6. zlib, xz, expat, libcap, kmod — systemd link deps
+# 6-7b. zlib, xz, expat, libcap, kmod, gperf, libffi — systemd link/build deps.
+# Stamped as a group: one-time builds that must NOT rebuild on a `make system`
+# re-run (kmod's libtool chokes re-linking over a dirty tree, and the re-run's
+# verkbox tar can't re-extract .xz), so guard the whole block behind one stamp.
+if need systemd-deps; then
 for pkg in "zlib-${ZLIB_VERSION}.tar.gz" "xz-${XZ_VERSION}.tar.xz"; do
     say "$pkg"; d=$(unpack "$pkg"); cd "$d"
     ./configure --prefix=/usr; make; make install; cd /sources
@@ -371,17 +378,13 @@ d=$(unpack kmod-${KMOD_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr --sysconfdir=/etc --with-openssl=no --with-xz \
     --with-zstd=no --disable-manpages
 make; make install; cd /sources
-
-# 7. gperf — systemd build dep
+# gperf — systemd build dep
 say "gperf ${GPERF_VERSION}"
 d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr; make; make install; cd /sources
-
-# 7b. Python build toolchain for systemd (meson/ninja/jinja2) ---------------
-# libffi → Python → ninja (all from source), then meson/jinja2 via offline pip.
-# --libdir=/usr/lib: libffi otherwise installs to /usr/lib64, which is off the
-# linker path in our merged-/usr (lib, not lib64) layout, so Python's _ctypes
-# fails to import (libffi.so.8 not found). Refresh the linker cache after.
+# libffi — Python's _ctypes dep. --libdir=/usr/lib: libffi otherwise installs to
+# /usr/lib64, off the linker path in our merged-/usr (lib, not lib64) layout, so
+# Python's _ctypes fails to import (libffi.so.8 not found). Refresh ld cache after.
 say "libffi ${LIBFFI_VERSION}"
 d=$(unpack libffi-${LIBFFI_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --libdir=/usr/lib --disable-static
@@ -389,6 +392,10 @@ make; make install
 printf '/usr/lib\n/usr/local/lib\n' > /etc/ld.so.conf
 ldconfig
 cd /sources
+mark systemd-deps
+fi
+
+# 7b. Python build toolchain for systemd (meson/ninja/jinja2) ---------------
 
 if need python; then
 say "Python ${PYTHON_VERSION}"
