@@ -752,36 +752,43 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 AL
 
-# D-Bus system bus units. Our dbus is built without systemd integration (that
-# would pull in glib), so provide the socket + service ourselves and enable the
-# socket. systemd-logind and friends connect to /run/dbus/system_bus_socket.
-mkdir -p /etc/systemd/system/sockets.target.wants /usr/lib/tmpfiles.d
-cat > /usr/lib/systemd/system/dbus.socket <<'DS'
-[Unit]
-Description=D-Bus System Message Bus Socket
-Before=sockets.target
-[Socket]
-ListenStream=/run/dbus/system_bus_socket
-[Install]
-WantedBy=sockets.target
-Also=dbus.service
-DS
+# D-Bus system bus. Our dbus is built WITHOUT systemd integration (that would
+# pull in glib), so it CANNOT do socket activation: --address=systemd: and
+# --systemd-activation require systemd support and make dbus-daemon exit with
+# "compiled without systemd support". Instead run it as a plain service that
+# creates and listens on /run/dbus/system_bus_socket itself (address comes from
+# the built-in system.conf). systemd-logind & friends connect there.
+mkdir -p /etc/systemd/system/multi-user.target.wants /usr/lib/tmpfiles.d
+rm -f /usr/lib/systemd/system/dbus.socket \
+      /etc/systemd/system/sockets.target.wants/dbus.socket
 cat > /usr/lib/systemd/system/dbus.service <<'DV'
 [Unit]
 Description=D-Bus System Message Bus
-Requires=dbus.socket
-After=dbus.socket
+Documentation=man:dbus-daemon(1)
 [Service]
+Type=simple
 ExecStartPre=/usr/bin/mkdir -p /run/dbus
-ExecStart=/usr/bin/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+ExecStart=/usr/bin/dbus-daemon --system --nofork --nopidfile --syslog-only
 ExecReload=/usr/bin/dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig
+Restart=on-failure
 [Install]
+WantedBy=multi-user.target
 Alias=dbus.service
 DV
 echo 'd /run/dbus 0755 root root -' > /usr/lib/tmpfiles.d/dbus.conf
-ln -sf /usr/lib/systemd/system/dbus.socket \
-       /etc/systemd/system/sockets.target.wants/dbus.socket
+ln -sf /usr/lib/systemd/system/dbus.service \
+       /etc/systemd/system/multi-user.target.wants/dbus.service
 ln -sf /usr/lib/systemd/system/dbus.service /etc/systemd/system/dbus.service
+
+# systemd ships dbus policy files (e.g. oom1) referencing service users that our
+# minimal base lacks, making dbus warn "Unknown username systemd-oom". Create the
+# ones referenced so the config loads cleanly.
+for u in systemd-oom:996 systemd-network:995 systemd-resolve:994; do
+    name="${u%%:*}"; uid="${u##*:}"
+    grep -q "^$name:" /etc/passwd || \
+        echo "$name:x:$uid:$uid:$name:/:/usr/bin/false" >> /etc/passwd
+    grep -q "^$name:" /etc/group || echo "$name:x:$uid:" >> /etc/group
+done
 
 # --- Networking: dhcpcd is ACTIVE. systemd-networkd is built but left disabled
 # --- as a swappable option (first concrete step toward replacing systemd bits).
