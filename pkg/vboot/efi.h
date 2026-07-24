@@ -1,0 +1,117 @@
+/* efi.h — a minimal, from-scratch subset of the UEFI ABI for vboot.
+ *
+ * Just the types + protocols vboot needs — no gnu-efi, no vendor headers. On
+ * aarch64 UEFI uses the ordinary AAPCS64 calling convention (unlike x86_64,
+ * which needs ms_abi), so plain C function pointers match the firmware ABI.
+ */
+#ifndef VERK_EFI_H
+#define VERK_EFI_H
+#include <stdint.h>
+
+typedef uint64_t  UINTN;
+typedef int64_t   INTN;
+typedef uint8_t   UINT8;
+typedef uint16_t  UINT16;
+typedef uint32_t  UINT32;
+typedef uint64_t  UINT64;
+typedef uint16_t  CHAR16;
+typedef uint8_t   BOOLEAN;
+typedef void     *EFI_HANDLE;
+typedef void     *EFI_EVENT;
+typedef UINTN     EFI_STATUS;
+typedef UINT64    EFI_PHYSICAL_ADDRESS;
+typedef UINT64    EFI_VIRTUAL_ADDRESS;
+typedef UINT64    EFI_LBA;
+
+#define EFIAPI                              /* aarch64: standard AAPCS, no attr */
+#define IN
+#define OUT
+#define EFIERR(n)      (0x8000000000000000ULL | (n))
+#define EFI_SUCCESS            0
+#define EFI_LOAD_ERROR        EFIERR(1)
+#define EFI_INVALID_PARAMETER EFIERR(2)
+#define EFI_UNSUPPORTED       EFIERR(3)
+#define EFI_BUFFER_TOO_SMALL  EFIERR(5)
+#define EFI_NOT_FOUND         EFIERR(14)
+#define EFI_ERROR(s)   (((INTN)(s)) < 0)
+
+typedef struct { UINT32 Data1; UINT16 Data2, Data3; UINT8 Data4[8]; } EFI_GUID;
+
+typedef struct {
+    UINT64 Signature; UINT32 Revision, HeaderSize, CRC32, Reserved;
+} EFI_TABLE_HEADER;
+
+/* ---- Simple Text Output ------------------------------------------------- */
+struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_RESET)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, BOOLEAN);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_STRING)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, CHAR16*);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_SETATTR)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, UINTN);
+typedef EFI_STATUS (EFIAPI *EFI_TEXT_CLEAR)(struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*);
+typedef struct _EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
+    EFI_TEXT_RESET   Reset;
+    EFI_TEXT_STRING  OutputString;
+    EFI_TEXT_STRING  TestString;
+    void            *QueryMode;
+    void            *SetMode;
+    EFI_TEXT_SETATTR SetAttribute;
+    EFI_TEXT_CLEAR   ClearScreen;
+    void            *SetCursorPosition;
+    void            *EnableCursor;
+    void            *Mode;
+} EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+
+/* ---- Boot Services (only the members vboot uses; order matters!) --------- */
+typedef enum { AllocateAnyPages, AllocateMaxAddress, AllocateAddress } EFI_ALLOCATE_TYPE;
+typedef enum { EfiReservedMemoryType, EfiLoaderCode, EfiLoaderData } EFI_MEMORY_TYPE;
+
+typedef struct _EFI_BOOT_SERVICES {
+    EFI_TABLE_HEADER Hdr;
+    /* task priority */
+    void *RaiseTPL; void *RestoreTPL;
+    /* memory */
+    EFI_STATUS (EFIAPI *AllocatePages)(EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE, UINTN, EFI_PHYSICAL_ADDRESS*);
+    EFI_STATUS (EFIAPI *FreePages)(EFI_PHYSICAL_ADDRESS, UINTN);
+    void *GetMemoryMap;
+    EFI_STATUS (EFIAPI *AllocatePool)(EFI_MEMORY_TYPE, UINTN, void**);
+    EFI_STATUS (EFIAPI *FreePool)(void*);
+    /* event & timer */
+    void *CreateEvent; void *SetTimer; void *WaitForEvent; void *SignalEvent;
+    void *CloseEvent; void *CheckEvent;
+    /* protocol handlers */
+    void *InstallProtocolInterface; void *ReinstallProtocolInterface; void *UninstallProtocolInterface;
+    EFI_STATUS (EFIAPI *HandleProtocol)(EFI_HANDLE, EFI_GUID*, void**);
+    void *Reserved; void *RegisterProtocolNotify;
+    EFI_STATUS (EFIAPI *LocateHandle)(UINTN, EFI_GUID*, void*, UINTN*, EFI_HANDLE*);
+    void *LocateDevicePath; void *InstallConfigurationTable;
+    /* image */
+    EFI_STATUS (EFIAPI *LoadImage)(BOOLEAN, EFI_HANDLE, void*, void*, UINTN, EFI_HANDLE*);
+    EFI_STATUS (EFIAPI *StartImage)(EFI_HANDLE, UINTN*, CHAR16**);
+    EFI_STATUS (EFIAPI *Exit)(EFI_HANDLE, EFI_STATUS, UINTN, CHAR16*);
+    void *UnloadImage;
+    EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE, UINTN);
+    /* misc */
+    void *GetNextMonotonicCount;
+    EFI_STATUS (EFIAPI *Stall)(UINTN);
+    void *SetWatchdogTimer;
+    /* driver support / open protocol */
+    void *ConnectController; void *DisconnectController;
+    EFI_STATUS (EFIAPI *OpenProtocol)(EFI_HANDLE, EFI_GUID*, void**, EFI_HANDLE, EFI_HANDLE, UINT32);
+    void *CloseProtocol; void *OpenProtocolInformation;
+    void *ProtocolsPerHandle;
+    EFI_STATUS (EFIAPI *LocateHandleBuffer)(UINTN, EFI_GUID*, void*, UINTN*, EFI_HANDLE**);
+    EFI_STATUS (EFIAPI *LocateProtocol)(EFI_GUID*, void*, void**);
+    /* ... remainder unused */
+} EFI_BOOT_SERVICES;
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    CHAR16 *FirmwareVendor; UINT32 FirmwareRevision;
+    EFI_HANDLE ConsoleInHandle; void *ConIn;
+    EFI_HANDLE ConsoleOutHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
+    EFI_HANDLE StandardErrorHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
+    void *RuntimeServices;
+    EFI_BOOT_SERVICES *BootServices;
+    UINTN NumberOfTableEntries; void *ConfigurationTable;
+} EFI_SYSTEM_TABLE;
+
+#endif
