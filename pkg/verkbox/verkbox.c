@@ -325,7 +325,7 @@ static int a_seq(int c, char **v) {
 /* -------------------------------------------------- extended applets --- */
 /* ---- ls ---- */
 struct ls_ent { char *name; struct stat st; char *link; int skip; };
-static int ls_all, ls_almost, ls_lng, ls_recurse, ls_rev, ls_bytime, ls_bysize, ls_dirself, ls_human, ls_class;
+static int ls_all, ls_almost, ls_lng, ls_recurse, ls_rev, ls_bytime, ls_bysize, ls_dirself, ls_human, ls_class, ls_inode;
 
 static int ls_namecmp(const void *a, const void *b) {
     const struct ls_ent *x = a, *y = b; int r = strcmp(x->name, y->name);
@@ -392,6 +392,11 @@ static char ls_typechar(const struct stat *st) {
 /* print an already-sorted set of entries. show_total: emit the "total N" line
  * (directory listings do; a group of file operands does not). */
 static void ls_print(struct ls_ent *e, int n, int show_total) {
+    char ino[n>0?n:1][24]; int wi=1;
+    if (ls_inode) for (int i=0;i<n;i++) {
+        snprintf(ino[i],sizeof ino[i],"%lu",(unsigned long)e[i].st.st_ino);
+        int l=(int)strlen(ino[i]); if(l>wi) wi=l;
+    }
     if (ls_lng) {
         char modes[n>0?n:1][11]; char nlink[n>0?n:1][16];
         char sizes[n>0?n:1][32]; char dates[n>0?n:1][40];
@@ -417,6 +422,7 @@ static void ls_print(struct ls_ent *e, int n, int show_total) {
         }
         for (int i=0;i<n;i++) {
             if (e[i].skip) continue;   /* dir operand: counted for width, not printed here */
+            if (ls_inode) printf("%*s ", wi, ino[i]);
             printf("%s %*s %-*s %-*s %*s %s %s", modes[i], wn,nlink[i], wo,own[i], wg,grp[i], ws,sizes[i], dates[i], e[i].name);
             if (e[i].link) printf(" -> %s", e[i].link);
             else if (ls_class) { char c=ls_typechar(&e[i].st); if(c&&c!='@') putchar(c); }
@@ -426,6 +432,7 @@ static void ls_print(struct ls_ent *e, int n, int show_total) {
     } else {
         for (int i=0;i<n;i++) {
             if (e[i].skip) continue;
+            if (ls_inode) printf("%*s ", wi, ino[i]);
             fputs(e[i].name, stdout);
             if (ls_class) { char c=ls_typechar(&e[i].st); if(c) putchar(c); }
             putchar('\n');
@@ -473,7 +480,7 @@ static int ls_dir(const char *path, int print_header, int first) {
     return rc;
 }
 static int a_ls(int argc, char **argv) {
-    ls_all=ls_almost=ls_lng=ls_recurse=ls_rev=ls_bytime=ls_bysize=ls_dirself=ls_human=ls_class=0;
+    ls_all=ls_almost=ls_lng=ls_recurse=ls_rev=ls_bytime=ls_bysize=ls_dirself=ls_human=ls_class=ls_inode=0;
     int i, endopts=0, status=0;
     char **ops = malloc(sizeof(char*)*(argc>0?argc:1)); int nop=0;
     for (i=1;i<argc;i++) {
@@ -484,6 +491,7 @@ static int a_ls(int argc, char **argv) {
                 if(!strcmp(a,"--all"))ls_all=1; else if(!strcmp(a,"--almost-all"))ls_almost=1;
                 else if(!strcmp(a,"--recursive"))ls_recurse=1; else if(!strcmp(a,"--reverse"))ls_rev=1;
                 else if(!strcmp(a,"--human-readable"))ls_human=1; else if(!strcmp(a,"--classify"))ls_class=1;
+                else if(!strcmp(a,"--inode"))ls_inode=1;
                 else if(!strncmp(a,"--color",7)) { /* we don't colorize: accept & ignore */ }
                 else { fprintf(stderr,"ls: unrecognized option '%s'\n",a); free(ops); return 2; }
                 continue;
@@ -492,7 +500,7 @@ static int a_ls(int argc, char **argv) {
                 case 'a':ls_all=1;break; case 'A':ls_almost=1;break; case 'l':ls_lng=1;break;
                 case 'R':ls_recurse=1;break; case 'r':ls_rev=1;break; case 't':ls_bytime=1;break;
                 case 'S':ls_bysize=1;break; case 'd':ls_dirself=1;break; case 'h':ls_human=1;break;
-                case 'F':ls_class=1;break; case '1':break;
+                case 'F':ls_class=1;break; case 'i':ls_inode=1;break; case '1':break;
                 default: fprintf(stderr,"ls: invalid option -- '%c'\n",*p); free(ops); return 2;
             }
             continue;
@@ -2278,13 +2286,1237 @@ static int a_touch(int argc, char **argv)
     return status;
 }
 
+/* ------------------------------------------------- extended applets 2 --- */
+/* ---- sort ---- */
+/* sort — sort lines of text. Flags: -n -r -u -f -b (no -k). C locale, byte-wise
+ * default. Matches GNU: numeric compares the leading number (no exponent) at
+ * arbitrary precision; when keys tie, whole lines are compared byte-wise as a
+ * last resort (only -r reverses that); -u drops lines whose *key* compares
+ * equal to the previous line; a final line lacking a newline still counts and
+ * every output line is newline-terminated. */
+static int sort_nflag, sort_rflag, sort_fflag, sort_bflag;
+
+/* true if the numeric prefix at p has zero magnitude ("0", "0.0", "", "abc"...) */
+static int sort_iszero(const char *p) {
+    for (; (*p >= '0' && *p <= '9') || *p == '.'; p++)
+        if (*p > '0' && *p <= '9') return 0;
+    return 1;
+}
+
+/* compare magnitudes of two numeric prefixes (sign already stripped) */
+static int sort_magcmp(const char *a, const char *b) {
+    const char *ai = a, *bi = b;
+    while (*ai == '0') ai++;
+    while (*bi == '0') bi++;
+    const char *ae = ai; while (*ae >= '0' && *ae <= '9') ae++;
+    const char *be = bi; while (*be >= '0' && *be <= '9') be++;
+    long la = ae - ai, lb = be - bi;
+    if (la != lb) return la < lb ? -1 : 1;
+    while (ai < ae) {
+        if (*ai != *bi) return (unsigned char)*ai < (unsigned char)*bi ? -1 : 1;
+        ai++; bi++;
+    }
+    const char *af = ae, *bf = be;
+    if (*af == '.') af++;
+    if (*bf == '.') bf++;
+    for (;;) {
+        int ca = (*af >= '0' && *af <= '9');
+        int cb = (*bf >= '0' && *bf <= '9');
+        if (!ca && !cb) return 0;
+        int da = ca ? (unsigned char)*af : '0';
+        int db = cb ? (unsigned char)*bf : '0';
+        if (da != db) return da < db ? -1 : 1;
+        if (ca) af++;
+        if (cb) bf++;
+    }
+}
+
+/* GNU-style leading-number comparison (leading blanks skipped, no exponent) */
+static int sort_numcmp(const char *a, const char *b) {
+    while (*a == ' ' || *a == '\t') a++;
+    while (*b == ' ' || *b == '\t') b++;
+    int sa = 1, sb = 1;
+    if (*a == '-') { sa = -1; a++; }
+    if (*b == '-') { sb = -1; b++; }
+    int ea = sort_iszero(a) ? 0 : sa;   /* -0 and non-numeric collapse to 0 */
+    int eb = sort_iszero(b) ? 0 : sb;
+    if (ea != eb) return ea < eb ? -1 : 1;
+    int mag = sort_magcmp(a, b);
+    return ea < 0 ? -mag : mag;
+}
+
+/* case-folding byte comparison (C locale toupper) */
+static int sort_foldcmp(const char *a, const char *b) {
+    for (;;) {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        int fa = toupper(ca), fb = toupper(cb);
+        if (fa != fb) return fa < fb ? -1 : 1;
+        if (ca == 0) return 0;
+    }
+}
+
+/* key comparison honouring -n/-f/-b; no last-resort, no reverse */
+static int sort_keycmp(const char *a, const char *b) {
+    const char *pa = a, *pb = b;
+    if (sort_bflag) {
+        while (*pa == ' ' || *pa == '\t') pa++;
+        while (*pb == ' ' || *pb == '\t') pb++;
+    }
+    if (sort_nflag) return sort_numcmp(pa, pb);
+    if (sort_fflag) return sort_foldcmp(pa, pb);
+    return strcmp(pa, pb);
+}
+
+static int sort_cmp(const void *pa, const void *pb) {
+    const char *a = *(const char *const *)pa;
+    const char *b = *(const char *const *)pb;
+    int r = sort_keycmp(a, b);
+    if (r == 0) r = strcmp(a, b);      /* last resort: whole line, byte-wise */
+    return sort_rflag ? -r : r;
+}
+
+/* read one line (newline stripped); returns NULL at EOF with nothing read */
+static char *sort_readline(FILE *fp) {
+    size_t cap = 128, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    int c;
+    while ((c = getc(fp)) != EOF) {
+        if (len + 1 >= cap) {
+            char *nb = realloc(buf, cap *= 2);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+        if (c == '\n') { buf[len] = '\0'; return buf; }
+        buf[len++] = (char)c;
+    }
+    if (len == 0) { free(buf); return NULL; }
+    buf[len] = '\0';
+    return buf;
+}
+
+static int a_sort(int argc, char **argv) {
+    sort_nflag = sort_rflag = sort_fflag = sort_bflag = 0;
+    int uflag = 0, endopts = 0, i;
+    char **files = malloc((argc > 0 ? argc : 1) * sizeof(char *));
+    int nfiles = 0;
+    if (!files) { fprintf(stderr, "sort: out of memory\n"); return 2; }
+
+    for (i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!endopts && arg[0] == '-' && arg[1] != '\0') {
+            if (arg[1] == '-' && arg[2] == '\0') { endopts = 1; continue; }
+            for (char *p = arg + 1; *p; p++) {
+                switch (*p) {
+                    case 'n': sort_nflag = 1; break;
+                    case 'r': sort_rflag = 1; break;
+                    case 'u': uflag = 1; break;
+                    case 'f': sort_fflag = 1; break;
+                    case 'b': sort_bflag = 1; break;
+                    default:
+                        fprintf(stderr, "sort: invalid option -- '%c'\n", *p);
+                        free(files);
+                        return 2;
+                }
+            }
+        } else {
+            files[nfiles++] = arg;
+        }
+    }
+
+    char *stdin_src = "-";
+    char **srcs = files; int nsrc = nfiles;
+    if (nsrc == 0) { srcs = &stdin_src; nsrc = 1; }
+
+    char **lines = NULL;
+    size_t nlines = 0, cap = 0;
+
+    for (i = 0; i < nsrc; i++) {
+        FILE *fp;
+        if (strcmp(srcs[i], "-") == 0) fp = stdin;
+        else {
+            fp = fopen(srcs[i], "r");
+            if (!fp) {
+                fprintf(stderr, "sort: %s: %s\n", srcs[i], strerror(errno));
+                for (size_t k = 0; k < nlines; k++) free(lines[k]);
+                free(lines); free(files);
+                return 2;
+            }
+        }
+        char *ln;
+        while ((ln = sort_readline(fp)) != NULL) {
+            if (nlines >= cap) {
+                size_t ncap = cap ? cap * 2 : 128;
+                char **nl = realloc(lines, ncap * sizeof(char *));
+                if (!nl) {
+                    free(ln);
+                    for (size_t k = 0; k < nlines; k++) free(lines[k]);
+                    free(lines); free(files);
+                    if (fp != stdin) fclose(fp);
+                    fprintf(stderr, "sort: out of memory\n");
+                    return 2;
+                }
+                lines = nl; cap = ncap;
+            }
+            lines[nlines++] = ln;
+        }
+        if (fp != stdin) fclose(fp);
+    }
+
+    if (nlines > 1)
+        qsort(lines, nlines, sizeof(char *), sort_cmp);
+
+    for (size_t j = 0; j < nlines; j++) {
+        if (uflag && j > 0 && sort_keycmp(lines[j - 1], lines[j]) == 0)
+            continue;
+        fputs(lines[j], stdout);
+        putchar('\n');
+    }
+
+    for (size_t j = 0; j < nlines; j++) free(lines[j]);
+    free(lines); free(files);
+    return 0;
+}
+
+/* ---- tr ---- */
+/* ---- tr ---- */
+/* Character-class membership for tr set expansion (C locale, ASCII order). */
+static int tr_class_valid(const char *name)
+{
+    static const char *n[] = { "alpha","digit","alnum","upper","lower","space",
+                               "blank","punct","cntrl","graph","print","xdigit", 0 };
+    for (int i = 0; n[i]; i++)
+        if (!strcmp(name, n[i])) return 1;
+    return 0;
+}
+
+static int tr_class_has(const char *name, int c)
+{
+    unsigned char u = (unsigned char)c;
+    if (!strcmp(name, "alpha"))  return isalpha(u)  != 0;
+    if (!strcmp(name, "digit"))  return isdigit(u)  != 0;
+    if (!strcmp(name, "alnum"))  return isalnum(u)  != 0;
+    if (!strcmp(name, "upper"))  return isupper(u)  != 0;
+    if (!strcmp(name, "lower"))  return islower(u)  != 0;
+    if (!strcmp(name, "space"))  return isspace(u)  != 0;
+    if (!strcmp(name, "blank"))  return isblank(u)  != 0;
+    if (!strcmp(name, "punct"))  return ispunct(u)  != 0;
+    if (!strcmp(name, "cntrl"))  return iscntrl(u)  != 0;
+    if (!strcmp(name, "graph"))  return isgraph(u)  != 0;
+    if (!strcmp(name, "print"))  return isprint(u)  != 0;
+    if (!strcmp(name, "xdigit")) return isxdigit(u) != 0;
+    return 0;
+}
+
+/* Append one byte to a growable buffer; returns -1 on OOM. */
+static int tr_push(unsigned char **buf, size_t *len, size_t *cap, int b)
+{
+    if (*len == *cap) {
+        size_t nc = *cap ? *cap * 2 : 64;
+        unsigned char *nb = realloc(*buf, nc);
+        if (!nb) return -1;
+        *buf = nb; *cap = nc;
+    }
+    (*buf)[(*len)++] = (unsigned char)b;
+    return 0;
+}
+
+/* Read one character unit (handling backslash escapes) from *pp, advancing it. */
+static int tr_getone(const char **pp)
+{
+    const char *p = *pp;
+    int c = (unsigned char)*p++;
+    if (c == '\\' && *p) {
+        int e = (unsigned char)*p;
+        switch (e) {
+        case '\\': c = '\\'; p++; break;
+        case 'a':  c = '\a'; p++; break;
+        case 'b':  c = '\b'; p++; break;
+        case 'f':  c = '\f'; p++; break;
+        case 'n':  c = '\n'; p++; break;
+        case 'r':  c = '\r'; p++; break;
+        case 't':  c = '\t'; p++; break;
+        case 'v':  c = '\v'; p++; break;
+        default:
+            if (e >= '0' && e <= '7') {          /* octal escape, up to 3 digits */
+                int val = 0, k = 0;
+                while (k < 3 && *p >= '0' && *p <= '7') { val = val * 8 + (*p - '0'); p++; k++; }
+                c = val & 0xFF;
+            } else {                              /* unknown escape: literal char */
+                c = e; p++;
+            }
+            break;
+        }
+    }
+    *pp = p;
+    return c;
+}
+
+/* Expand a tr SET string into an ordered byte list. Returns 0 / -1 (msg printed). */
+static int tr_expand(const char *set, unsigned char **buf, size_t *len, size_t *cap)
+{
+    const char *p = set;
+    while (*p) {
+        if (p[0] == '[' && p[1] == ':') {         /* [:class:] */
+            const char *e = strstr(p + 2, ":]");
+            if (e) {
+                size_t nl = (size_t)(e - (p + 2));
+                char name[16];
+                if (nl < sizeof name) {
+                    memcpy(name, p + 2, nl); name[nl] = '\0';
+                    if (tr_class_valid(name)) {
+                        for (int c = 0; c < 256; c++)
+                            if (tr_class_has(name, c))
+                                if (tr_push(buf, len, cap, c)) goto oom;
+                        p = e + 2;
+                        continue;
+                    }
+                    fprintf(stderr, "tr: invalid character class '%s'\n", name);
+                    return -1;
+                }
+            }
+            /* not a well-formed class: fall through, treat '[' literally */
+        }
+        {
+            int c1 = tr_getone(&p);
+            if (*p == '-' && p[1] != '\0') {      /* range c1-c2 */
+                const char *q = p + 1;
+                int c2 = tr_getone(&q);
+                p = q;
+                if (c2 < c1) {
+                    fprintf(stderr, "tr: range-endpoints of '%c-%c' are in reverse "
+                                    "collating sequence order\n", c1, c2);
+                    return -1;
+                }
+                for (int c = c1; c <= c2; c++)
+                    if (tr_push(buf, len, cap, c)) goto oom;
+            } else {
+                if (tr_push(buf, len, cap, c1)) goto oom;
+            }
+        }
+    }
+    return 0;
+oom:
+    fprintf(stderr, "tr: memory exhausted\n");
+    return -1;
+}
+
+static int a_tr(int argc, char **argv)
+{
+    int dflag = 0, sflag = 0, cflag = 0;
+    char *set1 = NULL, *set2 = NULL;
+    int nops = 0, endopts = 0;
+
+    /* Single pass: like GNU getopt, options and operands may be intermixed. */
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopts && a[0] == '-' && a[1] != '\0') {
+            if (!strcmp(a, "--")) { endopts = 1; continue; }
+            if (a[1] == '-') {
+                if      (!strcmp(a, "--delete"))          dflag = 1;
+                else if (!strcmp(a, "--squeeze-repeats")) sflag = 1;
+                else if (!strcmp(a, "--complement"))      cflag = 1;
+                else { fprintf(stderr, "tr: unrecognized option '%s'\n", a); return 1; }
+                continue;
+            }
+            for (char *q = a + 1; *q; q++) {
+                switch (*q) {
+                case 'd': dflag = 1; break;
+                case 's': sflag = 1; break;
+                case 'c': case 'C': cflag = 1; break;
+                default:
+                    fprintf(stderr, "tr: invalid option -- '%c'\n", *q);
+                    return 1;
+                }
+            }
+            continue;
+        }
+        if      (nops == 0) set1 = a;
+        else if (nops == 1) set2 = a;
+        else { fprintf(stderr, "tr: extra operand '%s'\n", a); return 1; }
+        nops++;
+    }
+
+    if (nops == 0) {
+        fprintf(stderr, "tr: missing operand\n");
+        return 1;
+    }
+    if (dflag) {
+        if (!sflag && nops > 1) {
+            fprintf(stderr, "tr: extra operand '%s'\n"
+                    "Only one string may be given when deleting without "
+                    "squeezing repeats.\n", set2);
+            return 1;
+        }
+    } else if (!sflag && nops < 2) {
+        fprintf(stderr, "tr: missing operand after '%s'\n"
+                "Two strings must be given when translating.\n", set1);
+        return 1;
+    }
+
+    unsigned char *s1 = NULL, *s2 = NULL;
+    size_t n1 = 0, n2 = 0, c1cap = 0, c2cap = 0;
+    if (tr_expand(set1, &s1, &n1, &c1cap)) { free(s1); return 1; }
+    if (set2 && tr_expand(set2, &s2, &n2, &c2cap)) { free(s1); free(s2); return 1; }
+
+    int mem1[256] = {0};
+    for (size_t k = 0; k < n1; k++) mem1[s1[k]] = 1;
+
+    int do_translate = (!dflag && nops == 2);
+    int do_delete    = dflag;
+    int do_squeeze   = sflag;
+
+    if (do_translate && n2 == 0) {
+        fprintf(stderr, "tr: when not truncating set1, string2 must be non-empty\n");
+        free(s1); free(s2);
+        return 1;
+    }
+
+    unsigned char trans[256];
+    for (int b = 0; b < 256; b++) trans[b] = (unsigned char)b;
+    int del[256] = {0}, sq[256] = {0};
+
+    if (do_translate) {
+        unsigned char last2 = s2[n2 - 1];
+        if (!cflag) {
+            for (size_t k = 0; k < n1; k++)
+                trans[s1[k]] = (k < n2) ? s2[k] : last2;
+        } else {
+            size_t k = 0;
+            for (int b = 0; b < 256; b++)
+                if (!mem1[b]) { trans[b] = (k < n2) ? s2[k] : last2; k++; }
+        }
+    }
+    if (do_delete)
+        for (int b = 0; b < 256; b++) del[b] = cflag ? !mem1[b] : mem1[b];
+    if (do_squeeze) {
+        if (nops == 2)
+            for (size_t k = 0; k < n2; k++) sq[s2[k]] = 1;   /* squeeze on SET2 */
+        else if (!dflag)
+            for (int b = 0; b < 256; b++) sq[b] = cflag ? !mem1[b] : mem1[b];
+        /* dflag && nops==1: squeeze set stays empty */
+    }
+
+    free(s1); free(s2);
+
+    int rc = 0, last = -1;
+    unsigned char inbuf[65536], outbuf[65536];
+    size_t op = 0, rd;
+    while ((rd = fread(inbuf, 1, sizeof inbuf, stdin)) > 0) {
+        for (size_t k = 0; k < rd; k++) {
+            int c = inbuf[k];
+            if (do_delete && del[c]) continue;
+            int oc = do_translate ? trans[c] : c;
+            if (do_squeeze && sq[oc] && oc == last) continue;
+            outbuf[op++] = (unsigned char)oc;
+            last = oc;
+            if (op == sizeof outbuf) {
+                if (fwrite(outbuf, 1, op, stdout) != op) {
+                    fprintf(stderr, "tr: write error: %s\n", strerror(errno));
+                    return 1;
+                }
+                op = 0;
+            }
+        }
+    }
+    if (ferror(stdin)) {
+        fprintf(stderr, "tr: read error: %s\n", strerror(errno));
+        rc = 1;
+    }
+    if (op && fwrite(outbuf, 1, op, stdout) != op) {
+        fprintf(stderr, "tr: write error: %s\n", strerror(errno));
+        rc = 1;
+    }
+    if (fflush(stdout) != 0) {
+        fprintf(stderr, "tr: write error: %s\n", strerror(errno));
+        rc = 1;
+    }
+    return rc;
+}
+
+/* ---- nl ---- */
+/* number lines of a stream. body: 'a' number all, 't' number non-empty
+ * (GNU default), 'n' number none. *np is the shared running line counter. */
+static void nl_run(FILE *f, char body, long *np, char **buf, size_t *bufsz) {
+    ssize_t len;
+    while ((len = getline(buf, bufsz, f)) != -1) {
+        int numbered;
+        if (body == 'a')      numbered = 1;            /* number every line   */
+        else if (body == 't') numbered = (len > 1);    /* non-empty only      */
+        else                  numbered = 0;            /* body == 'n': none   */
+        if (numbered) printf("%6ld\t", ++(*np));       /* right-just w6 + TAB */
+        else          printf("%6s\t", "");             /* 6 spaces + TAB      */
+        fwrite(*buf, 1, (size_t)len, stdout);          /* line incl. its '\n' */
+    }
+}
+
+static int a_nl(int argc, char **argv) {
+    char body = 't';                                   /* GNU default -b t    */
+    int i = 1;
+    for (; i < argc; i++) {
+        char *a = argv[i];
+        if (a[0] != '-' || a[1] == '\0') break;        /* filename or "-"     */
+        if (strcmp(a, "--") == 0) { i++; break; }
+        if (a[1] == 'b') {                             /* -bSTYLE or -b STYLE */
+            const char *style = a[2] ? a + 2 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!style) {
+                fprintf(stderr, "nl: option requires an argument -- 'b'\n");
+                return 1;
+            }
+            if (style[0] == 'a' || style[0] == 't' || style[0] == 'n')
+                body = style[0];
+            else {
+                fprintf(stderr, "nl: invalid body numbering style: '%s'\n", style);
+                return 1;
+            }
+        } else {
+            fprintf(stderr, "nl: invalid option -- '%c'\n", a[1]);
+            return 1;
+        }
+    }
+
+    long n = 0;                                        /* continuous counter  */
+    char *buf = NULL; size_t bufsz = 0;
+    int rc = 0;
+    if (i >= argc) {
+        nl_run(stdin, body, &n, &buf, &bufsz);         /* no files: stdin     */
+    } else {
+        for (; i < argc; i++) {
+            FILE *f;
+            if (strcmp(argv[i], "-") == 0) f = stdin;
+            else {
+                f = fopen(argv[i], "rb");
+                if (!f) {
+                    fprintf(stderr, "nl: %s: %s\n", argv[i], strerror(errno));
+                    rc = 1;
+                    continue;
+                }
+            }
+            nl_run(f, body, &n, &buf, &bufsz);
+            if (f != stdin) fclose(f);
+        }
+    }
+    free(buf);
+    return rc;
+}
+
+/* ---- tac ---- */
+/* tac — concatenate and print files in reverse (last line first).
+ * Records are '\n'-terminated (trailing separator, GNU default): each record
+ * includes its terminating newline; text after the final newline is a partial
+ * record printed first. Each file operand is reversed independently (matching
+ * GNU tac), '-' means stdin, none means stdin. */
+
+/* Append the whole of stream f to *buf (grown as needed). Returns 0, -1 on I/O error. */
+static int tac_slurp_fd(FILE *f, char **buf, size_t *len, size_t *cap) {
+    char tmp[65536];
+    size_t n;
+    while ((n = fread(tmp, 1, sizeof tmp, f)) > 0) {
+        if (*len + n > *cap) {
+            size_t nc = *cap ? *cap : 65536;
+            while (nc < *len + n) nc *= 2;
+            char *nb = realloc(*buf, nc);
+            if (!nb) return -1;
+            *buf = nb; *cap = nc;
+        }
+        memcpy(*buf + *len, tmp, n);
+        *len += n;
+    }
+    return ferror(f) ? -1 : 0;
+}
+
+/* Emit buf[0..len) with '\n'-terminated records in reverse order. */
+static void tac_emit(const char *buf, size_t len) {
+    size_t p = len;
+    while (p > 0) {
+        size_t start = 0;                       /* find last '\n' in [0, p-1) */
+        for (size_t m = p - 1; m-- > 0; )
+            if (buf[m] == '\n') { start = m + 1; break; }
+        fwrite(buf + start, 1, p - start, stdout);
+        p = start;
+    }
+}
+
+static int a_tac(int argc, char **argv) {
+    int rc = 0, files_seen = 0, endopts = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!endopts && !strcmp(a, "--")) { endopts = 1; continue; }
+        files_seen = 1;
+        int is_stdin = !strcmp(a, "-");
+        FILE *f;
+        if (is_stdin) f = stdin;
+        else {
+            f = fopen(a, "rb");
+            if (!f) { fprintf(stderr, "tac: failed to open '%s' for reading: %s\n", a, strerror(errno)); rc = 1; continue; }
+        }
+        char *buf = NULL; size_t len = 0, cap = 0;
+        if (tac_slurp_fd(f, &buf, &len, &cap) != 0) {
+            fprintf(stderr, "tac: %s: %s\n", is_stdin ? "standard input" : a, strerror(errno));
+            rc = 1;
+        } else {
+            tac_emit(buf, len);
+        }
+        free(buf);
+        if (!is_stdin) fclose(f);
+    }
+    if (!files_seen) {
+        char *buf = NULL; size_t len = 0, cap = 0;
+        if (tac_slurp_fd(stdin, &buf, &len, &cap) != 0) {
+            fprintf(stderr, "tac: standard input: %s\n", strerror(errno));
+            rc = 1;
+        } else {
+            tac_emit(buf, len);
+        }
+        free(buf);
+    }
+    return rc;
+}
+
+/* ---- tee ---- */
+static int a_tee(int c, char **v) {
+    int append = 0, i = 1;
+    for (; i < c; i++) {
+        if (v[i][0] != '-' || !v[i][1]) break;      /* operand, or "-" = file named "-" */
+        if (!strcmp(v[i], "--")) { i++; break; }
+        if (v[i][1] == '-') {
+            char *o = v[i] + 2;
+            if (!strcmp(o, "append")) append = 1;
+            else { fprintf(stderr, "tee: unrecognized option '%s'\n", v[i]); return 1; }
+            continue;
+        }
+        for (char *p = v[i] + 1; *p; p++) switch (*p) {
+            case 'a': append = 1; break;
+            default: fprintf(stderr, "tee: invalid option -- '%c'\n", *p); return 1;
+        }
+    }
+    int nfiles = c - i, rc = 0;
+    FILE **out = NULL;
+    if (nfiles > 0) {
+        out = malloc(sizeof(FILE *) * (size_t)nfiles);
+        if (!out) { fprintf(stderr, "tee: memory exhausted\n"); return 1; }
+    }
+    const char *mode = append ? "ab" : "wb";
+    for (int k = 0; k < nfiles; k++) {
+        out[k] = fopen(v[i + k], mode);
+        if (!out[k]) { fprintf(stderr, "tee: %s: %s\n", v[i + k], strerror(errno)); rc = 1; }
+    }
+    char buf[65536]; size_t n; int stdout_ok = 1;
+    while ((n = fread(buf, 1, sizeof buf, stdin)) > 0) {
+        if (stdout_ok && fwrite(buf, 1, n, stdout) != n) {
+            fprintf(stderr, "tee: standard output: %s\n", strerror(errno));
+            stdout_ok = 0; rc = 1;
+        }
+        for (int k = 0; k < nfiles; k++) {
+            if (out[k] && fwrite(buf, 1, n, out[k]) != n) {
+                fprintf(stderr, "tee: %s: %s\n", v[i + k], strerror(errno));
+                fclose(out[k]); out[k] = NULL; rc = 1;
+            }
+        }
+    }
+    if (ferror(stdin)) { fprintf(stderr, "tee: standard input: %s\n", strerror(errno)); rc = 1; }
+    if (stdout_ok && fflush(stdout) != 0) {
+        fprintf(stderr, "tee: standard output: %s\n", strerror(errno)); rc = 1;
+    }
+    for (int k = 0; k < nfiles; k++)
+        if (out[k] && fclose(out[k]) != 0) {
+            fprintf(stderr, "tee: %s: %s\n", v[i + k], strerror(errno)); rc = 1;
+        }
+    free(out);
+    return rc;
+}
+
+/* ---- fold ---- */
+/* fold — wrap input lines to a max width (default 80).
+ * Flags: -w N (width), -b (count bytes; the default counting mode here),
+ * -s (break at last blank before the limit). Byte counting only, so every
+ * byte advances the column by 1 and a real '\n' resets it. Mirrors GNU
+ * coreutils fold_file byte-for-byte on stdout for these flags. */
+static int fold_parse_width(const char *s, size_t *width, const char *prog) {
+    char *end;
+    unsigned long v;
+    if (!isdigit((unsigned char)s[0])) {
+        fprintf(stderr, "%s: invalid number of columns: '%s'\n", prog, s);
+        return 1;
+    }
+    errno = 0;
+    v = strtoul(s, &end, 10);
+    if (*end != '\0' || errno != 0 || v == 0) {
+        fprintf(stderr, "%s: invalid number of columns: '%s'\n", prog, s);
+        return 1;
+    }
+    *width = (size_t)v;
+    return 0;
+}
+
+static int fold_stream(FILE *in, const char *name, size_t width,
+                       int break_spaces, const char *prog) {
+    static char *buf = NULL;
+    static size_t cap = 0;
+    size_t col = 0, off = 0;   /* byte mode: col == off between newlines */
+    int c;
+
+    while ((c = getc(in)) != EOF) {
+        if (off + 2 > cap) {
+            size_t ncap = cap ? cap * 2 : 128;
+            char *nb = realloc(buf, ncap);
+            if (!nb) { fprintf(stderr, "%s: memory exhausted\n", prog); exit(1); }
+            buf = nb; cap = ncap;
+        }
+        if (c == '\n') {                 /* real newline: emit and reset column */
+            buf[off++] = (char)c;
+            fwrite(buf, 1, off, stdout);
+            col = off = 0;
+            continue;
+        }
+    rescan:
+        col++;                           /* byte counting: one column per byte */
+        if (col > width) {
+            if (break_spaces) {          /* -s: break after the last blank */
+                size_t le = off;
+                int found = 0;
+                while (le) {
+                    --le;
+                    if (buf[le] == ' ' || buf[le] == '\t') { found = 1; break; }
+                }
+                if (found) {
+                    le++;                /* keep the blank on the first line */
+                    fwrite(buf, 1, le, stdout);
+                    putchar('\n');
+                    memmove(buf, buf + le, off - le);
+                    off -= le;
+                    col = off;
+                    goto rescan;
+                }
+            }
+            if (off == 0) {              /* width < 1: emit char on its own */
+                buf[off++] = (char)c;
+                continue;
+            }
+            buf[off++] = '\n';
+            fwrite(buf, 1, off, stdout);
+            col = off = 0;
+            goto rescan;
+        }
+        buf[off++] = (char)c;
+    }
+
+    if (off) fwrite(buf, 1, off, stdout);
+    if (ferror(in)) {
+        fprintf(stderr, "%s: %s: %s\n", prog, name, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int a_fold(int argc, char **argv) {
+    const char *prog = argv[0];
+    size_t width = 80;
+    int break_spaces = 0;
+    int end_opts = 0;
+    int i, status = 0, nfiles = 0;
+    char **files = malloc(sizeof(char *) * (size_t)(argc + 1));
+    if (!files) { fprintf(stderr, "%s: memory exhausted\n", prog); return 1; }
+
+    for (i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!end_opts && a[0] == '-' && a[1] != '\0') {
+            if (a[1] == '-') {
+                char *o = a + 2;
+                if (*o == '\0') { end_opts = 1; continue; }
+                if (strcmp(o, "bytes") == 0) continue;   /* default mode: no-op */
+                if (strcmp(o, "spaces") == 0) { break_spaces = 1; continue; }
+                if (strncmp(o, "width", 5) == 0 && (o[5] == '=' || o[5] == '\0')) {
+                    const char *val;
+                    if (o[5] == '=') val = o + 6;
+                    else {
+                        if (++i >= argc) {
+                            fprintf(stderr, "%s: option '--width' requires an argument\n", prog);
+                            free(files); return 1;
+                        }
+                        val = argv[i];
+                    }
+                    if (fold_parse_width(val, &width, prog)) { free(files); return 1; }
+                    continue;
+                }
+                fprintf(stderr, "%s: unrecognized option '%s'\n", prog, a);
+                free(files); return 1;
+            }
+            char *p = a + 1;
+            while (*p) {
+                if (*p == 'b') { p++; }
+                else if (*p == 's') { break_spaces = 1; p++; }
+                else if (*p == 'w') {
+                    const char *val;
+                    if (p[1] != '\0') val = p + 1;
+                    else {
+                        if (++i >= argc) {
+                            fprintf(stderr, "%s: option requires an argument -- 'w'\n", prog);
+                            free(files); return 1;
+                        }
+                        val = argv[i];
+                    }
+                    if (fold_parse_width(val, &width, prog)) { free(files); return 1; }
+                    break;   /* rest of this arg was the width value */
+                } else {
+                    fprintf(stderr, "%s: invalid option -- '%c'\n", prog, *p);
+                    free(files); return 1;
+                }
+            }
+        } else {
+            files[nfiles++] = a;
+        }
+    }
+
+    if (nfiles == 0) {
+        status |= fold_stream(stdin, "-", width, break_spaces, prog);
+    } else {
+        for (i = 0; i < nfiles; i++) {
+            if (strcmp(files[i], "-") == 0) {
+                status |= fold_stream(stdin, "-", width, break_spaces, prog);
+            } else {
+                FILE *f = fopen(files[i], "r");
+                if (!f) {
+                    fprintf(stderr, "%s: %s: %s\n", prog, files[i], strerror(errno));
+                    status = 1;
+                    continue;
+                }
+                status |= fold_stream(f, files[i], width, break_spaces, prog);
+                fclose(f);
+            }
+        }
+    }
+    free(files);
+    return status;
+}
+
+/* ---- comm ---- */
+/* comm: compare two sorted files line by line (GNU-compatible, C locale).
+ * Columns: 1=only in FILE1, 2=only in FILE2, 3=in both.
+ * Flags -1 -2 -3 suppress a column; a present column adds one leading TAB
+ * to every higher column. One operand may be "-" for stdin. */
+
+static int comm_cmp(const char *a, size_t al, const char *b, size_t bl)
+{
+    size_t m = al < bl ? al : bl;
+    int r = m ? memcmp(a, b, m) : 0;
+    if (r) return r;
+    if (al < bl) return -1;
+    if (al > bl) return 1;
+    return 0;
+}
+
+static int a_comm(int argc, char **argv)
+{
+    int s1 = 0, s2 = 0, s3 = 0;      /* suppress column 1/2/3 */
+    int endopts = 0, nfiles = 0;
+    const char *files[2] = { NULL, NULL };
+
+    for (int i = 1; i < argc; i++) {
+        char *a = argv[i];
+        if (!endopts && a[0] == '-' && a[1] != '\0') {
+            if (strcmp(a, "--") == 0) { endopts = 1; continue; }
+            if (a[1] == '-') {
+                fprintf(stderr, "comm: unrecognized option '%s'\n", a);
+                fprintf(stderr, "Try 'comm --help' for more information.\n");
+                return 1;
+            }
+            for (char *p = a + 1; *p; p++) {
+                switch (*p) {
+                case '1': s1 = 1; break;
+                case '2': s2 = 1; break;
+                case '3': s3 = 1; break;
+                default:
+                    fprintf(stderr, "comm: invalid option -- '%c'\n", *p);
+                    fprintf(stderr, "Try 'comm --help' for more information.\n");
+                    return 1;
+                }
+            }
+            continue;
+        }
+        if (nfiles < 2) {
+            files[nfiles++] = a;
+        } else {
+            fprintf(stderr, "comm: extra operand '%s'\n", a);
+            fprintf(stderr, "Try 'comm --help' for more information.\n");
+            return 1;
+        }
+    }
+
+    if (nfiles == 0) {
+        fprintf(stderr, "comm: missing operand\n");
+        fprintf(stderr, "Try 'comm --help' for more information.\n");
+        return 1;
+    }
+    if (nfiles == 1) {
+        fprintf(stderr, "comm: missing operand after '%s'\n", files[0]);
+        fprintf(stderr, "Try 'comm --help' for more information.\n");
+        return 1;
+    }
+
+    FILE *f1, *f2;
+    if (strcmp(files[0], "-") == 0) {
+        f1 = stdin;
+    } else {
+        f1 = fopen(files[0], "r");
+        if (!f1) {
+            fprintf(stderr, "comm: %s: %s\n", files[0], strerror(errno));
+            return 1;
+        }
+    }
+    if (strcmp(files[1], "-") == 0) {
+        f2 = stdin;
+    } else {
+        f2 = fopen(files[1], "r");
+        if (!f2) {
+            fprintf(stderr, "comm: %s: %s\n", files[1], strerror(errno));
+            if (f1 != stdin) fclose(f1);
+            return 1;
+        }
+    }
+
+    char *l1 = NULL, *l2 = NULL;
+    size_t c1 = 0, c2 = 0;
+    ssize_t n1, n2;
+    int have1, have2;
+
+    n1 = getline(&l1, &c1, f1); have1 = (n1 >= 0);
+    n2 = getline(&l2, &c2, f2); have2 = (n2 >= 0);
+
+    while (have1 || have2) {
+        int order;
+        if (!have1)      order = 1;              /* file1 exhausted -> col2 */
+        else if (!have2) order = -1;             /* file2 exhausted -> col1 */
+        else             order = comm_cmp(l1, (size_t)n1, l2, (size_t)n2);
+
+        if (order == 0) {                        /* column 3: in both */
+            if (!s3) {
+                if (!s1) putchar('\t');
+                if (!s2) putchar('\t');
+                fwrite(l2, 1, (size_t)n2, stdout);
+            }
+        } else if (order < 0) {                  /* column 1: only in FILE1 */
+            if (!s1)
+                fwrite(l1, 1, (size_t)n1, stdout);
+        } else {                                 /* column 2: only in FILE2 */
+            if (!s2) {
+                if (!s1) putchar('\t');
+                fwrite(l2, 1, (size_t)n2, stdout);
+            }
+        }
+
+        if (order <= 0) { n1 = getline(&l1, &c1, f1); have1 = (n1 >= 0); }
+        if (order >= 0) { n2 = getline(&l2, &c2, f2); have2 = (n2 >= 0); }
+    }
+
+    free(l1);
+    free(l2);
+
+    int rc = 0;
+    if (ferror(f1)) {
+        fprintf(stderr, "comm: %s: %s\n", files[0], strerror(errno));
+        rc = 1;
+    }
+    if (ferror(f2)) {
+        fprintf(stderr, "comm: %s: %s\n", files[1], strerror(errno));
+        rc = 1;
+    }
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "comm: write error: %s\n", strerror(errno));
+        rc = 1;
+    }
+
+    if (f1 != stdin) fclose(f1);
+    if (f2 != stdin) fclose(f2);
+    return rc;
+}
+
+/* ---- paste ---- */
+static void paste_out_delim(const char *delims, int off, int len) {
+    if (len > 0) fwrite(delims + off, 1, (size_t)len, stdout);
+}
+
+/* Parse -d LIST into single-byte delimiters, honoring GNU escapes
+   (\t \n \r \f \b \v \\ and \0 => empty delimiter).  Returns 0 on success,
+   1 if the list ends with an unescaped backslash, -1 on allocation error. */
+static int paste_collapse(const char *name, const char *list,
+                          char **out_bytes, int **out_lens, int *out_n) {
+    size_t slen = strlen(list);
+    char *bytes = malloc(slen + 1);
+    int *lens = malloc((slen ? slen : 1) * sizeof(int));
+    if (!bytes || !lens) {
+        free(bytes); free(lens);
+        fprintf(stderr, "%s: memory exhausted\n", name);
+        return -1;
+    }
+    char *w = bytes;
+    int idx = 0;
+    const char *s = list;
+    int backslash_at_end = 0;
+    while (*s) {
+        if (*s == '\\') {
+            s++;
+            if (*s == '\0') { backslash_at_end = 1; break; }
+            if (*s == '0') { s++; lens[idx++] = 0; continue; }
+            {
+                char c;
+                switch (*s) {
+                    case 'b': c = '\b'; break;
+                    case 'f': c = '\f'; break;
+                    case 'n': c = '\n'; break;
+                    case 'r': c = '\r'; break;
+                    case 't': c = '\t'; break;
+                    case 'v': c = '\v'; break;
+                    case '\\': c = '\\'; break;
+                    default: goto copy_char;
+                }
+                *w++ = c;
+                s++;
+                lens[idx++] = 1;
+                continue;
+            }
+        }
+    copy_char:
+        *w++ = *s++;
+        lens[idx++] = 1;
+    }
+    *w = '\0';
+    if (idx == 0) { lens[0] = 0; idx = 1; }
+    *out_bytes = bytes;
+    *out_lens = lens;
+    *out_n = idx;
+    if (backslash_at_end) {
+        fprintf(stderr,
+                "%s: delimiter list ends with an unescaped backslash: %s\n",
+                name, list);
+        return 1;
+    }
+    return 0;
+}
+
+static int paste_parallel(const char *name, int nfiles, char **fnames,
+                          const char *delims, const int *dlens, int ndelims,
+                          int line_delim) {
+    int ok = 1;
+    FILE **fp = malloc(sizeof(FILE *) * (size_t)nfiles);
+    char *delbuf = malloc((size_t)nfiles + 1);
+    if (!fp || !delbuf) {
+        free(fp); free(delbuf);
+        fprintf(stderr, "%s: memory exhausted\n", name);
+        return 1;
+    }
+    /* Open every file up front (GNU parallel semantics): a failed open is
+       fatal and produces no output. */
+    for (int f = 0; f < nfiles; f++) {
+        if (strcmp(fnames[f], "-") == 0) {
+            fp[f] = stdin;
+        } else {
+            fp[f] = fopen(fnames[f], "r");
+            if (!fp[f]) {
+                fprintf(stderr, "%s: %s: %s\n", name, fnames[f], strerror(errno));
+                for (int g = 0; g < f; g++)
+                    if (fp[g] && fp[g] != stdin) fclose(fp[g]);
+                free(fp); free(delbuf);
+                return 1;
+            }
+        }
+    }
+
+    int files_open = nfiles;
+    while (files_open) {
+        int somedone = 0;
+        int delimidx = 0, delimoff = 0, delims_saved = 0;
+        for (int i = 0; i < nfiles && files_open; i++) {
+            int chr = EOF, err = 0, sometodo = 0;
+            if (fp[i]) {
+                chr = getc(fp[i]);
+                err = errno;
+                if (chr != EOF && delims_saved) {
+                    fwrite(delbuf, 1, (size_t)delims_saved, stdout);
+                    delims_saved = 0;
+                }
+                while (chr != EOF) {
+                    sometodo = 1;
+                    if (chr == line_delim) break;
+                    putchar(chr);
+                    chr = getc(fp[i]);
+                    err = errno;
+                }
+            }
+
+            if (!sometodo) {
+                if (fp[i]) {
+                    if (ferror(fp[i])) {
+                        fprintf(stderr, "%s: %s: %s\n", name, fnames[i],
+                                strerror(err));
+                        ok = 0;
+                    }
+                    if (fp[i] == stdin) clearerr(fp[i]);
+                    else fclose(fp[i]);
+                    fp[i] = NULL;
+                    files_open--;
+                }
+                if (i + 1 == nfiles) {
+                    if (somedone) {
+                        if (delims_saved) {
+                            fwrite(delbuf, 1, (size_t)delims_saved, stdout);
+                            delims_saved = 0;
+                        }
+                        putchar(line_delim);
+                    }
+                    continue;
+                } else {
+                    int len = dlens[delimidx];
+                    if (len > 0) {
+                        memcpy(delbuf + delims_saved, delims + delimoff,
+                               (size_t)len);
+                        delims_saved += len;
+                    }
+                    delimoff += len;
+                    if (++delimidx == ndelims) { delimidx = 0; delimoff = 0; }
+                }
+            } else {
+                somedone = 1;
+                if (i + 1 != nfiles) {
+                    paste_out_delim(delims, delimoff, dlens[delimidx]);
+                    delimoff += dlens[delimidx];
+                    if (++delimidx == ndelims) { delimidx = 0; delimoff = 0; }
+                } else {
+                    int c = (chr == EOF) ? line_delim : chr;
+                    putchar(c);
+                }
+            }
+        }
+    }
+    free(fp);
+    free(delbuf);
+    return ok ? 0 : 1;
+}
+
+static int paste_serial(const char *name, int nfiles, char **fnames,
+                        const char *delims, const int *dlens, int ndelims,
+                        int line_delim) {
+    int ok = 1;
+    for (int f = 0; f < nfiles; f++) {
+        FILE *fp;
+        int is_stdin = (strcmp(fnames[f], "-") == 0);
+        if (is_stdin) {
+            fp = stdin;
+        } else {
+            fp = fopen(fnames[f], "r");
+            if (!fp) {
+                fprintf(stderr, "%s: %s: %s\n", name, fnames[f], strerror(errno));
+                ok = 0;
+                continue;
+            }
+        }
+        int delimidx = 0, delimoff = 0;
+        int charold, charnew;
+        charold = getc(fp);
+        int se = errno;
+        if (charold != EOF) {
+            while ((charnew = getc(fp)) != EOF) {
+                if (charold == line_delim) {
+                    paste_out_delim(delims, delimoff, dlens[delimidx]);
+                    delimoff += dlens[delimidx];
+                    if (++delimidx == ndelims) { delimidx = 0; delimoff = 0; }
+                } else {
+                    putchar(charold);
+                }
+                charold = charnew;
+            }
+            se = errno;
+            putchar(charold);
+        }
+        if (charold != line_delim) putchar(line_delim);
+        if (!ferror(fp)) se = 0;
+        if (is_stdin) clearerr(fp);
+        else if (fclose(fp) != 0 && !se) se = errno;
+        if (se) {
+            fprintf(stderr, "%s: %s: %s\n", name, fnames[f], strerror(se));
+            ok = 0;
+        }
+    }
+    return ok ? 0 : 1;
+}
+
+static int a_paste(int argc, char **argv) {
+    const char *name = argv[0];
+    int serial = 0;
+    const char *dlist = "\t";     /* default: single TAB */
+    int line_delim = '\n';
+    char **files = malloc(sizeof(char *) * (size_t)(argc + 1));
+    if (!files) { fprintf(stderr, "%s: memory exhausted\n", name); return 1; }
+    int nfiles = 0;
+    int no_more_opts = 0;
+
+    for (int i = 1; i < argc; i++) {
+        char *arg = argv[i];
+        if (!no_more_opts && arg[0] == '-' && arg[1] != '\0') {
+            if (arg[1] == '-' && arg[2] == '\0') { no_more_opts = 1; continue; }
+            if (arg[1] == '-') {
+                if (strcmp(arg, "--serial") == 0) { serial = 1; continue; }
+                if (strncmp(arg, "--delimiters=", 13) == 0) {
+                    dlist = arg + 13; continue;
+                }
+                if (strcmp(arg, "--delimiters") == 0) {
+                    if (++i < argc) { dlist = argv[i]; continue; }
+                    fprintf(stderr, "%s: option '--delimiters' requires an argument\n", name);
+                    free(files); return 1;
+                }
+                fprintf(stderr, "%s: unrecognized option '%s'\n", name, arg);
+                free(files); return 1;
+            }
+            const char *p = arg + 1;
+            while (*p) {
+                if (*p == 's') { serial = 1; p++; }
+                else if (*p == 'd') {
+                    if (*(p + 1)) { dlist = p + 1; }
+                    else if (++i < argc) { dlist = argv[i]; }
+                    else {
+                        fprintf(stderr, "%s: option requires an argument -- 'd'\n", name);
+                        free(files); return 1;
+                    }
+                    break;
+                } else {
+                    fprintf(stderr, "%s: invalid option -- '%c'\n", name, *p);
+                    free(files); return 1;
+                }
+            }
+            continue;
+        }
+        files[nfiles++] = arg;
+    }
+
+    if (nfiles == 0) files[nfiles++] = "-";
+
+    char *dbytes = NULL;
+    int *dlens = NULL, ndelims = 0;
+    int rc = paste_collapse(name, dlist, &dbytes, &dlens, &ndelims);
+    if (rc != 0) { free(files); free(dbytes); free(dlens); return 1; }
+
+    int status;
+    if (serial)
+        status = paste_serial(name, nfiles, files, dbytes, dlens, ndelims, line_delim);
+    else
+        status = paste_parallel(name, nfiles, files, dbytes, dlens, ndelims, line_delim);
+
+    free(files);
+    free(dbytes);
+    free(dlens);
+    return status;
+}
+
+
 /* ------------------------------------------------------------ dispatch ---- */
 struct applet { const char *name; int (*fn)(int, char **); };
 static const struct applet applets[] = {
     {"true",a_true},{"false",a_false},{"echo",a_echo},{"cat",a_cat},{"pwd",a_pwd},
     {"whoami",a_whoami},{"nproc",a_nproc},{"yes",a_yes},{"basename",a_basename},
     {"dirname",a_dirname},{"head",a_head},{"wc",a_wc},{"seq",a_seq},
-    {"ls",a_ls},{"tail",a_tail},{"cut",a_cut},{"rev",a_rev},{"uniq",a_uniq},{"mkdir",a_mkdir},{"rmdir",a_rmdir},{"rm",a_rm},{"cp",a_cp},{"mv",a_mv},{"ln",a_ln},{"touch",a_touch},{NULL,NULL}
+    {"ls",a_ls},{"tail",a_tail},{"cut",a_cut},{"rev",a_rev},{"uniq",a_uniq},{"mkdir",a_mkdir},{"rmdir",a_rmdir},{"rm",a_rm},{"cp",a_cp},{"mv",a_mv},{"ln",a_ln},{"touch",a_touch},
+    {"sort",a_sort},{"tr",a_tr},{"nl",a_nl},{"tac",a_tac},{"tee",a_tee},{"fold",a_fold},{"comm",a_comm},{"paste",a_paste},{NULL,NULL}
 };
 
 static int list_applets(void) {
