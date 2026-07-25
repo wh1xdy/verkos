@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #include <openssl/err.h>
 
 static int quiet, follow, head_only, noverify;
@@ -91,9 +92,27 @@ static int request(const char *scheme, const char *host, int port, const char *p
         c.ssl = SSL_new(ctx);
         SSL_set_fd(c.ssl, c.fd);
         SSL_set_tlsext_host_name(c.ssl, host);      /* SNI */
+        /* Check the name on the certificate, not just its signature chain: a
+         * valid certificate for some other host is not good enough. */
+        if (!noverify) {
+            X509_VERIFY_PARAM *vp = SSL_get0_param(c.ssl);
+            X509_VERIFY_PARAM_set_hostflags(vp, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            if (!X509_VERIFY_PARAM_set1_host(vp, host, 0)) {
+                fprintf(stderr, "vget: cannot set the expected hostname\n"); cclose(&c); return -1;
+            }
+        }
         if (SSL_connect(c.ssl) != 1) { fprintf(stderr, "vget: TLS handshake failed\n"); cclose(&c); return -1; }
-        if (!noverify && SSL_get_verify_result(c.ssl) != X509_V_OK && !quiet)
-            fprintf(stderr, "vget: warning: TLS certificate not verified\n");
+        /* A failed check must end the transfer. This used to print a warning and
+         * carry on, which meant any certificate at all was accepted — and vpk
+         * downloads recipes over this and runs their build() as root. Use -k to
+         * opt out deliberately, the way curl and wget do. */
+        long vr = SSL_get_verify_result(c.ssl);
+        if (!noverify && vr != X509_V_OK) {
+            fprintf(stderr, "vget: TLS certificate for %s is not trusted: %s\n",
+                    host, X509_verify_cert_error_string(vr));
+            fprintf(stderr, "vget: refusing to continue (use -k to override)\n");
+            cclose(&c); return -1;
+        }
     }
 
     char req[2048];
@@ -159,6 +178,10 @@ int main(int argc, char **argv) {
     SSL_library_init(); SSL_load_error_strings();
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_default_verify_paths(ctx);
+    /* Without this the handshake succeeds no matter what the peer presents;
+     * loading the CA store alone verifies nothing. */
+    SSL_CTX_set_verify(ctx, noverify ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
     char scheme[8], host[256], path[1024], location[1024];
     int port;

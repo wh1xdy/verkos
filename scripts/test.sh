@@ -123,6 +123,23 @@ if [ -x "$T/vawk" ]; then
     done
 fi
 
+say "vget TLS (a fetcher that accepts any certificate is a back door)"
+if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
+    ok "vget compiles"
+    # These need the network; skip rather than fail when there is none.
+    if timeout 20 "$T/vget" -I https://github.com >/dev/null 2>&1; then
+        for bad in self-signed expired wrong.host; do
+            if timeout 20 "$T/vget" -I "https://$bad.badssl.com" >/dev/null 2>&1
+            then bad "$bad.badssl.com is refused"
+            else ok  "$bad.badssl.com is refused"; fi
+        done
+        check "a valid certificate still works" "timeout 20 '$T/vget' -I https://github.com"
+        check "-k still overrides"              "timeout 20 '$T/vget' -k -I https://self-signed.badssl.com"
+    else
+        printf '  \033[33mskip\033[0m  TLS checks (no network)\n'
+    fi
+else bad "vget does not compile"; fi
+
 say "shell scripts parse"
 for f in scripts/*.sh scripts/lib/*.sh boot/*.sh config/*.sh config/targets/*.sh pkg/vboot/build.sh; do
     [ -f "$f" ] || continue
