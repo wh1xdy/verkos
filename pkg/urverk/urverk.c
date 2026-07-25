@@ -201,9 +201,36 @@ static int fat_super(const char *dev, char *label, char *uuid) {
     close(fd);
     return ok;
 }
+/* A swap area is neither: mkswap writes "SWAPSPACE2" at the end of the first
+ * page, with the UUID and label just past the first kilobyte. Without this an
+ * fstab swap line written by UUID can never be resolved, and the swap silently
+ * never comes on. */
+static int swap_super(const char *dev, char *label, char *uuid) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char pg[4096];
+    int ok = -1;
+    if (pread(fd, pg, sizeof pg, 0) == (ssize_t)sizeof pg &&
+        !memcmp(pg + 4086, "SWAPSPACE2", 10)) {
+        static const char *hex = "0123456789abcdef";
+        char *u = uuid;
+        for (int i = 0; i < 16; i++) {
+            if (i == 4 || i == 6 || i == 8 || i == 10) *u++ = '-';
+            *u++ = hex[pg[1036 + i] >> 4];
+            *u++ = hex[pg[1036 + i] & 15];
+        }
+        *u = 0;
+        memcpy(label, pg + 1052, 16); label[16] = 0;
+        ok = 0;
+    }
+    close(fd);
+    return ok;
+}
+
 static int probe_dev(const char *dev, char *label, char *uuid) {
     if (ext_super(dev, label, uuid) == 0) return 0;
-    return fat_super(dev, label, uuid);
+    if (fat_super(dev, label, uuid) == 0) return 0;
+    return swap_super(dev, label, uuid);
 }
 
 /* Turn "LABEL=x" / "UUID=y" into a device path; anything else is passed through.
@@ -471,6 +498,12 @@ static void mount_fstab(void) {
             snprintf(opts, sizeof opts, "defaults");
         if (opt_present(opts, "noauto")) continue;
 
+        /* Resolve before anything uses <dev>: swapon(2) needs a device node
+         * just as much as mount(2) does, and this branch used to run first. */
+        if (resolve_spec(dev, sizeof dev, 5)) {
+            if (debug) say2("no device for ", dev);
+            continue;
+        }
         if (!strcmp(type, "swap")) {
             if (swapon(dev, 0) == 0) say2("swap on ", dev);
             else if (debug) warn_errno(dev);
@@ -478,12 +511,6 @@ static void mount_fstab(void) {
         }
         if (!strcmp(mnt, "/")) continue;            /* already our root */
         if (already_mounted(mnt)) { if (debug) say2("already mounted: ", mnt); continue; }
-        /* mount(2) wants a device node; UUID=/LABEL= is fstab's spelling, and
-         * passing it through unresolved silently leaves the entry unmounted. */
-        if (resolve_spec(dev, sizeof dev, 5)) {
-            say2("no device for ", dev);
-            continue;
-        }
         char data[256];
         unsigned long flags = parse_opts(opts, data, sizeof data);
         mkdir(mnt, 0755);

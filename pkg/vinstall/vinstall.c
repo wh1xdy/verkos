@@ -29,6 +29,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#include <termios.h>
 
 #define MNT      "/run/vinstall"
 #define ESP_MB_DEFAULT 128
@@ -38,6 +41,8 @@ static int dry_run, assume_yes, verbose;
  * an ISO or a mounted image is just as valid a source, and is how this gets
  * tested without a live medium. */
 static const char *source = "/";
+static const char *passwd_file;      /* chpasswd-format lines for the new system */
+static int lock_root;
 static const char *prog = "vinstall";
 
 static void die(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
@@ -142,6 +147,15 @@ static int device_is_mounted(const char *disk) {
                    "grep -c '^%s' /proc/mounts 2>/dev/null", disk) == 0 && atoi(p) > 0;
 }
 
+static unsigned long disk_mb(const char *dev) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return 0;
+    unsigned long long bytes = 0;
+    if (ioctl(fd, BLKGETSIZE64, &bytes)) bytes = 0;
+    close(fd);
+    return (unsigned long)(bytes / (1024 * 1024));
+}
+
 /* ---- the disk menu -------------------------------------------------------- */
 static void list_disks(void) {
     printf("\nDisks this machine can see:\n\n");
@@ -175,6 +189,82 @@ static void get_uuid(const char *dev, char *out, size_t cap) {
         die("cannot read the UUID of %s", dev);
 }
 
+/* ---- passwords -----------------------------------------------------------
+ * The source system's /etc/shadow is copied with everything else, so without
+ * this the installed machine silently inherits whatever root password the image
+ * was built with — which for VerkOS is the documented development default. */
+static char *ask_hidden(const char *prompt) {
+    static char buf[256];
+    struct termios old, new;
+    int tty = isatty(STDIN_FILENO);
+    fputs(prompt, stdout); fflush(stdout);
+    if (tty && tcgetattr(STDIN_FILENO, &old) == 0) {
+        new = old; new.c_lflag &= ~(unsigned)ECHO; new.c_lflag |= ECHONL;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &new);
+    }
+    char *r = fgets(buf, sizeof buf, stdin);
+    if (tty) tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+    if (!r) return NULL;
+    buf[strcspn(buf, "\n")] = 0;
+    return buf;
+}
+
+/* Ask twice and only accept a match — a mistyped password on a machine you are
+ * about to reboot into is not recoverable without a rescue medium. */
+static int ask_password_twice(const char *who, char *out, size_t cap) {
+    for (int try = 0; try < 3; try++) {
+        char first[256];
+        char prompt[128];
+        snprintf(prompt, sizeof prompt, "Password for %s: ", who);
+        char *a = ask_hidden(prompt);
+        if (!a) return -1;
+        if (strlen(a) < 6) { printf("  at least 6 characters, please\n"); continue; }
+        snprintf(first, sizeof first, "%s", a);
+        char *b = ask_hidden("Repeat it: ");
+        if (!b) return -1;
+        if (strcmp(first, b)) { printf("  they do not match\n"); continue; }
+        snprintf(out, cap, "%s", first);
+        memset(first, 0, sizeof first);
+        return 0;
+    }
+    return -1;
+}
+
+/* Applied with the target's own chpasswd, so the hashing is whatever the
+ * installed system itself would produce. */
+static void set_passwords(const char *root, const char *user) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/run-vinstall-pw", root);
+
+    if (passwd_file) {
+        run("cp %s %s", passwd_file, path);
+    } else if (!dry_run) {
+        FILE *f = fopen(path, "w");
+        if (!f) die("cannot write %s: %s", path, strerror(errno));
+        if (!lock_root) {
+            char pw[256];
+            if (ask_password_twice("root on the installed system", pw, sizeof pw))
+                { fclose(f); unlink(path); die("no root password set — refusing to install one that is already public"); }
+            fprintf(f, "root:%s\n", pw);
+            memset(pw, 0, sizeof pw);
+        }
+        if (user) {
+            char pw[256];
+            if (ask_password_twice(user, pw, sizeof pw)) { fclose(f); unlink(path); die("no password for %s", user); }
+            fprintf(f, "%s:%s\n", user, pw);
+            memset(pw, 0, sizeof pw);
+        }
+        fclose(f);
+        chmod(path, 0600);
+    }
+    if (dry_run) return;
+    /* The redirection is performed by the shell on this side of the chroot, so
+     * the path has to be the one this side can see. */
+    run("chroot %s /usr/bin/chpasswd < %s/run-vinstall-pw", root, root);
+    if (lock_root) run("chroot %s /usr/bin/passwd -l root >/dev/null", root);
+    unlink(path);
+}
+
 /* Everything the installed system needs to boot must be readable before the
  * target disk is touched. Discovering a missing bootloader after partitioning,
  * formatting and copying leaves the operator with a wiped disk and half an
@@ -202,11 +292,14 @@ static void check_source(const char *arch) {
 }
 
 /* ---- confirmation --------------------------------------------------------- */
-static void confirm(const char *disk, unsigned esp_mb, const char *hostname) {
+static void confirm(const char *disk, unsigned esp_mb, unsigned swap_mb,
+                    unsigned home_mb, const char *hostname) {
     printf("\n\033[1mAbout to install VerkOS onto %s\033[0m\n\n", disk);
     printf("  %-22s %s\n", "target disk", disk);
-    printf("  %-22s GPT: %u MB EFI system partition + ext4 root on the rest\n",
-           "layout", esp_mb);
+    printf("  %-22s GPT: %u MB EFI system partition", "layout", esp_mb);
+    if (home_mb) printf(", %u MB /home", home_mb);
+    if (swap_mb) printf(", %u MB swap", swap_mb);
+    printf(", ext4 root on the rest\n");
     printf("  %-22s %s\n", "hostname", hostname);
     printf("  %-22s vboot (ours), booting urverk\n", "bootloader");
     printf("\nWhat is on that disk now:\n\n");
@@ -261,7 +354,8 @@ static void copy_system(const char *root) {
     run("chmod 1777 %s/tmp", root);
 }
 
-static void write_fstab(const char *root, const char *root_uuid, const char *esp_uuid) {
+static void write_fstab(const char *root, const char *root_uuid, const char *esp_uuid,
+                        const char *home_uuid, const char *swap_uuid) {
     if (dry_run) return;
     char path[512];
     snprintf(path, sizeof path, "%s/etc/fstab", root);
@@ -273,6 +367,10 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
         "UUID=%-36s /       ext4  defaults,noatime     0    1\n"
         "UUID=%-36s /boot   vfat  defaults,noatime     0    2\n",
         root_uuid, esp_uuid);
+    if (home_uuid && *home_uuid)
+        fprintf(f, "UUID=%-36s /home   ext4  defaults,noatime     0    2\n", home_uuid);
+    if (swap_uuid && *swap_uuid)
+        fprintf(f, "UUID=%-36s none    swap  sw                   0    0\n", swap_uuid);
     fclose(f);
 }
 
@@ -355,13 +453,17 @@ static void usage(void) {
            "  -u NAME      create this user on the installed system\n"
            "  -s DIR       install from this tree instead of the running system\n"
            "  --esp MB     size of the EFI system partition (default: %d)\n"
+           "  --swap MB    also create a swap partition\n"
+           "  --home MB    put /home on its own partition\n"
+           "  --passwd-file F  set passwords from USER:PASSWORD lines (for -y)\n"
+           "  --lock-root  install with the root account locked (needs -u)\n"
            "  -n           dry run: print what would happen, change nothing\n"
            "  -v           show every command\n", ESP_MB_DEFAULT);
 }
 
 int main(int argc, char **argv) {
     const char *disk = NULL, *hostname = "verkos", *user = NULL;
-    unsigned esp_mb = ESP_MB_DEFAULT;
+    unsigned esp_mb = ESP_MB_DEFAULT, swap_mb = 0, home_mb = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-t") && i + 1 < argc) disk = argv[++i];
@@ -372,6 +474,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-u") && i + 1 < argc) user = argv[++i];
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) source = argv[++i];
         else if (!strcmp(argv[i], "--esp") && i + 1 < argc) esp_mb = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--swap") && i + 1 < argc) swap_mb = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--home") && i + 1 < argc) home_mb = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--passwd-file") && i + 1 < argc) passwd_file = argv[++i];
+        else if (!strcmp(argv[i], "--lock-root")) lock_root = 1;
         else { usage(); return strcmp(argv[i], "-h") && strcmp(argv[i], "--help"); }
     }
     if (getuid() != 0) die("must be run as root");
@@ -386,6 +492,16 @@ int main(int argc, char **argv) {
 
     char arch[64] = "aarch64";
     capture(arch, sizeof arch, "uname -m");
+
+    /* Unattended and with nothing said about passwords, the installed system
+     * would keep the source image's root password. Refuse rather than ship a
+     * machine whose password is in a public repository. */
+    if (assume_yes && !passwd_file && !lock_root && !isatty(STDIN_FILENO))
+        die("no way to set a password: pass --passwd-file FILE, or --lock-root with -u.\n"
+            "       Without one of those the installed system keeps the source system's\n"
+            "       root password, which for a VerkOS image is the development default.");
+    if (lock_root && !user)
+        die("--lock-root leaves no way in: create an account with -u NAME as well");
 
     if (!disk) {
         list_disks();
@@ -410,11 +526,14 @@ int main(int argc, char **argv) {
         die("%s has mounted partitions — unmount them first", disk);
 
     if (!dry_run) check_source(arch);
-    confirm(disk, esp_mb, hostname);
+    confirm(disk, esp_mb, swap_mb, home_mb, hostname);
 
-    char esp_part[256], root_part[256];
+    char esp_part[256], root_part[256], home_part[256] = "", swap_part[256] = "";
     part_name(disk, 1, esp_part, sizeof esp_part);
     part_name(disk, 2, root_part, sizeof root_part);
+    /* /home and swap are numbered in the order they are written above. */
+    if (home_mb) part_name(disk, 3, home_part, sizeof home_part);
+    if (swap_mb) part_name(disk, home_mb ? 4 : 3, swap_part, sizeof swap_part);
 
     step("partitioning %s", disk);
     run("wipefs -a %s >/dev/null 2>&1 || true", disk);
@@ -422,12 +541,28 @@ int main(int argc, char **argv) {
      * systems (and the firmware) recognise what they are looking at. The root
      * partition takes whatever is left. */
     if (!dry_run) {
+        /* Sizes are worked out here rather than left to sfdisk, because only the
+         * last partition can say "the rest" and root is not last once /home or
+         * swap exist. */
+        unsigned long total = disk_mb(disk);
+        if (!total) die("cannot determine the size of %s", disk);
+        unsigned long fixed = esp_mb + swap_mb + home_mb + 2;   /* 2 MiB alignment slack */
+        if (total <= fixed + 512)
+            die("%s is %lu MB — too small for a %u MB ESP%s%s plus a root filesystem",
+                disk, total, esp_mb,
+                swap_mb ? " , swap" : "", home_mb ? " and /home" : "");
+        unsigned long root_mb = total - fixed;
+
         FILE *sf = fopen("/run/vinstall.sfdisk", "w");
         if (!sf) die("cannot write the partition script: %s", strerror(errno));
-        fprintf(sf,
-            "label: gpt\n"
-            "start=1MiB, size=%uMiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n"
-            "type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"VerkOS\"\n", esp_mb);
+        fprintf(sf, "label: gpt\n");
+        fprintf(sf, "start=1MiB, size=%uMiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n",
+                esp_mb);
+        fprintf(sf, "size=%luMiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"VerkOS\"\n", root_mb);
+        if (home_mb)
+            fprintf(sf, "size=%uMiB, type=933AC7E1-2EB4-4F13-B844-0E14E2AEF915, name=\"home\"\n", home_mb);
+        if (swap_mb)
+            fprintf(sf, "size=%uMiB, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F, name=\"swap\"\n", swap_mb);
         fclose(sf);
     }
     run("sfdisk --quiet --wipe always %s < /run/vinstall.sfdisk", disk);
@@ -439,16 +574,22 @@ int main(int argc, char **argv) {
     wait_for_partition(root_part);
     run("%s -n VERKESP %s", mkvfat, esp_part);
     run("mkfs.ext4 -q -F -L VERKOS %s", root_part);
+    if (home_mb) { wait_for_partition(home_part); run("mkfs.ext4 -q -F -L VERKHOME %s", home_part); }
+    if (swap_mb) { wait_for_partition(swap_part); run("mkswap -L VERKSWAP %s >/dev/null", swap_part); }
 
     char root_uuid[128], esp_uuid[128];
     get_uuid(root_part, root_uuid, sizeof root_uuid);
     get_uuid(esp_part, esp_uuid, sizeof esp_uuid);
+    char home_uuid[128] = "", swap_uuid[128] = "";
+    if (home_mb) get_uuid(home_part, home_uuid, sizeof home_uuid);
+    if (swap_mb) get_uuid(swap_part, swap_uuid, sizeof swap_uuid);
 
     step("mounting the new system on %s", MNT);
     run("mkdir -p %s", MNT);
     run("mount %s %s", root_part, MNT);
     run("mkdir -p %s/boot", MNT);
     run("mount %s %s/boot", esp_part, MNT);
+    if (home_mb) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
 
     step("copying the system");
     copy_system(MNT);
@@ -457,17 +598,21 @@ int main(int argc, char **argv) {
     install_bootloader(MNT, arch, root_uuid);
 
     step("configuring the installed system");
-    write_fstab(MNT, root_uuid, esp_uuid);
+    write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid);
     set_hostname(MNT, hostname);
     if (user) run("chroot %s /usr/bin/useradd -m -s /bin/bash %s", MNT, user);
+    step("setting passwords");
+    set_passwords(MNT, user);
 
     step("unmounting");
     run("sync");
     run("umount %s/boot", MNT);
+    if (home_mb) run("umount %s/home", MNT);
     run("umount %s", MNT);
 
     printf("\n\033[1;32mVerkOS is installed on %s.\033[0m\n", disk);
     printf("Root filesystem UUID %s. Remove the install medium and reboot.\n\n", root_uuid);
-    if (user) printf("The account '%s' has no password yet — set one with: passwd %s\n\n", user, user);
+    if (user) printf("An account for '%s' is ready to log in.\n\n", user);
+    if (lock_root) printf("The root account is locked; use '%s' and su.\n\n", user ? user : "your account");
     return 0;
 }

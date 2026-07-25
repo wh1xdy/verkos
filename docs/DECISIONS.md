@@ -449,3 +449,34 @@ screen, so nothing is hidden), and `ved` treats an unknown argument as a file
 name, which is what vi does.
 
 `scripts/test.sh` now runs the whole class as regression tests.
+
+## D-018 — An install must not inherit the image's password
+
+**Decision:** `vinstall` sets the passwords for the system it installs, and
+refuses to run unattended without being told what they should be.
+
+The source system's `/etc/shadow` is copied along with everything else, so
+without this every installed machine kept whatever root password the image was
+built with — for a VerkOS image, the development default that is written down
+in this repository. The installer now prompts (twice, without echo) when it has
+a terminal, takes `--passwd-file FILE` in chpasswd format when it does not, and
+`--lock-root` for installs that should only be reachable through a named
+account — which it refuses without `-u`, since that would leave no way in at
+all.
+
+Passwords are applied with the **installed system's own chpasswd**, so the
+hashing is whatever that system would have produced itself.
+
+Verified by the check that matters: after installing, the image's `verkos`
+password is rejected and the one given at install time is accepted.
+
+**Also added:** `--swap MB` and `--home MB`. Both surfaced a gap in urverk —
+its fstab handling resolved `UUID=` only for ext filesystems, and only after
+the swap branch had already run. It reads FAT boot sectors and swap headers
+now, and resolves before anything uses the device. Without that, an fstab line
+the installer had just written was quietly ignored: `/home` stayed on the root
+partition and swap never came on, with nothing reported.
+
+**Not done yet:** installing onto existing partitions (dual boot) and
+encryption. Encryption in particular is an ext4-shaped decision — LUKS is not
+something to hand-roll.
