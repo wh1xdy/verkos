@@ -148,6 +148,24 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
     fi
 else bad "vget does not compile"; fi
 
+say "verkbox sort can check order, not just produce it"
+# libtool detects duplicate object names with "ar t LIB | sort | sort -uc".
+# verkbox's sort had no -c at all and exited 2 on every input, so the check
+# always "failed" and libtool declared "object name conflicts in archive" for
+# archives that were fine — which is how GCC's libstdc++ refused to link.
+if [ -x "$T/verkbox" ]; then
+    check "sort -uc accepts sorted, unique input" \
+          "printf 'a\nb\nc\n' | '$T/verkbox' sort -uc"
+    check "sort -uc rejects a duplicate" \
+          "! printf 'a\na\nb\n' | '$T/verkbox' sort -uc 2>/dev/null"
+    check "sort -c rejects unsorted input" \
+          "! printf 'b\na\n' | '$T/verkbox' sort -c 2>/dev/null"
+    check "sort -c accepts a duplicate when -u is not given" \
+          "printf 'a\na\n' | '$T/verkbox' sort -c"
+    check "sort still sorts" \
+          "[ \"\$(printf 'c\na\nb\n' | '$T/verkbox' sort | tr -d '\n')\" = abc ]"
+fi
+
 say "vawk splits fields the way awk is specified to"
 # POSIX: an FS longer than one character is an extended regular expression.
 # vawk used only its first character, so -F'[(, ]+' split on '[' and every

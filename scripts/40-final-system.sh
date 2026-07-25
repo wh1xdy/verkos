@@ -319,13 +319,19 @@ cd /sources
 # gcc (final, native) — gmp/mpfr/mpc bundled in-tree
 say "gcc ${GCC_VERSION} (final)"
 d=$(unpack gcc-${GCC_VERSION}.tar.xz); cd "$d"
+# Clear any graft from an earlier attempt: mv would otherwise move the new
+# tree *inside* the old one and gcc would configure against nothing.
+rm -rf gmp mpfr mpc
 tar -xf ../gmp-${GMP_VERSION}.tar.xz  && mv gmp-${GMP_VERSION}  gmp
 tar -xf ../mpfr-${MPFR_VERSION}.tar.xz && mv mpfr-${MPFR_VERSION} mpfr
 tar -xf ../mpc-${MPC_VERSION}.tar.gz  && mv mpc-${MPC_VERSION}  mpc
 case $(uname -m) in
     x86_64) sed -e '/m64=/s/lib64/lib/' -i.orig gcc/config/i386/t-linux64 ;;
 esac
-mkdir -p build && cd build
+# Start from an empty build directory. Generated headers from a previous
+# attempt survive otherwise, and make considers them up to date — a run
+# after fixing the generator still compiles against the broken output.
+rm -rf build && mkdir build && cd build
 ../configure --prefix=/usr LD=ld --enable-languages=c,c++ \
     --enable-default-pie --enable-default-ssp \
     --disable-multilib --disable-bootstrap --disable-fixincludes \

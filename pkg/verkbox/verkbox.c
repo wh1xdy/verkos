@@ -2503,7 +2503,12 @@ static char *sort_readline(FILE *fp) {
 
 static int a_sort(int argc, char **argv) {
     sort_nflag = sort_rflag = sort_fflag = sort_bflag = 0;
-    int uflag = 0, endopts = 0, i;
+    /* -c/-C check whether the input is already ordered instead of sorting it.
+     * libtool uses "ar t LIB | sort | sort -uc" to detect duplicate object
+     * names; without -c that pipeline always failed, and libtool reported
+     * "object name conflicts in archive" for archives that were perfectly
+     * fine — which is how GCC's libstdc++ refused to link. */
+    int uflag = 0, endopts = 0, i, cflag = 0, quiet_check = 0;
     char **files = malloc((argc > 0 ? argc : 1) * sizeof(char *));
     int nfiles = 0;
     if (!files) { fprintf(stderr, "sort: out of memory\n"); return 2; }
@@ -2519,6 +2524,8 @@ static int a_sort(int argc, char **argv) {
                     case 'u': uflag = 1; break;
                     case 'f': sort_fflag = 1; break;
                     case 'b': sort_bflag = 1; break;
+                    case 'c': cflag = 1; break;
+                    case 'C': cflag = 1; quiet_check = 1; break;
                     default:
                         fprintf(stderr, "sort: invalid option -- '%c'\n", *p);
                         free(files);
@@ -2567,6 +2574,27 @@ static int a_sort(int argc, char **argv) {
             lines[nlines++] = ln;
         }
         if (fp != stdin) fclose(fp);
+    }
+
+    if (cflag) {
+        /* Report the first line that breaks the order, as GNU sort does. With
+         * -u an equal pair is a fault too, not just a descending one. */
+        int rc = 0;
+        for (size_t j = 1; j < nlines; j++) {
+            int c = sort_cmp(&lines[j - 1], &lines[j]);
+            const char *why = NULL;
+            if (c > 0) why = "disorder";
+            else if (uflag && sort_keycmp(lines[j - 1], lines[j]) == 0) why = "duplicate key";
+            if (why) {
+                if (!quiet_check)
+                    fprintf(stderr, "sort: -:%zu: %s: %s\n", j + 1, why, lines[j]);
+                rc = 1;
+                break;
+            }
+        }
+        for (size_t j = 0; j < nlines; j++) free(lines[j]);
+        free(lines); free(files);
+        return rc;
     }
 
     if (nlines > 1)
