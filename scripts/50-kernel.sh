@@ -39,9 +39,11 @@ build_kernel() {
     # GUI draws straight to it). Built-in, not modules, so it's up at boot. Also
     # virtio-input + evdev for keyboard/mouse into a future compositor. This is
     # what the arm64 defconfig was missing (DRM was a module, no virtio-gpu/input).
-    ./scripts/config --enable DRM --enable DRM_VIRTIO_GPU --enable DRM_FBDEV_EMULATION \
-                     --enable FB --enable FB_CORE --enable FRAMEBUFFER_CONSOLE \
-                     --enable VIRTIO_INPUT --enable INPUT_EVDEV
+    # DRM_KMS_HELPER + INPUT must be enabled explicitly, else olddefconfig leaves
+    # DRM as a module (=m) and drops the built-in virtio-gpu/input drivers.
+    ./scripts/config --enable DRM --enable DRM_KMS_HELPER --enable DRM_VIRTIO_GPU \
+                     --enable DRM_FBDEV_EMULATION --enable FB --enable FRAMEBUFFER_CONSOLE \
+                     --enable INPUT --enable INPUT_EVDEV --enable VIRTIO_INPUT
     make olddefconfig
 
     make -j"$JOBS"

@@ -59,12 +59,11 @@ fetch_one "kmod-${KMOD_VERSION}.tar.xz"               "$KMOD_SHA256"
 fetch_one "util-linux-${UTIL_LINUX_VERSION}.tar.xz"   "$UTIL_LINUX_SHA256"
 fetch_one "dbus-${DBUS_VERSION}.tar.xz"               "$DBUS_SHA256"
 
-# Python + systemd build tooling (built/installed in the chroot).
+# Python build tooling (built/installed in the chroot).
 fetch_one "libffi-${LIBFFI_VERSION}.tar.gz"           "$LIBFFI_SHA256"
 fetch_one "Python-${PYTHON_VERSION}.tar.xz"           "$PYTHON_SHA256"
 fetch_one "ninja-${NINJA_VERSION}.tar.gz"             "$NINJA_SHA256"
 
-fetch_one "systemd-${SYSTEMD_VERSION}.tar.gz"         "$SYSTEMD_SHA256"
 
 # meson/jinja2/markupsafe/flit_core as sdists for an OFFLINE pip install inside
 # the chroot (Python there has no TLS). Fetched here on the host, which does.
@@ -86,7 +85,7 @@ if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
         && "$PIP" download --no-binary :all: --dest "$SRC_DIR/pip" \
         "markupsafe==${MARKUPSAFE_VERSION}" \
         && ok "Python build tools staged in $SRC_DIR/pip" \
-        || warn "pip download failed — systemd's meson/jinja2 must be provided another way"
+        || warn "pip download failed — meson/jinja2 must be provided another way"
 else
     warn "No host pip found — meson/jinja2/markupsafe won't be staged for the"
     warn "chroot. Install pip and re-run 'make fetch', or provide them manually."

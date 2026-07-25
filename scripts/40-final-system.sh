@@ -4,7 +4,7 @@
 # Precondition: stage 30 finished (rootfs is chroot-ready). This stage does the
 # LFS chapter-7/8 work: set up the chroot (virtual filesystems, directory tree,
 # essential files/users), stage the sources inside it, then run a native build
-# of the real system ending in systemd as PID 1.
+# of the real system ending in urverk as PID 1.
 #
 # The heavy lifting is a build script generated INTO the rootfs and executed via
 # chroot (native) or qemu-user chroot (foreign) — exactly how LFS uses /sources.
@@ -181,8 +181,8 @@ unstage_sources() { sudo umount "$ROOTFS/sources" 2>/dev/null || true; }
 write_native_build_script() {
     step "Writing the in-chroot native build script"
     # This runs with a native compiler (no --host); it builds the real system.
-    # Written faithfully to LFS ch.8 / BLFS systemd. The critical path to a
-    # booting systemd is implemented; extend with the remaining userland
+    # Written faithfully to LFS ch.8. The critical path to a booting system is
+    # implemented; extend with the remaining userland
     # packages (FINAL_SYSTEM_SEQUENCE, below) following the same pattern.
     sudo tee "$ROOTFS/root/build-native.sh" >/dev/null <<'NATIVE'
 #!/bin/bash
@@ -478,9 +478,12 @@ find man -name Makefile.in -exec sed -i 's/passwd\.5 / /'   {} \;
 sed -e 's:#ENCRYPT_METHOD DES:ENCRYPT_METHOD YESCRYPT:' \
     -e 's:/var/spool/mail:/var/mail:' -e '/PATH=/{s@/sbin:@@;s@/usr/sbin:@@}' \
     -i etc/login.defs
+# --disable-logind: shadow enables logind support by default, which links
+# login/su/passwd against libsystemd. VerkOS' init is urverk, so drop it —
+# otherwise systemd cannot be removed without breaking the ability to log in.
 ./configure --sysconfdir=/etc --disable-static \
     --without-libbsd --with-{b,yes}crypt --without-selinux \
-    --without-libpam
+    --without-libpam --disable-logind
 make; make exec_prefix=/usr install
 cd /sources
 mark shadow
@@ -501,24 +504,12 @@ fi
 
 # 9. systemd — PID 1 (needs meson+ninja+python-jinja2 present in the chroot).
 #    Built with PAM (logind sessions) now that Linux-PAM is available.
-if need systemd; then
-say "systemd ${SYSTEMD_VERSION}"
-d=$(unpack systemd-${SYSTEMD_VERSION}.tar.gz); cd "$d"
-mkdir -p build && cd build
-meson setup .. \
-    --prefix=/usr --buildtype=release \
-    -Dmode=release -Ddefault-dnssec=no -Dfirstboot=false \
-    -Dinstall-tests=false -Dldconfig=false -Dsysusers=false \
-    -Drpmmacrosdir=no -Dhomed=disabled -Duserdb=false \
-    -Dman=disabled -Dmode=release -Dpam=enabled -Dpamconfdir=no \
-    -Dpamlibdir=/usr/lib/security \
-    -Ddev-kvm-mode=0660 -Dnobody-group=nogroup
-ninja
-ninja install
-mark systemd
-fi
-# Point /sbin/init at systemd.
-ln -sfv /usr/lib/systemd/systemd /usr/sbin/init
+# systemd — REMOVED. VerkOS' own init is urverk (pkg/urverk); nothing in the
+# base system links libsystemd any more (shadow is built --disable-logind), so
+# systemd is neither built nor installed. /sbin/init is urverk, services live in
+# /etc/urverk/services, and urverk-ctl replaces systemctl.
+# Point /sbin/init at urverk, VerkOS' own init.
+ln -sfv /sbin/urverk /usr/sbin/init
 cd /sources
 
 # 10. Networking + SSH -------------------------------------------------------
@@ -914,7 +905,7 @@ account   include     system-account
 session   include     system-session
 password  include     system-password
 P
-cat > /etc/pam.d/systemd-user <<'P'
+cat > /etc/pam.d/urverk-user <<'P'
 account   include     system-account
 session   include     system-session
 P
@@ -941,13 +932,8 @@ if [ -x /usr/bin/verkfetch ]; then
 fi
 PROF
 
-# Machine id (systemd needs one).
-systemd-machine-id-setup 2>/dev/null || echo uninitialized > /etc/machine-id
-
-# Text login by default; systemd auto-starts serial-getty on console=.
-systemctl set-default multi-user.target 2>/dev/null \
-  || ln -sfv /usr/lib/systemd/system/multi-user.target \
-             /etc/systemd/system/default.target
+# Machine id: kept, it is a generic /etc/machine-id that other tools read.
+[ -s /etc/machine-id ] || echo uninitialized > /etc/machine-id
 
 # Users/passwords: create /etc/shadow from /etc/passwd, then set a known root
 # password. DEV DEFAULT: root / "verkos" — CHANGE BEFORE ANY REAL USE.
@@ -961,12 +947,7 @@ fi
 
 # Serial-console autologin: drop straight to a root shell on boot (handy for dev
 # and demos). Applies to any serial-getty@ instance regardless of tty name.
-mkdir -p /etc/systemd/system/serial-getty@.service.d
-cat > /etc/systemd/system/serial-getty@.service.d/autologin.conf <<'AL'
-[Service]
-ExecStart=
-ExecStart=-/usr/bin/vgetty --autologin root --keep-baud %I 115200,38400,9600 $TERM
-AL
+# Console autologin is urverk's console service (vgetty --autologin root).
 
 # D-Bus system bus. Our dbus is built WITHOUT systemd integration (that would
 # pull in glib), so it CANNOT do socket activation: --address=systemd: and
@@ -974,27 +955,7 @@ AL
 # "compiled without systemd support". Instead run it as a plain service that
 # creates and listens on /run/dbus/system_bus_socket itself (address comes from
 # the built-in system.conf). systemd-logind & friends connect there.
-mkdir -p /etc/systemd/system/multi-user.target.wants /usr/lib/tmpfiles.d
-rm -f /usr/lib/systemd/system/dbus.socket \
-      /etc/systemd/system/sockets.target.wants/dbus.socket
-cat > /usr/lib/systemd/system/dbus.service <<'DV'
-[Unit]
-Description=D-Bus System Message Bus
-Documentation=man:dbus-daemon(1)
-[Service]
-Type=simple
-ExecStartPre=/usr/bin/mkdir -p /run/dbus
-ExecStart=/usr/bin/dbus-daemon --system --nofork --nopidfile --syslog-only
-ExecReload=/usr/bin/dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-Alias=dbus.service
-DV
-echo 'd /run/dbus 0755 root root -' > /usr/lib/tmpfiles.d/dbus.conf
-ln -sf /usr/lib/systemd/system/dbus.service \
-       /etc/systemd/system/multi-user.target.wants/dbus.service
-ln -sf /usr/lib/systemd/system/dbus.service /etc/systemd/system/dbus.service
+mkdir -p /usr/lib/tmpfiles.d
 
 # systemd ships dbus policy files (e.g. oom1) referencing service users that our
 # minimal base lacks, making dbus warn "Unknown username systemd-oom". Create the
@@ -1006,27 +967,10 @@ for u in systemd-oom:996 systemd-network:995 systemd-resolve:994; do
     grep -q "^$name:" /etc/group || echo "$name:x:$uid:" >> /etc/group
 done
 
-# systemd-vconsole-setup runs when /dev/tty0 exists and calls loadkeys/setfont from
-# the kbd package, which our minimal base doesn't ship yet — so it failed and left
-# systemd 'degraded'. Gate it on loadkeys being present: without kbd the unit is
-# cleanly SKIPPED (not failed); installing kbd later re-enables it automatically.
-mkdir -p /usr/lib/systemd/system/systemd-vconsole-setup.service.d
-cat > /usr/lib/systemd/system/systemd-vconsole-setup.service.d/10-verkos.conf <<'VC'
-[Unit]
-ConditionPathExists=/usr/bin/loadkeys
-VC
 
 # --- Networking: vdhcp is ACTIVE (our own DHCP client). dhcpcd and
 # --- systemd-networkd are both built but left disabled as swappable options —
 # --- concrete steps toward replacing systemd's networking with our own.
-mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/network
-cat > /etc/systemd/network/20-wired.network <<'NET'
-[Match]
-Name=en* eth*
-
-[Network]
-DHCP=yes
-NET
 # (/etc/resolv.conf already created above; vdhcp overwrites it at runtime.)
 
 # /etc/vdhcp.conf — vdhcp reads this for the interface list and tunables. With
@@ -1049,67 +993,8 @@ VC
 
 # vdhcp.service — VerkOS' own DHCP client, the active one. Config-driven: the
 # interface list (and tunables) come from /etc/vdhcp.conf.
-cat > /etc/systemd/system/vdhcp.service <<'VD'
-[Unit]
-Description=vdhcp DHCP client (VerkOS)
-Wants=network.target
-Before=network.target
-After=systemd-udevd.service
-[Service]
-Type=simple
-ExecStart=/usr/sbin/vdhcp
-Restart=on-failure
-RestartSec=2
-[Install]
-WantedBy=multi-user.target
-VD
-ln -sf /etc/systemd/system/vdhcp.service \
-       /etc/systemd/system/multi-user.target.wants/vdhcp.service
-
-# dhcpcd.service — kept installed but NOT enabled (swap in by enabling this and
-# disabling vdhcp.service if ever needed).
-cat > /etc/systemd/system/dhcpcd.service <<'DH'
-[Unit]
-Description=dhcpcd DHCP/DNS client (VerkOS, inactive fallback)
-Wants=network.target
-Before=network.target
-Conflicts=vdhcp.service
-[Service]
-Type=simple
-ExecStart=/usr/sbin/dhcpcd -B
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-DH
-
-# --- SSH: host keys, sshd service, password (root/verkos) + key auth --------
-ssh-keygen -A 2>/dev/null || true
-mkdir -p /root/.ssh; chmod 700 /root/.ssh
-[ -f /root/.ssh/verkos_ed25519 ] || \
-    ssh-keygen -t ed25519 -N '' -C verkos -f /root/.ssh/verkos_ed25519 2>/dev/null
-cat /root/.ssh/verkos_ed25519.pub > /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-cat >> /etc/ssh/sshd_config <<'SSHD'
-
-# --- VerkOS: allow root via both password and key ---
-PermitRootLogin yes
-PasswordAuthentication yes
-PubkeyAuthentication yes
-SSHD
-cat > /etc/systemd/system/sshd.service <<'SS'
-[Unit]
-Description=OpenSSH server (VerkOS)
-After=network.target
-[Service]
-Type=simple
-ExecStartPre=/usr/bin/ssh-keygen -A
-ExecStart=/usr/sbin/sshd -D -e
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-SS
-ln -sf /etc/systemd/system/sshd.service \
-       /etc/systemd/system/multi-user.target.wants/sshd.service
+# vdhcp, sshd and the console login are urverk services (built in, and in
+# /etc/urverk/services) — no unit files needed.
 
 # --- Register the base system in vpk's database ----------------------------
 # So `vpk list` shows the whole OS and base packages are protected from removal
@@ -1133,7 +1018,7 @@ reg pkgconf "$PKGCONF_VERSION";    reg libffi "$LIBFFI_VERSION"
 reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
 reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
 reg shadow "$SHADOW_VERSION";      reg linux-pam "$LINUXPAM_VERSION"
-reg dbus "$DBUS_VERSION";          reg systemd "$SYSTEMD_VERSION"
+reg dbus "$DBUS_VERSION";          reg urverk 0.1
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
 reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
@@ -1232,7 +1117,7 @@ if [ -x /usr/bin/vip ]; then
 fi
 
 echo
-echo "==> Native build complete: full core userland + systemd as /usr/sbin/init"
+echo "==> Native build complete: full core userland + urverk as /usr/sbin/init"
 NATIVE
     sudo chmod +x "$ROOTFS/root/build-native.sh"
 }
@@ -1243,7 +1128,7 @@ NATIVE
 FINAL_SYSTEM_SEQUENCE=(
     glibc zlib bzip2 xz ncurses bash coreutils
     sed grep gawk diffutils findutils tar gzip make patch m4 bison flex
-    binutils gcc file gperf expat libcap kmod util-linux dbus systemd
+    binutils gcc file gperf expat libcap kmod util-linux dbus urverk
 )
 
 require_ready
@@ -1264,7 +1149,7 @@ fi
 # native script: libffi+Python+ninja from source, meson/jinja2 via offline pip
 # from the sdists that 'make fetch' staged under sources/pip/. Verify they exist.
 if [ ! -d "$SRC_DIR/pip" ]; then
-    warn "sources/pip/ is missing — the systemd build tools weren't staged."
+    warn "sources/pip/ is missing — the python build tools weren't staged."
     warn "Run 'make fetch' on a host with pip before the final-system build."
 fi
 
@@ -1276,7 +1161,7 @@ if enter_rootfs '/root/build-native.sh'; then
         sudo install -m 0755 "$VERK_ROOT/tools/verkfetch" "$ROOTFS/usr/bin/verkfetch"
         ok "installed verkfetch → /usr/bin/verkfetch"
     fi
-    ok "Final system built — systemd is /usr/sbin/init"
+    ok "Final system built — urverk is /usr/sbin/init"
 else
     warn "Native build stopped before completion — inspect the log above."
     warn "Re-run 'make system ARCH=$ARCH' to resume (completed packages are installed)."
