@@ -1,4 +1,4 @@
-/* systemv — VerkOS' own init, and the systemd replacement the OS is heading for.
+/* urverk — VerkOS' own init, and the systemd replacement the OS is heading for.
  *
  * One binary, two stages, chosen automatically:
  *
@@ -8,12 +8,12 @@
  *   line, mount it, carry our mounts across and switch_root into the real init.
  *
  *   Stage 2 — PID 1 on the real root. We mount the rest of the filesystems, set
- *   the hostname, start the services described in /etc/systemv/services, then
+ *   the hostname, start the services described in /etc/urverk/services, then
  *   supervise them: reap orphans, respawn what should come back, and shut the
  *   machine down cleanly on signal.
  *
- * Which stage runs is decided by whether /etc/systemv/services exists (it does
- * on the real root, it does not in the initramfs); systemv.stage=1|2 on the
+ * Which stage runs is decided by whether /etc/urverk/services exists (it does
+ * on the real root, it does not in the initramfs); urverk.stage=1|2 on the
  * kernel command line overrides that. Built static so the initramfs needs
  * nothing but us.
  *
@@ -23,8 +23,8 @@
  *      ro | rw          mount the root read-only (default) or writable
  *      init=PATH        what to exec after switching (default /sbin/init)
  *      rootdelay=N      extra seconds to wait for the root device
- *      systemv.stage=N  force stage 1 or 2
- *      systemv.debug    keep going verbosely instead of quietly
+ *      urverk.stage=N  force stage 1 or 2
+ *      urverk.debug    keep going verbosely instead of quietly
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -40,6 +40,9 @@
 #include <dirent.h>
 #include <signal.h>
 #include <time.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #define NEWROOT "/newroot"
 
@@ -47,19 +50,19 @@ static int debug;
 
 /* ---- console output (we are PID 1; keep it dependency-free) -------------- */
 static void say(const char *s) {
-    fputs("  [systemv] ", stderr); fputs(s, stderr); fputc('\n', stderr);
+    fputs("  [urverk] ", stderr); fputs(s, stderr); fputc('\n', stderr);
 }
 static void say2(const char *s, const char *t) {
-    fputs("  [systemv] ", stderr); fputs(s, stderr); fputs(t, stderr); fputc('\n', stderr);
+    fputs("  [urverk] ", stderr); fputs(s, stderr); fputs(t, stderr); fputc('\n', stderr);
 }
 static void warn_errno(const char *what) {
-    fputs("  [systemv] ", stderr); fputs(what, stderr);
+    fputs("  [urverk] ", stderr); fputs(what, stderr);
     fputs(": ", stderr); fputs(strerror(errno), stderr); fputc('\n', stderr);
 }
 /* Unrecoverable: say why and stop. Panicking as PID 1 would just reboot-loop. */
 static void panic(const char *why) {
-    fputs("\n  [systemv] PANIC: ", stderr); fputs(why, stderr);
-    fputs("\n  [systemv] dropping to a shell if one exists\n", stderr);
+    fputs("\n  [urverk] PANIC: ", stderr); fputs(why, stderr);
+    fputs("\n  [urverk] dropping to a shell if one exists\n", stderr);
     execl("/bin/sh", "sh", (char *)NULL);
     for (;;) pause();
 }
@@ -164,7 +167,7 @@ static void switch_root(const char *init) {
 /* =========================================================================
  * Stage 2 — PID 1 on the real root
  * ========================================================================= */
-#define SVC_DIR      "/etc/systemv/services"
+#define SVC_DIR      "/etc/urverk/services"
 #define MAX_SVC      32
 #define RESPAWN_NO   0
 #define RESPAWN_ON_FAILURE 1
@@ -263,9 +266,35 @@ static int load_service(const char *dir, const char *file) {
 static int cmp_name(const void *a, const void *b) {
     return strcmp(*(const char **)a, *(const char **)b);
 }
+/* VerkOS' own daemons, known to urverk directly. These are what the OS is made
+ * of — the DHCP client, the ssh server and the console login — so urverk brings
+ * them up even with no files in SVC_DIR at all (a wiped /etc, a rescue boot, or
+ * an installer's freshly-copied root still comes up complete). Anything in
+ * SVC_DIR with the same name overrides the built-in. */
+static const svc_t builtin[] = {
+    { "vdhcp",   "vdhcp DHCP client (VerkOS)", "",
+      "/usr/sbin/vdhcp", RESPAWN_ALWAYS, 0, 0, 0 },
+    { "sshd",    "OpenSSH server (VerkOS)", "/usr/bin/ssh-keygen -A",
+      "/usr/sbin/sshd -D -e", RESPAWN_ON_FAILURE, 0, 0, 0 },
+    { "console", "console login (vgetty)", "",
+      "/usr/bin/vgetty --autologin root --keep-baud %console% 115200,38400,9600 linux",
+      RESPAWN_ALWAYS, 0, 0, 0 },
+};
+static int have_svc(const char *name) {
+    for (int i = 0; i < n_svcs; i++) if (!strcmp(svcs[i].name, name)) return 1;
+    return 0;
+}
+static void add_builtins(void) {
+    for (unsigned i = 0; i < sizeof builtin / sizeof builtin[0]; i++) {
+        if (n_svcs >= MAX_SVC) return;
+        if (have_svc(builtin[i].name)) continue;      /* a file already defines it */
+        svcs[n_svcs++] = builtin[i];
+        if (debug) say2("using built-in service ", builtin[i].name);
+    }
+}
 static void load_services(void) {
     DIR *d = opendir(SVC_DIR);
-    if (!d) { say("no " SVC_DIR " — nothing to start"); return; }
+    if (!d) { say("no " SVC_DIR " — using built-in services"); add_builtins(); return; }
     static char names[MAX_SVC][256];
     const char *ptrs[MAX_SVC];
     int n = 0;
@@ -282,6 +311,7 @@ static void load_services(void) {
     /* file names carry the order: 10-… before 20-… */
     qsort(ptrs, n, sizeof ptrs[0], cmp_name);
     for (int i = 0; i < n; i++) load_service(SVC_DIR, ptrs[i]);
+    add_builtins();          /* fill in any core service the files did not define */
 }
 
 /* ---- running things ------------------------------------------------------ */
@@ -338,7 +368,7 @@ static void start_service(svc_t *s) {
         _exit(127);
     }
     s->pid = p;
-    fputs("  [systemv] started ", stderr); fputs(s->name, stderr);
+    fputs("  [urverk] started ", stderr); fputs(s->name, stderr);
     if (s->desc[0]) { fputs(" — ", stderr); fputs(s->desc, stderr); }
     fputc('\n', stderr);
 }
@@ -355,12 +385,92 @@ static int should_respawn(svc_t *s, int status) {
     time_t now = time(NULL);
     if (now - s->window > 60) { s->window = now; s->restarts = 0; }   /* new window */
     if (++s->restarts > 5) {
-        fputs("  [systemv] ", stderr); fputs(s->name, stderr);
+        fputs("  [urverk] ", stderr); fputs(s->name, stderr);
         fputs(" is restarting too fast — giving up on it\n", stderr);
         s->respawn = RESPAWN_NO;
         return 0;
     }
     return 1;
+}
+
+/* ---- control socket ------------------------------------------------------
+ * PID 1 listens on /run/urverk.sock; the same binary run by a user connects to
+ * it (see client_main). One text command per connection, one text reply. */
+#define CTL_SOCK "/run/urverk.sock"
+static int ctl_fd = -1;
+
+static void ctl_open(void) {
+    struct sockaddr_un a;
+    unlink(CTL_SOCK);
+    ctl_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ctl_fd < 0) { warn_errno("control socket"); return; }
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", CTL_SOCK);
+    if (bind(ctl_fd, (struct sockaddr *)&a, sizeof a) || listen(ctl_fd, 4)) {
+        warn_errno("control socket"); close(ctl_fd); ctl_fd = -1; return;
+    }
+    chmod(CTL_SOCK, 0600);                 /* root only: this stops services */
+}
+static svc_t *svc_by_name(const char *name) {
+    for (int i = 0; i < n_svcs; i++) if (!strcmp(svcs[i].name, name)) return &svcs[i];
+    return NULL;
+}
+static void stop_service(svc_t *s) {
+    if (s->pid <= 0) return;
+    int was = s->respawn;
+    s->respawn = RESPAWN_NO;               /* do not fight the operator */
+    kill(s->pid, SIGTERM);
+    for (int i = 0; i < 30 && s->pid > 0; i++) {
+        int st; pid_t p = waitpid(s->pid, &st, WNOHANG);
+        if (p == s->pid) { s->pid = 0; break; }
+        usleep(100000);
+    }
+    if (s->pid > 0) { kill(s->pid, SIGKILL); waitpid(s->pid, NULL, 0); s->pid = 0; }
+    s->respawn = was;
+}
+/* handle one command; writes the reply to fd */
+static void ctl_handle(int fd) {
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n <= 0) return;
+    buf[n] = 0;
+    char *nl = strpbrk(buf, "\r\n"); if (nl) *nl = 0;
+    char *arg = strchr(buf, ' ');
+    if (arg) { *arg++ = 0; while (*arg == ' ') arg++; }
+
+    char out[2048]; out[0] = 0;
+    if (!strcmp(buf, "status")) {
+        for (int i = 0; i < n_svcs; i++) {
+            char line[256];
+            svc_t *s = &svcs[i];
+            snprintf(line, sizeof line, "%-12s %-9s %s\n", s->name,
+                     s->pid > 0 ? "running" : (s->respawn == RESPAWN_NO ? "stopped" : "dead"),
+                     s->desc);
+            strncat(out, line, sizeof out - strlen(out) - 1);
+        }
+        if (!n_svcs) snprintf(out, sizeof out, "no services\n");
+    } else if (!strcmp(buf, "stop") && arg) {
+        svc_t *s = svc_by_name(arg);
+        if (!s) snprintf(out, sizeof out, "no such service: %s\n", arg);
+        else { stop_service(s); s->respawn = RESPAWN_NO; snprintf(out, sizeof out, "stopped %s\n", arg); }
+    } else if ((!strcmp(buf, "start") || !strcmp(buf, "restart")) && arg) {
+        svc_t *s = svc_by_name(arg);
+        if (!s) snprintf(out, sizeof out, "no such service: %s\n", arg);
+        else {
+            if (s->pid > 0) stop_service(s);
+            s->restarts = 0;
+            start_service(s);
+            snprintf(out, sizeof out, "%s %s (pid %d)\n", buf, arg, (int)s->pid);
+        }
+    } else if (!strcmp(buf, "reboot"))   { want_shutdown = 2; snprintf(out, sizeof out, "rebooting\n"); }
+    else if (!strcmp(buf, "poweroff") || !strcmp(buf, "halt")) {
+        want_shutdown = 1; snprintf(out, sizeof out, "powering off\n");
+    } else {
+        snprintf(out, sizeof out,
+                 "urverk: commands are status | start NAME | stop NAME | restart NAME | reboot | poweroff\n");
+    }
+    ssize_t w = write(fd, out, strlen(out)); (void)w;
 }
 
 /* ---- shutdown ------------------------------------------------------------ */
@@ -400,7 +510,7 @@ static int stage2(void) {
     /* PID 1 must claim ctrl-alt-del or the kernel reboots without asking us */
     reboot(RB_DISABLE_CAD);
 
-    say("VerkOS init (stage 2) — SystemV");
+    say("VerkOS init (stage 2) — Urverk");
     mount_pseudo();
     mount_system();
     set_hostname_from_file();
@@ -409,31 +519,71 @@ static int stage2(void) {
     say2("services: ", n_svcs ? "starting" : "none configured");
     for (int i = 0; i < n_svcs; i++) start_service(&svcs[i]);
 
-    fputs("\n  [systemv] VerkOS is up\n\n", stderr);
+    fputs("\n  [urverk] VerkOS is up\n\n", stderr);
 
-    /* supervise: reap whatever dies, restart what should come back */
+    ctl_open();
+
+    /* Supervise: wait on the control socket, and reap children as they die.
+     * poll() with a timeout keeps both jobs on one thread — SIGCHLD only needs
+     * to interrupt the wait, the reaping happens right after. */
     for (;;) {
         if (want_shutdown) do_shutdown(want_shutdown);
-        int status;
-        pid_t p = waitpid(-1, &status, 0);
-        if (p < 0) {
-            if (errno == EINTR) continue;    /* a signal — loop and check */
-            if (errno == ECHILD) { sleep(1); continue; }
-            warn_errno("waitpid");
-            sleep(1);
-            continue;
+
+        struct pollfd pfd = { .fd = ctl_fd, .events = POLLIN };
+        int pr = (ctl_fd >= 0) ? poll(&pfd, 1, 1000) : (usleep(200000), 0);
+        if (pr > 0 && (pfd.revents & POLLIN)) {
+            int c = accept(ctl_fd, NULL, NULL);
+            if (c >= 0) { ctl_handle(c); close(c); }
         }
-        svc_t *s = svc_by_pid(p);
-        if (!s) continue;                    /* an orphan we just reaped */
-        s->pid = 0;
-        if (should_respawn(s, status)) {
-            say2("restarting ", s->name);
-            start_service(s);
-        } else if (!want_shutdown) {
-            say2("stopped ", s->name);
+
+        /* reap everything that exited while we waited */
+        for (;;) {
+            int status;
+            pid_t p = waitpid(-1, &status, WNOHANG);
+            if (p <= 0) break;
+            svc_t *s = svc_by_pid(p);
+            if (!s) continue;                /* an orphan we just reaped */
+            s->pid = 0;
+            if (should_respawn(s, status)) {
+                say2("restarting ", s->name);
+                start_service(s);
+            } else if (!want_shutdown) {
+                say2("stopped ", s->name);
+            }
         }
     }
     return 0;                                    /* not reached */
+}
+
+/* =========================================================================
+ * Client mode — the same binary, run by hand (install it as urverk-ctl too)
+ * ========================================================================= */
+static int client_main(int argc, char **argv) {
+    char cmd[256] = "";
+    for (int i = 1; i < argc; i++) {
+        if (cmd[0]) strncat(cmd, " ", sizeof cmd - strlen(cmd) - 1);
+        strncat(cmd, argv[i], sizeof cmd - strlen(cmd) - 1);
+    }
+    if (!cmd[0]) snprintf(cmd, sizeof cmd, "status");
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { perror("urverk: socket"); return 1; }
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", CTL_SOCK);
+    if (connect(fd, (struct sockaddr *)&a, sizeof a)) {
+        fprintf(stderr, "urverk: cannot reach init on %s: %s\n"
+                        "        (is urverk running as PID 1?)\n", CTL_SOCK, strerror(errno));
+        return 1;
+    }
+    strncat(cmd, "\n", sizeof cmd - strlen(cmd) - 1);
+    if (write(fd, cmd, strlen(cmd)) < 0) { perror("urverk: write"); return 1; }
+    char buf[2048];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) { ssize_t w = write(1, buf, n); (void)w; }
+    close(fd);
+    return 0;
 }
 
 /* =========================================================================
@@ -490,17 +640,21 @@ static int stage1(void) {
     return 0;                                    /* not reached */
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    /* Only PID 1 is the init; any other invocation is the control client, so
+     * `urverk status` (or urverk-ctl, a symlink to this binary) just works. */
+    if (getpid() != 1) return client_main(argc, argv);
+
     mount_pseudo();                              /* /proc first: we need cmdline */
     read_cmdline();
-    debug = cmdline_flag("systemv.debug");
+    debug = cmdline_flag("urverk.debug");
 
     /* Stage 2 is for the real root, stage 1 for the initramfs. The service
      * directory only exists on the real root, which tells them apart; allow an
      * explicit override for odd setups and for testing. */
     char forced[8] = "";
     int stage;
-    if (cmdline_get("systemv.stage", forced, sizeof forced))
+    if (cmdline_get("urverk.stage", forced, sizeof forced))
         stage = (forced[0] == '2') ? 2 : 1;
     else {
         struct stat st;

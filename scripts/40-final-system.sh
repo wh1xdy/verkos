@@ -165,9 +165,9 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vtree/vtree.c" "$ROOTFS/sources/vtree.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vpager/vpager.c" "$ROOTFS/sources/vpager.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
-    sudo cp "$VERK_ROOT/pkg/systemv/systemv.c" "$ROOTFS/sources/systemv.c" 2>/dev/null || true
-    sudo rm -rf "$ROOTFS/sources/systemv-services"
-    sudo cp -a "$VERK_ROOT/pkg/systemv/services" "$ROOTFS/sources/systemv-services" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
+    sudo rm -rf "$ROOTFS/sources/urverk-services"
+    sudo cp -a "$VERK_ROOT/pkg/urverk/services" "$ROOTFS/sources/urverk-services" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vgzip/vgzip.c" "$ROOTFS/sources/vgzip.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vzip/vzip.c" "$ROOTFS/sources/vzip.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vtar/vtar.c" "$ROOTFS/sources/vtar.c" 2>/dev/null || true
@@ -810,15 +810,18 @@ say "vfb (VerkOS framebuffer splash — first GUI)"
 gcc -O2 -o /usr/bin/vfb /sources/vfb.c
 cd /sources; mark vfb
 fi
-# systemv — VerkOS' own init (the systemd replacement we are growing). Static so
+# urverk — VerkOS' own init (the systemd replacement we are growing). Static so
 # the same binary works as the initramfs /init. Installed alongside systemd, not
-# instead of it: boot it with init=/sbin/systemv (vboot has a menu entry).
-if need systemv; then
-say "systemv (VerkOS init — stage 1 initramfs + stage 2 PID 1)"
-gcc -O2 -static -o /sbin/systemv /sources/systemv.c
-mkdir -p /etc/systemv/services
-cp -a /sources/systemv-services/. /etc/systemv/services/ 2>/dev/null || true
-cd /sources; mark systemv
+# instead of it: boot it with init=/sbin/urverk (vboot has a menu entry).
+if need urverk; then
+say "urverk (VerkOS init — stage 1 initramfs + stage 2 PID 1)"
+gcc -O2 -static -o /sbin/urverk /sources/urverk.c
+# same binary as the control client: `urverk-ctl status`, `urverk-ctl restart sshd`
+ln -sf /sbin/urverk /usr/bin/urverk-ctl
+ln -sf /sbin/urverk /usr/bin/urverk
+mkdir -p /etc/urverk/services
+cp -a /sources/urverk-services/. /etc/urverk/services/ 2>/dev/null || true
+cd /sources; mark urverk
 fi
 if need vgzip; then
 say "vgzip (VerkOS gzip/gunzip/zcat — own DEFLATE)"
@@ -1163,7 +1166,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vdate 0.1; reg vstat 0.1
     reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
     reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1; reg vbzip2 0.1
-    reg vpager 0.1; reg vfb 0.1; reg systemv 0.1
+    reg vpager 0.1; reg vfb 0.1; reg urverk 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
