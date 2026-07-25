@@ -18,10 +18,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bison flex gawk m4 texinfo bc cpio patch \
             xz-utils gzip tar pkg-config perl python3 libelf-dev \
-            qemu-system-x86 libcurl4-openssl-dev liblzma-dev zlib1g-dev
+            qemu-system-x86 libcurl4-openssl-dev liblzma-dev zlib1g-dev \
+            bzip2 dosfstools mtools parted gcc-aarch64-linux-gnu
 
       - name: make check (host prerequisites)
         run: make check ARCH=x86_64
+
+      # Everything that can be verified without building a distro or booting a
+      # VM: the signature crypto vboot trusts, cpio/gzip/bzip2 round trips
+      # against the GNU tools, sed/awk byte-for-byte, and the bootloader
+      # building for both architectures.
+      - name: make test
+        run: make test
 
       - name: Compile vpk (the package manager)
         run: cc -O2 -Wall -o /tmp/vpk pkg/vpk/vpk.c -lcurl -llzma -lz

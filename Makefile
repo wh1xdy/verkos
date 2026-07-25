@@ -18,10 +18,11 @@ ARCH   ?= x86_64
 SHELL  := /bin/bash
 BUILD  := scripts/build.sh
 
-.PHONY: all check pin fetch toolchain temp system kernel image boot run clean distclean help
+.PHONY: all check test pin fetch toolchain temp system kernel image boot run clean distclean help
 
 all:        ; @bash $(BUILD) all       $(ARCH)
 check:      ; @bash $(BUILD) check     $(ARCH)
+test:       ; @bash scripts/test.sh
 pin:        ; @bash scripts/pin-hashes.sh
 fetch:      ; @bash $(BUILD) fetch     $(ARCH)
 toolchain:  ; @bash $(BUILD) toolchain $(ARCH)

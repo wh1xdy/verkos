@@ -250,6 +250,17 @@ int main(int argc, char **argv) {
     int tostdout = !strcmp(me, "zcat"), keep = 0;
     const char *files[256]; int nf = 0;
     for (int i = 1; i < argc; i++) {
+        /* Accept combined short flags the way gzip does: -dc is by far the
+         * most common way people write "decompress to stdout". */
+        if (argv[i][0] == '-' && argv[i][1] && argv[i][1] != '-') {
+            for (const char *f = argv[i] + 1; *f; f++) {
+                if      (*f == 'd') decompress = 1;
+                else if (*f == 'c') tostdout = 1;
+                else if (*f == 'k') keep = 1;
+                else { fprintf(stderr, "%s: unknown option -%c\n", me, *f); return 1; }
+            }
+            continue;
+        }
         if (!strcmp(argv[i], "-d")) decompress = 1;
         else if (!strcmp(argv[i], "-c")) tostdout = 1;
         else if (!strcmp(argv[i], "-k")) keep = 1;
