@@ -44,6 +44,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/swap.h>
+#include <grp.h>
 
 #define NEWROOT "/newroot"
 
@@ -177,13 +178,24 @@ static void switch_root(const char *init) {
 #define RESPAWN_ON_FAILURE 1
 #define RESPAWN_ALWAYS     2
 
+#define TYPE_SIMPLE  0          /* long-running; ready as soon as it is started */
+#define TYPE_ONESHOT 1          /* runs to completion; ready when it exits 0 */
+
 typedef struct {
     char name[64];              /* from the file name, minus any NN- prefix */
     char desc[128];
     char pre[256];              /* optional one-shot run before exec */
     char exec[256];
+    char needs[256];            /* services that must be ready first */
+    char user[32], group[32];   /* drop privileges to these before exec */
+    char workdir[128];
+    char env[256];              /* space-separated KEY=VALUE pairs */
+    int  umask_val;             /* -1 = inherit */
+    int  type;
     int  respawn;
     pid_t pid;                  /* 0 when not running */
+    int  ready;                 /* dependents may start */
+    int  started;               /* we have tried to start it this boot */
     int  restarts;
     time_t window;              /* start of the current restart-rate window */
 } svc_t;
@@ -336,6 +348,22 @@ static void svc_set(svc_t *s, const char *key, const char *val) {
     if      (!strcmp(key, "description")) snprintf(s->desc, sizeof s->desc, "%s", val);
     else if (!strcmp(key, "exec"))        snprintf(s->exec, sizeof s->exec, "%s", val);
     else if (!strcmp(key, "pre"))         snprintf(s->pre,  sizeof s->pre,  "%s", val);
+    else if (!strcmp(key, "needs") || !strcmp(key, "after")) {
+        /* both express ordering; needs also waits for the dependency to be ready */
+        if (s->needs[0]) strncat(s->needs, " ", sizeof s->needs - strlen(s->needs) - 1);
+        strncat(s->needs, val, sizeof s->needs - strlen(s->needs) - 1);
+    }
+    else if (!strcmp(key, "user"))    snprintf(s->user,    sizeof s->user,    "%s", val);
+    else if (!strcmp(key, "group"))   snprintf(s->group,   sizeof s->group,   "%s", val);
+    else if (!strcmp(key, "workdir")) snprintf(s->workdir, sizeof s->workdir, "%s", val);
+    else if (!strcmp(key, "env")) {
+        if (s->env[0]) strncat(s->env, " ", sizeof s->env - strlen(s->env) - 1);
+        strncat(s->env, val, sizeof s->env - strlen(s->env) - 1);
+    }
+    else if (!strcmp(key, "umask"))   s->umask_val = (int)strtol(val, NULL, 8);
+    else if (!strcmp(key, "type")) {
+        s->type = !strcmp(val, "oneshot") ? TYPE_ONESHOT : TYPE_SIMPLE;
+    }
     else if (!strcmp(key, "respawn")) {
         if      (!strcmp(val, "always"))     s->respawn = RESPAWN_ALWAYS;
         else if (!strcmp(val, "on-failure")) s->respawn = RESPAWN_ON_FAILURE;
@@ -350,6 +378,7 @@ static int load_service(const char *dir, const char *file) {
     if (!f) return -1;
     svc_t *s = &svcs[n_svcs];
     memset(s, 0, sizeof *s);
+    s->umask_val = -1;
     /* "20-sshd.svc" -> "sshd": the numeric prefix only fixes start order */
     const char *base = file;
     while (*base >= '0' && *base <= '9') base++;
@@ -383,13 +412,15 @@ static int cmp_name(const void *a, const void *b) {
  * an installer's freshly-copied root still comes up complete). Anything in
  * SVC_DIR with the same name overrides the built-in. */
 static const svc_t builtin[] = {
-    { "vdhcp",   "vdhcp DHCP client (VerkOS)", "",
-      "/usr/sbin/vdhcp", RESPAWN_ALWAYS, 0, 0, 0 },
-    { "sshd",    "OpenSSH server (VerkOS)", "/usr/bin/ssh-keygen -A",
-      "/usr/sbin/sshd -D -e", RESPAWN_ON_FAILURE, 0, 0, 0 },
-    { "console", "console login (vgetty)", "",
-      "/usr/bin/vgetty --autologin root --keep-baud %console% 115200,38400,9600 linux",
-      RESPAWN_ALWAYS, 0, 0, 0 },
+    { .name = "vdhcp", .desc = "vdhcp DHCP client (VerkOS)",
+      .exec = "/usr/sbin/vdhcp", .respawn = RESPAWN_ALWAYS,
+      .type = TYPE_SIMPLE, .umask_val = -1 },
+    { .name = "sshd", .desc = "OpenSSH server (VerkOS)",
+      .pre = "/usr/bin/ssh-keygen -A", .exec = "/usr/sbin/sshd -D -e",
+      .respawn = RESPAWN_ON_FAILURE, .type = TYPE_SIMPLE, .umask_val = -1 },
+    { .name = "console", .desc = "console login (vgetty)",
+      .exec = "/usr/bin/vgetty --autologin root --keep-baud %console% 115200,38400,9600 linux",
+      .respawn = RESPAWN_ALWAYS, .type = TYPE_SIMPLE, .umask_val = -1 },
 };
 static int have_svc(const char *name) {
     for (int i = 0; i < n_svcs; i++) if (!strcmp(svcs[i].name, name)) return 1;
@@ -464,6 +495,57 @@ static void expand_console(char *cmd, size_t cap) {
     snprintf(out, sizeof out, "%.*s%s%s", (int)head, cmd, con, hit + strlen("%console%"));
     snprintf(cmd, cap, "%s", out);
 }
+/* Send a service's output to its own log, so the console is not a soup of every
+ * daemon at once and `urverk-ctl logs NAME` has something to show. */
+#define LOG_DIR "/var/log/urverk"
+static void svc_redirect_log(const svc_t *s) {
+    char path[256];
+    mkdir(LOG_DIR, 0750);
+    snprintf(path, sizeof path, LOG_DIR "/%s.log", s->name);
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0640);
+    if (fd < 0) return;                       /* keep the console rather than fail */
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    if (fd > STDERR_FILENO) close(fd);
+}
+/* KEY=VALUE pairs from the service file */
+static void svc_apply_env(const svc_t *s) {
+    if (!s->env[0]) return;
+    char buf[256]; snprintf(buf, sizeof buf, "%s", s->env);
+    for (char *tok = strtok(buf, " \t"); tok; tok = strtok(NULL, " \t")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = 0;
+        setenv(tok, eq + 1, 1);
+    }
+}
+/* look a name up in /etc/passwd or /etc/group without pulling in NSS */
+static int lookup_id(const char *file, const char *name, int field) {
+    FILE *f = fopen(file, "r");
+    if (!f) return -1;
+    char line[512];
+    int id = -1;
+    while (fgets(line, sizeof line, f)) {
+        char *save = NULL, *p = strtok_r(line, ":", &save);
+        if (!p || strcmp(p, name)) continue;
+        for (int i = 1; i <= field; i++) p = strtok_r(NULL, ":", &save);
+        if (p) id = (int)strtol(p, NULL, 10);
+        break;
+    }
+    fclose(f);
+    return id;
+}
+static int svc_drop_privs(const svc_t *s) {
+    if (!s->user[0] && !s->group[0]) return 0;
+    int gid = -1, uid = -1;
+    if (s->group[0]) gid = lookup_id("/etc/group", s->group, 2);
+    if (s->user[0])  uid = lookup_id("/etc/passwd", s->user, 2);
+    if (s->user[0] && gid < 0) gid = lookup_id("/etc/passwd", s->user, 3);
+    if (s->user[0] && uid < 0) return -1;                 /* unknown user: refuse */
+    if (gid >= 0) { setgroups(0, NULL); if (setgid((gid_t)gid)) return -1; }
+    if (uid >= 0 && setuid((uid_t)uid)) return -1;
+    return 0;
+}
 static void start_service(svc_t *s) {
     if (s->pre[0]) run_sync(s->pre);
     char buf[256]; snprintf(buf, sizeof buf, "%s", s->exec);
@@ -475,10 +557,19 @@ static void start_service(svc_t *s) {
     if (p == 0) {
         /* every service gets its own session so it cannot steal our terminal */
         setsid();
+        svc_redirect_log(s);
+        if (s->workdir[0] && chdir(s->workdir)) _exit(126);
+        if (s->umask_val >= 0) umask((mode_t)s->umask_val);
+        svc_apply_env(s);
+        if (svc_drop_privs(s)) _exit(126);       /* never run as root by mistake */
         execv(argv[0], argv);
         _exit(127);
     }
     s->pid = p;
+    s->started = 1;
+    /* A simple service is ready as soon as it is running; a oneshot only counts
+     * as ready once it has finished successfully (see the reaper). */
+    if (s->type == TYPE_SIMPLE) s->ready = 1;
     say2("started ", s->name[0] ? s->name : "(unnamed)");
 }
 static svc_t *svc_by_pid(pid_t p) {
@@ -553,9 +644,10 @@ static void ctl_handle(int fd) {
         for (int i = 0; i < n_svcs; i++) {
             char line[256];
             svc_t *s = &svcs[i];
-            snprintf(line, sizeof line, "%-12.63s %-9.9s %.100s\n", s->name,
-                     s->pid > 0 ? "running" : (s->respawn == RESPAWN_NO ? "stopped" : "dead"),
-                     s->desc);
+            const char *state = s->pid > 0 ? "running"
+                             : s->type == TYPE_ONESHOT ? (s->ready ? "done" : "failed")
+                             : s->respawn == RESPAWN_NO ? "stopped" : "dead";
+            snprintf(line, sizeof line, "%-12.63s %-9.9s %.100s\n", s->name, state, s->desc);
             strncat(out, line, sizeof out - strlen(out) - 1);
         }
         if (!n_svcs) snprintf(out, sizeof out, "no services\n");
@@ -572,12 +664,28 @@ static void ctl_handle(int fd) {
             start_service(s);
             snprintf(out, sizeof out, "%s %s (pid %d)\n", buf, arg, (int)s->pid);
         }
+    } else if (!strcmp(buf, "logs") && arg) {
+        char path[256];
+        snprintf(path, sizeof path, LOG_DIR "/%.64s.log", arg);
+        int lf = open(path, O_RDONLY);
+        if (lf < 0) { snprintf(out, sizeof out, "no log for %s\n", arg); }
+        else {
+            /* send the tail; a boot's worth of log is plenty to diagnose with */
+            off_t end = lseek(lf, 0, SEEK_END);
+            off_t from = end > 65536 ? end - 65536 : 0;
+            lseek(lf, from, SEEK_SET);
+            char b[4096];
+            ssize_t n2;
+            while ((n2 = read(lf, b, sizeof b)) > 0) { ssize_t w2 = write(fd, b, n2); (void)w2; }
+            close(lf);
+            return;                                   /* already written */
+        }
     } else if (!strcmp(buf, "reboot"))   { want_shutdown = 2; snprintf(out, sizeof out, "rebooting\n"); }
     else if (!strcmp(buf, "poweroff") || !strcmp(buf, "halt")) {
         want_shutdown = 1; snprintf(out, sizeof out, "powering off\n");
     } else {
         snprintf(out, sizeof out,
-                 "urverk: commands are status | start NAME | stop NAME | restart NAME | reboot | poweroff\n");
+                 "urverk: status | start NAME | stop NAME | restart NAME | logs NAME | reboot | poweroff\n");
     }
     ssize_t w = write(fd, out, strlen(out)); (void)w;
 }
@@ -610,6 +718,58 @@ static void do_shutdown(int mode) {
     for (;;) pause();
 }
 
+/* Is every service this one needs ready? Unknown names are ignored rather than
+ * deadlocking the boot over a typo. */
+static int deps_ready(const svc_t *s) {
+    if (!s->needs[0]) return 1;
+    char buf[256]; snprintf(buf, sizeof buf, "%s", s->needs);
+    for (char *tok = strtok(buf, " \t"); tok; tok = strtok(NULL, " \t")) {
+        svc_t *d = svc_by_name(tok);
+        if (d && !d->ready) return 0;
+    }
+    return 1;
+}
+/* Start services in dependency order: repeatedly start whatever has all its
+ * needs satisfied. A oneshot blocks its dependents until it exits, so we reap
+ * while we wait. If nothing can progress (a cycle, or a oneshot that never
+ * finishes) we say so and start the rest anyway rather than hang the boot. */
+static void start_all(void) {
+    for (int round = 0; round < MAX_SVC + 2; round++) {
+        int started_any = 0, pending = 0;
+        for (int i = 0; i < n_svcs; i++) {
+            svc_t *s = &svcs[i];
+            if (s->started) continue;
+            if (!deps_ready(s)) { pending = 1; continue; }
+            start_service(s);
+            started_any = 1;
+            if (s->type == TYPE_ONESHOT) {
+                /* wait for it, with a cap so a hung oneshot cannot stop the boot */
+                for (int t = 0; t < 300 && s->pid > 0; t++) {
+                    int st;
+                    pid_t p = waitpid(s->pid, &st, WNOHANG);
+                    if (p == s->pid) {
+                        s->pid = 0;
+                        s->ready = (WIFEXITED(st) && WEXITSTATUS(st) == 0);
+                        if (!s->ready) say2("oneshot failed: ", s->name);
+                        break;
+                    }
+                    usleep(100000);
+                }
+                if (s->pid > 0) { say2("oneshot still running, continuing: ", s->name); s->ready = 1; }
+            }
+        }
+        if (!pending) return;                    /* everything is up */
+        if (!started_any) {                      /* nothing can proceed */
+            for (int i = 0; i < n_svcs; i++) {
+                if (svcs[i].started) continue;
+                say2("unmet dependency, starting anyway: ", svcs[i].name);
+                start_service(&svcs[i]);
+            }
+            return;
+        }
+    }
+}
+
 static int stage2(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -630,7 +790,7 @@ static int stage2(void) {
 
     load_services();
     say2("services: ", n_svcs ? "starting" : "none configured");
-    for (int i = 0; i < n_svcs; i++) start_service(&svcs[i]);
+    start_all();
 
     fputs("\n  [urverk] VerkOS is up\n\n", stderr);
 
@@ -657,6 +817,10 @@ static int stage2(void) {
             svc_t *s = svc_by_pid(p);
             if (!s) continue;                /* an orphan we just reaped */
             s->pid = 0;
+            if (s->type == TYPE_ONESHOT) {   /* completion is what makes it ready */
+                s->ready = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+                continue;                    /* oneshots are not respawned */
+            }
             if (should_respawn(s, status)) {
                 say2("restarting ", s->name);
                 start_service(s);

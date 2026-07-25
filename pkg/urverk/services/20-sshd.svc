@@ -1,5 +1,5 @@
-# OpenSSH. ssh-keygen -A is a no-op once the host keys exist.
+# OpenSSH. Waits for the host keys, and for networking to be configured.
 description OpenSSH server (VerkOS)
-pre /usr/bin/ssh-keygen -A
-exec /usr/sbin/sshd -D -e
+needs   sshkeys vdhcp
+exec    /usr/sbin/sshd -D -e
 respawn on-failure

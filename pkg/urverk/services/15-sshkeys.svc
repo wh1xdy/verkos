@@ -1,0 +1,6 @@
+# Host keys, generated once. A oneshot: it runs to completion and only then
+# counts as ready, so sshd is never started before its keys exist.
+description generate SSH host keys
+type    oneshot
+exec    /usr/bin/ssh-keygen -A
+respawn no
