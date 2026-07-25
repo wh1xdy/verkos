@@ -48,6 +48,9 @@ build_initramfs() {
     # exactly when it is needed: no root device, or a root that will not mount.
     # Costs a few MB in an image whose ESP is measured in hundreds.
     add_rescue_shell "$work"
+    # An encrypted root has to be opened before there is a root to mount, so
+    # cryptsetup has to be here rather than on the filesystem it unlocks.
+    add_cryptsetup "$work"
 
     ( cd "$work" && find . | "$tools/vcpio" -o ) > "$BUILD_DIR/initramfs.cpio" \
         || die "vcpio failed"
@@ -57,6 +60,51 @@ build_initramfs() {
 
 # Copy bash and whatever it links into the initramfs, plus verkbox for the
 # everyday tools, so a rescue prompt can actually do something.
+# cryptsetup and everything it names, into the initramfs. Without this an
+# encrypted root cannot be opened at all: urverk prompts, forks, and finds
+# nothing to exec.
+add_cryptsetup() {
+    local work="$1"
+    local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
+    local cs=""
+    for c in "$ROOTFS/usr/sbin/cryptsetup" "$ROOTFS/sbin/cryptsetup" "$ROOTFS/usr/bin/cryptsetup"; do
+        [ -x "$c" ] && { cs="$c"; break; }
+    done
+    [ -n "$cs" ] || { log "no cryptsetup in the rootfs — the initramfs cannot open an encrypted root"; return 0; }
+
+    mkdir -p "$work/usr/sbin" "$work/usr/lib"
+    $SUDO ln -sfn usr/sbin "$work/sbin" 2>/dev/null || true
+    $SUDO cp "$cs" "$work/usr/sbin/cryptsetup"
+
+    # Follow the whole dependency chain, not just the direct NEEDED entries:
+    # libcryptsetup pulls in json-c, devmapper, popt and OpenSSL, and each of
+    # those names more. A missing one only shows up as "error while loading
+    # shared libraries" at the moment the disk needs unlocking.
+    local pending="$work/usr/sbin/cryptsetup" seen="" lib d found
+    while [ -n "$pending" ]; do
+        local next=""
+        for f in $pending; do
+            for lib in $(readelf -d "$f" 2>/dev/null | sed -n "s/.*NEEDED.*\[\(.*\)\]/\1/p"); do
+                case " $seen " in *" $lib "*) continue ;; esac
+                seen="$seen $lib"
+                found=""
+                for d in "$ROOTFS/usr/lib" "$ROOTFS/lib" "$ROOTFS/usr/lib64"; do
+                    [ -e "$d/$lib" ] && { found="$d/$lib"; break; }
+                done
+                if [ -n "$found" ]; then
+                    $SUDO cp -L "$found" "$work/usr/lib/$lib"
+                    next="$next $work/usr/lib/$lib"
+                else
+                    warn "cryptsetup needs $lib, which is not in the rootfs"
+                fi
+            done
+        done
+        pending="$next"
+    done
+    ok "initramfs carries cryptsetup ($(echo $seen | wc -w) libraries)"
+    return 0
+}
+
 add_rescue_shell() {
     local work="$1"
     local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo

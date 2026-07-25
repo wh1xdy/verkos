@@ -42,6 +42,9 @@ static int dry_run, assume_yes, verbose;
  * tested without a live medium. */
 static const char *source = "/";
 static const char *passwd_file;      /* chpasswd-format lines for the new system */
+static int encrypt_root;
+static const char *luks_file;        /* passphrase for an unattended install */
+#define LUKS_NAME "cryptroot"
 static int lock_root;
 static const char *prog = "vinstall";
 
@@ -565,18 +568,23 @@ static void copy_system(const char *root) {
 }
 
 static void write_fstab(const char *root, const char *root_uuid, const char *esp_uuid,
-                        const char *home_uuid, const char *swap_uuid) {
+                        const char *home_uuid, const char *swap_uuid, int encrypted) {
     if (dry_run) return;
     char path[512];
     snprintf(path, sizeof path, "%s/etc/fstab", root);
     FILE *f = fopen(path, "w");
     if (!f) die("cannot write %s: %s", path, strerror(errno));
+    /* UUID= would be resolved by scanning raw block devices, and the mapper
+     * device is not one; name it directly. */
+    char rootline[192];
+    if (encrypted) snprintf(rootline, sizeof rootline, "/dev/mapper/%s", LUKS_NAME);
+    else snprintf(rootline, sizeof rootline, "UUID=%s", root_uuid);
     fprintf(f,
         "# Written by vinstall. urverk mounts these at boot.\n"
         "# device                                  mount   type  options              dump fsck\n"
-        "UUID=%-36s /       ext4  defaults,noatime     0    1\n"
+        "%-41s /       ext4  defaults,noatime     0    1\n"
         "UUID=%-36s /boot   vfat  defaults,noatime     0    2\n",
-        root_uuid, esp_uuid);
+        rootline, esp_uuid);
     if (home_uuid && *home_uuid)
         fprintf(f, "UUID=%-36s /home   ext4  defaults,noatime     0    2\n", home_uuid);
     if (swap_uuid && *swap_uuid)
@@ -585,7 +593,7 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
 }
 
 static void install_bootloader(const char *root, const char *arch, const char *root_uuid,
-                               int own_disk) {
+                               int own_disk, const char *luks_uuid) {
     char esp[512];
     snprintf(esp, sizeof esp, "%s/boot", root);
     run("mkdir -p %s/EFI/BOOT %s/EFI/verkos", esp, esp);
@@ -635,6 +643,16 @@ static void install_bootloader(const char *root, const char *arch, const char *r
      * boots, with no initrd and an empty command line, and panics mounting root.
      * Keep it matching pkg/vboot/vboot.c and config/esp/vboot.conf. */
     const char *console = !strcmp(arch, "aarch64") ? "ttyAMA0" : "ttyS0";
+    /* With an encrypted root the kernel cannot be told to mount it directly:
+     * the initramfs has to find the container, ask for the passphrase and open
+     * it first, and only then is there a device to mount. */
+    char rootspec[256], luksarg[192] = "";
+    if (luks_uuid && *luks_uuid) {
+        snprintf(rootspec, sizeof rootspec, "/dev/mapper/%s", LUKS_NAME);
+        snprintf(luksarg, sizeof luksarg, "rd.luks.uuid=%s rd.luks.name=%s ", luks_uuid, LUKS_NAME);
+    } else {
+        snprintf(rootspec, sizeof rootspec, "UUID=%s", root_uuid);
+    }
     fprintf(f,
         "# Written by vinstall.\n"
         "timeout 5\n"
@@ -643,18 +661,18 @@ static void install_bootloader(const char *root, const char *arch, const char *r
         "entry VerkOS\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk\n"
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk\n"
         "\n"
         "entry VerkOS (verbose boot)\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk urverk.debug\n"
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk urverk.debug\n"
         "\n"
         "entry VerkOS (rescue shell)\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk urverk.rescue\n",
-        root_uuid, console, root_uuid, console, root_uuid, console);
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk urverk.rescue\n",
+        luksarg, rootspec, console, luksarg, rootspec, console, luksarg, rootspec, console);
     fclose(f);
 }
 
@@ -686,6 +704,9 @@ static void usage(void) {
            "  --esp-part DEV   use this existing EFI partition (never formatted)\n"
            "  --home-part DEV  --swap-part DEV   optional, formatted\n"
            "  --no-efi-entry   do not add a boot entry to the firmware\n"
+           "\n"
+           "  --encrypt        put the root filesystem inside a LUKS2 container\n"
+           "  --luks-passphrase-file F   read the passphrase from F (for -y)\n"
            "  -n           dry run: print what would happen, change nothing\n"
            "  -v           show every command\n", ESP_MB_DEFAULT);
 }
@@ -714,6 +735,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--home-part") && i + 1 < argc) given_home = argv[++i];
         else if (!strcmp(argv[i], "--swap-part") && i + 1 < argc) given_swap = argv[++i];
         else if (!strcmp(argv[i], "--no-efi-entry")) no_efi_entry = 1;
+        else if (!strcmp(argv[i], "--encrypt")) encrypt_root = 1;
+        else if (!strcmp(argv[i], "--luks-passphrase-file") && i + 1 < argc) luks_file = argv[++i];
         else { usage(); return strcmp(argv[i], "-h") && strcmp(argv[i], "--help"); }
     }
     if (getuid() != 0) die("must be run as root");
@@ -844,12 +867,50 @@ int main(int argc, char **argv) {
      * would delete it. Only the one we just created is ours to format. */
     if (own_disk) run("%s -n VERKESP %s", mkvfat, esp_part);
     else printf("    keeping the filesystem on %s\n", esp_part);
-    run("mkfs.ext4 -q -F -L VERKOS %s", root_part);
+    /* The container has to exist before there is a filesystem to put in it, so
+     * this sits between partitioning and mkfs. Everything downstream then uses
+     * the mapper device and never touches the raw partition again. */
+    char fs_dev[256];
+    snprintf(fs_dev, sizeof fs_dev, "%s", root_part);
+    char luks_uuid[128] = "";
+    if (encrypt_root) {
+        if (!have_tool("cryptsetup"))
+            die("cryptsetup is not installed — cannot create an encrypted root");
+        step("encrypting %s", root_part);
+        if (luks_file) {
+            run("cryptsetup luksFormat --type luks2 -q --key-file %s %s", luks_file, root_part);
+            run("cryptsetup luksOpen --key-file %s %s %s", luks_file, root_part, LUKS_NAME);
+        } else if (!dry_run) {
+            char pass[256];
+            if (ask_password_twice("the encrypted disk", pass, sizeof pass))
+                die("no passphrase given — nothing has been written to the filesystem yet");
+            char pf[256];
+            snprintf(pf, sizeof pf, "/run/vinstall-luks");
+            FILE *f = fopen(pf, "w");
+            if (!f) die("cannot write %s: %s", pf, strerror(errno));
+            chmod(pf, 0600);
+            fputs(pass, f);
+            fclose(f);
+            memset(pass, 0, sizeof pass);
+            run("cryptsetup luksFormat --type luks2 -q --key-file %s %s", pf, root_part);
+            run("cryptsetup luksOpen --key-file %s %s %s", pf, root_part, LUKS_NAME);
+            unlink(pf);
+        }
+        snprintf(fs_dev, sizeof fs_dev, "/dev/mapper/%s", LUKS_NAME);
+        /* The container's own UUID is what the initramfs looks for; the
+         * filesystem inside has a different one. */
+        if (!dry_run &&
+            (capture(luks_uuid, sizeof luks_uuid, "cryptsetup luksUUID %s 2>/dev/null", root_part) != 0
+             || !luks_uuid[0]))
+            die("could not read the LUKS UUID of %s", root_part);
+    }
+
+    run("mkfs.ext4 -q -F -L VERKOS %s", fs_dev);
     if (home_part[0]) { wait_for_partition(home_part); run("mkfs.ext4 -q -F -L VERKHOME %s", home_part); }
     if (swap_part[0]) { wait_for_partition(swap_part); run("mkswap -L VERKSWAP %s >/dev/null", swap_part); }
 
     char root_uuid[128], esp_uuid[128];
-    get_uuid(root_part, root_uuid, sizeof root_uuid);
+    get_uuid(fs_dev, root_uuid, sizeof root_uuid);
     get_uuid(esp_part, esp_uuid, sizeof esp_uuid);
     char home_uuid[128] = "", swap_uuid[128] = "";
     if (home_part[0]) get_uuid(home_part, home_uuid, sizeof home_uuid);
@@ -857,7 +918,7 @@ int main(int argc, char **argv) {
 
     step("mounting the new system on %s", MNT);
     run("mkdir -p %s", MNT);
-    run("mount %s %s", root_part, MNT);
+    run("mount %s %s", fs_dev, MNT);
     run("mkdir -p %s/boot", MNT);
     run("mount %s %s/boot", esp_part, MNT);
     if (home_part[0]) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
@@ -866,7 +927,7 @@ int main(int argc, char **argv) {
     copy_system(MNT);
 
     step("installing vboot and writing the boot configuration");
-    install_bootloader(MNT, arch, root_uuid, own_disk);
+    install_bootloader(MNT, arch, root_uuid, own_disk, luks_uuid);
     if (!no_efi_entry && efi_available() && !dry_run) {
         const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
         if (efi_add_boot_entry(esp_part, efi_name, "VerkOS") == 0)
@@ -877,7 +938,7 @@ int main(int argc, char **argv) {
     }
 
     step("configuring the installed system");
-    write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid);
+    write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid, luks_uuid[0] != 0);
     set_hostname(MNT, hostname);
     if (user) run("chroot %s /usr/bin/useradd -m -s /bin/bash %s", MNT, user);
     step("setting passwords");
@@ -888,6 +949,7 @@ int main(int argc, char **argv) {
     run("umount %s/boot", MNT);
     if (home_part[0]) run("umount %s/home", MNT);
     run("umount %s", MNT);
+    if (luks_uuid[0]) run("cryptsetup luksClose %s || true", LUKS_NAME);
 
     printf("\n\033[1;32mVerkOS is installed on %s.\033[0m\n", disk);
     printf("Root filesystem UUID %s. Remove the install medium and reboot.\n\n", root_uuid);

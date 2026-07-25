@@ -516,3 +516,46 @@ only added to.
 
 **Still not done:** encryption. LUKS is an ext4-shaped decision — not something
 to hand-roll — so it means taking cryptsetup as a dependency.
+
+## D-020 — Encrypted root: LUKS2, opened by urverk before there is a root
+
+**Decision:** `vinstall --encrypt` puts the root filesystem inside a LUKS2
+container, and urverk's initramfs stage finds it, asks for the passphrase and
+opens it before anything is mounted. cryptsetup does the cryptography; we do
+not.
+
+**Why cryptsetup rather than our own.** This is the same judgement as ext4 in
+D-014, only sharper: a mistake in a disk encryption implementation is silent
+and unrecoverable. What VerkOS owns here is the *plumbing* — finding the
+container, asking for the passphrase, and handing it over — not the key
+derivation or the cipher.
+
+**How the pieces fit.** The installer writes `rd.luks.uuid=<container>` and
+`root=/dev/mapper/cryptroot` into vboot.conf. urverk reads the LUKS header
+directly to find which partition holds that container — nothing else can
+identify an encrypted partition, because it has no filesystem to read until it
+is open — then prompts and execs cryptsetup with the passphrase on stdin.
+Both LUKS1 and LUKS2 put the UUID at offset 168, so one reader covers them.
+
+cryptsetup and its ten shared libraries are copied into the initramfs by
+following the whole dependency chain rather than the direct NEEDED entries:
+libcryptsetup names json-c, devmapper, popt and OpenSSL, and those name more. A
+library missed here would only show up as "error while loading shared
+libraries" at the moment the disk needs unlocking.
+
+The kernel now has `DM_CRYPT`, `BLK_DEV_DM` and `CRYPTO_XTS` built in rather
+than as modules: a module would have to be loaded from inside the initramfs
+before the root can be opened, which means carrying the modules and a loader
+there for no benefit.
+
+**Verified end to end**, not by inspection: the partition reports
+`crypto_LUKS` with `aes-xts-plain64` and refuses to mount without the
+passphrase; the disk boots on its own; urverk finds the container by UUID,
+prompts, opens it, and the system comes up with root on
+`/dev/mapper/cryptroot`.
+
+**What it cost.** Reaching this needed cmake, json-c, libdevmapper and
+cryptsetup, and those needed a native GCC — which had never been built here,
+because the flag that enables it never reached the chroot. Getting through that
+found eight defects in VerkOS' own tools, most of which produced a wrong answer
+with a zero exit status. They are listed in D-021.

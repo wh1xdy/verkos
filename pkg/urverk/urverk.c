@@ -45,6 +45,7 @@
 #include <sys/un.h>
 #include <sys/swap.h>
 #include <grp.h>
+#include <termios.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
 #include <netinet/in.h>
@@ -225,6 +226,96 @@ static int swap_super(const char *dev, char *label, char *uuid) {
     }
     close(fd);
     return ok;
+}
+
+/* A LUKS container announces itself in the first bytes of the partition, and
+ * both header versions put the UUID at the same offset — 40 ASCII bytes at 168.
+ * Nothing else can identify an encrypted partition: it has no filesystem to
+ * read until it is opened. */
+static int luks_super(const char *dev, char *uuid) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char h[208];
+    int ok = -1;
+    if (pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h &&
+        !memcmp(h, "LUKS\xba\xbe", 6)) {
+        memcpy(uuid, h + 168, 40);
+        uuid[40] = 0;
+        ok = 0;
+    }
+    close(fd);
+    return ok;
+}
+
+/* Find the partition holding the LUKS container with this UUID. */
+static int find_luks(const char *want, char *out, size_t cap, int attempts) {
+    for (int attempt = 0; attempt < attempts; attempt++) {
+        DIR *d = opendir("/dev");
+        struct dirent *e;
+        while (d && (e = readdir(d))) {
+            if (strncmp(e->d_name, "sd", 2) && strncmp(e->d_name, "vd", 2) &&
+                strncmp(e->d_name, "nvme", 4) && strncmp(e->d_name, "mmcblk", 6)) continue;
+            char dev[128], uuid[48];
+            snprintf(dev, sizeof dev, "/dev/%.100s", e->d_name);
+            if (luks_super(dev, uuid)) continue;
+            if (!strcasecmp(uuid, want)) { closedir(d); snprintf(out, cap, "%s", dev); return 0; }
+        }
+        if (d) closedir(d);
+        usleep(100000);
+    }
+    return -1;
+}
+
+/* Ask for the passphrase and hand it to cryptsetup on standard input. Asking
+ * here rather than letting cryptsetup prompt keeps the prompt consistent with
+ * the rest of the boot and works when stdin is the kernel console. */
+static int luks_unlock(const char *dev, const char *name) {
+    for (int try = 1; try <= 3; try++) {
+        char pass[512];
+        struct termios old, quiet;
+        int have_tty = isatty(STDIN_FILENO);
+        fprintf(stderr, "\n  Passphrase for %s: ", dev);
+        fflush(stderr);
+        if (have_tty && tcgetattr(STDIN_FILENO, &old) == 0) {
+            quiet = old;
+            quiet.c_lflag &= ~(unsigned)ECHO;
+            quiet.c_lflag |= ECHONL;
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
+        }
+        char *r = fgets(pass, sizeof pass, stdin);
+        if (have_tty) tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+        if (!r) return -1;
+        pass[strcspn(pass, "\n")] = 0;
+
+        int pfd[2];
+        if (pipe(pfd)) { warn_errno("pipe"); return -1; }
+        pid_t pid = fork();
+        if (pid < 0) { warn_errno("fork"); close(pfd[0]); close(pfd[1]); return -1; }
+        if (pid == 0) {
+            close(pfd[1]);
+            dup2(pfd[0], STDIN_FILENO);
+            close(pfd[0]);
+            execl("/usr/sbin/cryptsetup", "cryptsetup", "luksOpen", "--key-file", "-",
+                  dev, name, (char *)NULL);
+            execl("/sbin/cryptsetup", "cryptsetup", "luksOpen", "--key-file", "-",
+                  dev, name, (char *)NULL);
+            _exit(127);
+        }
+        close(pfd[0]);
+        ssize_t n = write(pfd[1], pass, strlen(pass));
+        (void)n;
+        close(pfd[1]);
+        memset(pass, 0, sizeof pass);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 0;
+        if (WIFEXITED(st) && WEXITSTATUS(st) == 127) {
+            say("cryptsetup is not in the initramfs — cannot open an encrypted root");
+            return -1;
+        }
+        say("wrong passphrase");
+    }
+    return -1;
 }
 
 static int probe_dev(const char *dev, char *label, char *uuid) {
@@ -1369,6 +1460,25 @@ static int stage1(void) {
 
     int extra = 0;
     if (cmdline_get("rootdelay", delay, sizeof delay)) extra = atoi(delay);
+
+    /* An encrypted root has to be opened before there is anything to mount.
+     * rd.luks.uuid names the container; root= then names the mapper device it
+     * is opened as, exactly as it would for a plain partition. */
+    char luks_uuid[64] = "", luks_name[64] = "";
+    if (cmdline_get("rd.luks.uuid", luks_uuid, sizeof luks_uuid)) {
+        if (!cmdline_get("rd.luks.name", luks_name, sizeof luks_name))
+            snprintf(luks_name, sizeof luks_name, "cryptroot");
+        say2("encrypted root, container ", luks_uuid);
+        char cdev[128];
+        if (find_luks(luks_uuid, cdev, sizeof cdev, 100)) {
+            say2("no LUKS container with that UUID: ", luks_uuid);
+            emergency_shell("the encrypted root device was not found");
+        } else if (luks_unlock(cdev, luks_name)) {
+            emergency_shell("the encrypted root could not be unlocked");
+        } else {
+            say2("opened as /dev/mapper/", luks_name);
+        }
+    }
 
     say2("root device: ", root);
     resolve_root(root, sizeof root);          /* LABEL=/UUID= -> /dev/... */
