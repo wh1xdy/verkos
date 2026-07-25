@@ -47,6 +47,9 @@
 #include <grp.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdint.h>
 
 #define NEWROOT "/newroot"
 
@@ -112,6 +115,14 @@ static int cmdline_flag(const char *flag) {
     return 0;
 }
 
+/* write a short string to a file; used for sysfs/cgroup knobs */
+static void write_early(const char *path, const char *val) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return;
+    ssize_t w = write(fd, val, strlen(val)); (void)w;
+    close(fd);
+}
+
 /* ---- early filesystems --------------------------------------------------- */
 static void mount_pseudo(void) {
     mkdir("/proc", 0555); mkdir("/sys", 0555); mkdir("/dev", 0755); mkdir("/run", 0755);
@@ -136,6 +147,90 @@ static int wait_for_device(const char *dev, int secs) {
         if (debug && i && i % 10 == 0) say2("still waiting for ", dev);
     }
     return 0;
+}
+
+/* ---- resolving root=LABEL=... / UUID=... --------------------------------
+ * Disk order is not stable on real hardware, so an installed system should not
+ * name /dev/vda. Both live in the ext2/3/4 superblock at a fixed offset, so we
+ * can read them ourselves without blkid. */
+static int ext_super(const char *dev, char *label, char *uuid) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char sb[1024];
+    int ok = -1;
+    if (pread(fd, sb, sizeof sb, 1024) == (ssize_t)sizeof sb &&
+        sb[0x38] == 0x53 && sb[0x39] == 0xEF) {          /* ext magic 0xEF53 */
+        memcpy(label, sb + 0x78, 16); label[16] = 0;
+        static const char *hex = "0123456789abcdef";
+        char *u = uuid;
+        for (int i = 0; i < 16; i++) {
+            if (i == 4 || i == 6 || i == 8 || i == 10) *u++ = '-';
+            *u++ = hex[sb[0x68 + i] >> 4];
+            *u++ = hex[sb[0x68 + i] & 15];
+        }
+        *u = 0;
+        ok = 0;
+    }
+    close(fd);
+    return ok;
+}
+/* Turn "LABEL=x" / "UUID=y" into a device path; anything else is passed through. */
+static void resolve_root(char *spec, size_t cap) {
+    int by_label = !strncmp(spec, "LABEL=", 6);
+    int by_uuid  = !strncmp(spec, "UUID=", 5);
+    if (!by_label && !by_uuid) return;
+    const char *want = spec + (by_label ? 6 : 5);
+    say2("looking for root by ", spec);
+    for (int attempt = 0; attempt < 100; attempt++) {     /* devices may still appear */
+        DIR *d = opendir("/dev");
+        struct dirent *e;
+        while (d && (e = readdir(d))) {
+            /* only the usual block-device names, to avoid opening every node */
+            if (strncmp(e->d_name, "sd", 2) && strncmp(e->d_name, "vd", 2) &&
+                strncmp(e->d_name, "nvme", 4) && strncmp(e->d_name, "mmcblk", 6)) continue;
+            char dev[128], label[24], uuid[40];
+            snprintf(dev, sizeof dev, "/dev/%.100s", e->d_name);
+            if (ext_super(dev, label, uuid)) continue;
+            if ((by_label && !strcmp(label, want)) || (by_uuid && !strcasecmp(uuid, want))) {
+                closedir(d);
+                say2("root is ", dev);
+                snprintf(spec, cap, "%s", dev);
+                return;
+            }
+        }
+        if (d) closedir(d);
+        usleep(100000);
+    }
+    say("no device matched — leaving the root spec as it is");
+}
+
+/* ---- checking the filesystem -------------------------------------------
+ * Best effort: if no fsck is installed (VerkOS does not ship e2fsprogs yet)
+ * this is simply skipped rather than being treated as a failure. */
+static void run_fsck(const char *dev) {
+    struct stat st;
+    const char *tools[] = { "/usr/sbin/fsck.ext4", "/sbin/fsck.ext4", "/usr/sbin/e2fsck", NULL };
+    const char *tool = NULL;
+    for (int i = 0; tools[i] && !tool; i++) if (!stat(tools[i], &st)) tool = tools[i];
+    if (!tool) { if (debug) say("no fsck installed — skipping the check"); return; }
+    say2("checking ", dev);
+    pid_t p = fork();
+    if (p == 0) { execl(tool, tool, "-p", dev, (char *)NULL); _exit(127); }
+    if (p < 0) return;
+    int status = 0;
+    while (waitpid(p, &status, 0) < 0 && errno == EINTR) {}
+    int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    /* fsck: 0 clean, 1 errors corrected — both fine to continue on */
+    if (rc > 1) say("filesystem needs attention (fsck could not fix it automatically)");
+}
+/* Last resort when the root cannot be used: give a person a shell instead of
+ * hanging or rebooting in a loop. */
+static void emergency_shell(const char *why) {
+    fputs("\n  [urverk] EMERGENCY: ", stderr); fputs(why, stderr);
+    fputs("\n  [urverk] starting a shell; exit to retry the boot\n\n", stderr);
+    pid_t p = fork();
+    if (p == 0) { execl("/bin/sh", "sh", (char *)NULL); execl("/bin/bash", "bash", (char *)NULL); _exit(127); }
+    if (p > 0) { int st; while (waitpid(p, &st, 0) < 0 && errno == EINTR) {} }
 }
 
 /* ---- the handoff --------------------------------------------------------- */
@@ -182,6 +277,8 @@ static void switch_root(const char *init) {
 
 #define TYPE_SIMPLE  0          /* long-running; ready as soon as it is started */
 #define TYPE_ONESHOT 1          /* runs to completion; ready when it exits 0 */
+#define TYPE_TIMER   2          /* runs on a schedule instead of at boot */
+#define TYPE_SOCKET  3          /* started the first time someone connects */
 
 typedef struct {
     char name[64];              /* from the file name, minus any NN- prefix */
@@ -195,6 +292,14 @@ typedef struct {
     int  umask_val;             /* -1 = inherit */
     int  type;
     int  respawn;
+    /* timer: every N seconds, or daily at a wall-clock minute */
+    int  every_sec, at_hour, at_min;
+    time_t next_run;
+    /* socket activation: urverk holds the port until the first connection */
+    char listen[64];
+    int  lfd;
+    /* cgroup v2 limits, applied to the service's own cgroup */
+    char mem_max[32], cpu_weight[16];
     pid_t pid;                  /* 0 when not running */
     int  ready;                 /* dependents may start */
     int  started;               /* we have tried to start it this boot */
@@ -225,6 +330,12 @@ static void mount_system(void) {
         && errno != EBUSY && debug) warn_errno("mount /run");
     if (mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777")
         && errno != EBUSY && debug) warn_errno("mount /tmp");
+    /* cgroup v2, so services can be given memory and CPU limits */
+    mkdir("/sys/fs/cgroup", 0755);
+    if (mount("cgroup2", "/sys/fs/cgroup", "cgroup2", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)
+        && errno != EBUSY && debug) warn_errno("mount cgroup2");
+    /* let child cgroups control memory and cpu */
+    write_early("/sys/fs/cgroup/cgroup.subtree_control", "+memory +cpu");
 }
 /* ---- /etc/fstab ----------------------------------------------------------
  * urverk mounts the handful of pseudo-filesystems itself, but a real machine
@@ -404,8 +515,31 @@ static void svc_set(svc_t *s, const char *key, const char *val) {
     }
     else if (!strcmp(key, "umask"))   s->umask_val = (int)strtol(val, NULL, 8);
     else if (!strcmp(key, "type")) {
-        s->type = !strcmp(val, "oneshot") ? TYPE_ONESHOT : TYPE_SIMPLE;
+        s->type = !strcmp(val, "oneshot") ? TYPE_ONESHOT
+                : !strcmp(val, "timer")   ? TYPE_TIMER
+                : !strcmp(val, "socket")  ? TYPE_SOCKET : TYPE_SIMPLE;
     }
+    else if (!strcmp(key, "every")) {
+        /* 30s / 5m / 2h — a bare number is seconds */
+        char *end = NULL;
+        long v = strtol(val, &end, 10);
+        if (end && *end == 'm') v *= 60;
+        else if (end && *end == 'h') v *= 3600;
+        else if (end && *end == 'd') v *= 86400;
+        s->every_sec = (int)v;
+        s->type = TYPE_TIMER;
+    }
+    else if (!strcmp(key, "at")) {                     /* HH:MM, daily */
+        int h = 0, m = 0;
+        if (sscanf(val, "%d:%d", &h, &m) == 2) { s->at_hour = h; s->at_min = m; }
+        s->type = TYPE_TIMER;
+    }
+    else if (!strcmp(key, "listen")) {
+        snprintf(s->listen, sizeof s->listen, "%s", val);
+        s->type = TYPE_SOCKET;
+    }
+    else if (!strcmp(key, "memory")) snprintf(s->mem_max,    sizeof s->mem_max,    "%s", val);
+    else if (!strcmp(key, "cpu"))    snprintf(s->cpu_weight, sizeof s->cpu_weight, "%s", val);
     else if (!strcmp(key, "respawn")) {
         if      (!strcmp(val, "always"))     s->respawn = RESPAWN_ALWAYS;
         else if (!strcmp(val, "on-failure")) s->respawn = RESPAWN_ON_FAILURE;
@@ -588,17 +722,92 @@ static int svc_drop_privs(const svc_t *s) {
     if (uid >= 0 && setuid((uid_t)uid)) return -1;
     return 0;
 }
+/* cgroup v2: give the service its own group and write the limits into it. The
+ * child puts itself in the group, so everything it forks is accounted too. */
+#define CGROOT "/sys/fs/cgroup"
+static void write_file(const char *path, const char *val) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return;
+    ssize_t w = write(fd, val, strlen(val)); (void)w;
+    close(fd);
+}
+static void cgroup_prepare(const svc_t *s) {
+    if (!s->mem_max[0] && !s->cpu_weight[0]) return;
+    char dir[256], path[320];
+    snprintf(dir, sizeof dir, CGROOT "/urverk.%.60s", s->name);
+    if (mkdir(dir, 0755) && errno != EEXIST) { if (debug) warn_errno(dir); return; }
+    if (s->mem_max[0])    { snprintf(path, sizeof path, "%s/memory.max", dir);  write_file(path, s->mem_max); }
+    if (s->cpu_weight[0]) { snprintf(path, sizeof path, "%s/cpu.weight", dir);  write_file(path, s->cpu_weight); }
+}
+static void cgroup_join(const svc_t *s) {
+    if (!s->mem_max[0] && !s->cpu_weight[0]) return;
+    char path[320], pid[16];
+    snprintf(path, sizeof path, CGROOT "/urverk.%.60s/cgroup.procs", s->name);
+    snprintf(pid, sizeof pid, "%d", (int)getpid());
+    write_file(path, pid);
+}
+
+/* ---- timers -------------------------------------------------------------- */
+static void timer_schedule(svc_t *s, int first) {
+    time_t now = time(NULL);
+    if (s->every_sec > 0) {
+        s->next_run = now + (first ? s->every_sec : s->every_sec);
+        return;
+    }
+    /* daily at HH:MM: next occurrence, today or tomorrow */
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    struct tm want = tmv;
+    want.tm_hour = s->at_hour; want.tm_min = s->at_min; want.tm_sec = 0;
+    time_t t = mktime(&want);
+    if (t <= now) t += 86400;
+    s->next_run = t;
+}
+
+/* ---- socket activation ---------------------------------------------------
+ * urverk holds the port and starts the service on the first connection, then
+ * hands the port over by closing its own listener. Simple and dependency-free:
+ * the service binds the port itself, exactly as it would if started at boot. */
+static void socket_listen(svc_t *s) {
+    if (!s->listen[0]) return;
+    char host[48] = "0.0.0.0"; int port = 0;
+    const char *colon = strrchr(s->listen, ':');
+    if (colon) {
+        size_t hl = (size_t)(colon - s->listen);
+        if (hl < sizeof host) { memcpy(host, s->listen, hl); host[hl] = 0; }
+        port = atoi(colon + 1);
+    } else port = atoi(s->listen);
+    if (port <= 0) { say2("bad listen address: ", s->listen); return; }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { warn_errno("socket"); return; }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = inet_addr(host);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 8)) {
+        warn_errno("listen"); close(fd); return;
+    }
+    s->lfd = fd;
+    say2("waiting for a connection before starting ", s->name);
+}
+
 static void start_service(svc_t *s) {
     if (s->pre[0]) run_sync(s->pre);
     char buf[256]; snprintf(buf, sizeof buf, "%s", s->exec);
     expand_console(buf, sizeof buf);
     char *argv[32]; split_args(buf, argv, 32);
     if (!argv[0]) return;
+    cgroup_prepare(s);
     pid_t p = fork();
     if (p < 0) { warn_errno("fork"); return; }
     if (p == 0) {
         /* every service gets its own session so it cannot steal our terminal */
         setsid();
+        cgroup_join(s);
         svc_redirect_log(s);
         if (s->workdir[0] && chdir(s->workdir)) _exit(126);
         if (s->umask_val >= 0) umask((mode_t)s->umask_val);
@@ -782,6 +991,19 @@ static void start_all(void) {
             svc_t *s = &svcs[i];
             if (s->started) continue;
             if (!deps_ready(s)) { pending = 1; continue; }
+            if (s->type == TYPE_TIMER) {          /* armed, not run, at boot */
+                timer_schedule(s, 1);
+                s->started = 1; s->ready = 1;
+                say2("armed timer ", s->name);
+                started_any = 1;
+                continue;
+            }
+            if (s->type == TYPE_SOCKET) {         /* holds the port until someone connects */
+                socket_listen(s);
+                s->started = 1; s->ready = 1;
+                started_any = 1;
+                continue;
+            }
             start_service(s);
             started_any = 1;
             if (s->type == TYPE_ONESHOT) {
@@ -845,11 +1067,39 @@ static int stage2(void) {
     for (;;) {
         if (want_shutdown) do_shutdown(want_shutdown);
 
-        struct pollfd pfd = { .fd = ctl_fd, .events = POLLIN };
-        int pr = (ctl_fd >= 0) ? poll(&pfd, 1, 1000) : (usleep(200000), 0);
-        if (pr > 0 && (pfd.revents & POLLIN)) {
-            int c = accept(ctl_fd, NULL, NULL);
-            if (c >= 0) { ctl_handle(c); close(c); }
+        struct pollfd pfd[1 + MAX_SVC];
+        int nfd = 0, idx[1 + MAX_SVC];
+        if (ctl_fd >= 0) { pfd[nfd].fd = ctl_fd; pfd[nfd].events = POLLIN; idx[nfd] = -1; nfd++; }
+        for (int i = 0; i < n_svcs; i++)
+            if (svcs[i].type == TYPE_SOCKET && svcs[i].lfd > 0 && svcs[i].pid <= 0) {
+                pfd[nfd].fd = svcs[i].lfd; pfd[nfd].events = POLLIN; idx[nfd] = i; nfd++;
+            }
+        int pr = nfd ? poll(pfd, nfd, 1000) : (usleep(200000), 0);
+        for (int k = 0; k < nfd && pr > 0; k++) {
+            if (!(pfd[k].revents & POLLIN)) continue;
+            if (idx[k] < 0) {                                  /* the control socket */
+                int c = accept(ctl_fd, NULL, NULL);
+                if (c >= 0) { ctl_handle(c); close(c); }
+            } else {                                           /* someone connected */
+                svc_t *s = &svcs[idx[k]];
+                say2("connection — starting ", s->name);
+                close(s->lfd); s->lfd = 0;   /* hand the port to the service */
+                start_service(s);
+            }
+        }
+        /* due timers */
+        {
+            time_t now = time(NULL);
+            for (int i = 0; i < n_svcs; i++) {
+                svc_t *s = &svcs[i];
+                if (s->type != TYPE_TIMER || s->pid > 0) continue;
+                if (!s->next_run || now < s->next_run) continue;
+                say2("timer fired: ", s->name);
+                int keep = s->type; s->type = TYPE_SIMPLE;   /* run it like a job */
+                start_service(s);
+                s->type = keep;
+                timer_schedule(s, 0);
+            }
         }
 
         /* reap everything that exited while we waited */
@@ -863,6 +1113,11 @@ static int stage2(void) {
             if (s->type == TYPE_ONESHOT) {   /* completion is what makes it ready */
                 s->ready = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
                 continue;                    /* oneshots are not respawned */
+            }
+            if (s->type == TYPE_TIMER) continue;      /* it runs again on schedule */
+            if (s->type == TYPE_SOCKET && !want_shutdown) {
+                socket_listen(s);            /* take the port back and wait again */
+                continue;
             }
             if (should_respawn(s, status)) {
                 say2("restarting ", s->name);
@@ -927,10 +1182,13 @@ static int stage1(void) {
     if (cmdline_get("rootdelay", delay, sizeof delay)) extra = atoi(delay);
 
     say2("root device: ", root);
+    resolve_root(root, sizeof root);          /* LABEL=/UUID= -> /dev/... */
     if (!wait_for_device(root, 10 + extra)) {
         say2("root device never appeared: ", root);
+        emergency_shell("the root device never appeared");
         panic("no root device");
     }
+    run_fsck(root);                            /* skipped when no fsck is installed */
 
     if (mkdir(NEWROOT, 0755) && errno != EEXIST) warn_errno("mkdir " NEWROOT);
 
@@ -947,7 +1205,14 @@ static int stage1(void) {
             warn_errno(types[i]);
         }
     }
-    if (!mounted) { warn_errno("mount root"); panic("cannot mount the root filesystem"); }
+    if (!mounted) {
+        warn_errno("mount root");
+        emergency_shell("the root filesystem could not be mounted");
+        /* the shell may have fixed it — one more try before giving up */
+        for (int i = 0; types[i] && !mounted; i++)
+            if (mount(root, NEWROOT, types[i], flags, NULL) == 0) mounted = 1;
+        if (!mounted) panic("cannot mount the root filesystem");
+    }
 
     /* sanity: does the new root actually contain an init? */
     struct stat st;

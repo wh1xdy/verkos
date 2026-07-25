@@ -1,0 +1,5 @@
+# Example timer: replaces a cron entry. Runs on a schedule instead of at boot.
+description periodic tick (timer example)
+type    timer
+every   15s
+exec    /usr/bin/touch /tmp/urverk-tick

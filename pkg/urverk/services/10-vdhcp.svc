@@ -2,3 +2,6 @@
 description vdhcp DHCP client (VerkOS)
 exec /usr/sbin/vdhcp
 respawn always
+# resource limits, applied through cgroup v2
+memory  64M
+cpu     50

@@ -1,0 +1,5 @@
+# Example socket activation: urverk holds the port and only starts this the
+# first time something connects.
+description on-demand example service
+listen  0.0.0.0:9999
+exec    /usr/bin/touch /tmp/urverk-socket-fired
