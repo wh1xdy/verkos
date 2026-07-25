@@ -82,6 +82,27 @@ if [ -x "$T/vbzip2" ] && command -v bzip2 >/dev/null; then
     head -c 200000 /dev/urandom > "$T/b.bin"
     "$T/vbzip2" -c "$T/b.bin" > "$T/b.bz2" 2>/dev/null
     check "bzip2 reads what vbzip2 writes" "bzip2 -dc '$T/b.bz2' | cmp -s - '$T/b.bin'"
+    # -dc used to match no flag at all, so the tool stayed in compress mode and
+    # replaced the named file with a .bz2 of itself — losing the original
+    check "vbzip2 -dc round-trips"        "'$T/vbzip2' -dc '$T/b.bz2' | cmp -s - '$T/b.bin'"
+    check "vbzip2 -dc leaves the source"  "[ -f '$T/b.bz2' ]"
+    if "$T/vbzip2" -Q "$T/b.bz2" >/dev/null 2>&1; then
+        bad "an unknown flag is an error"
+    else ok "an unknown flag is an error"; fi
+    check "and did not eat the file"      "[ -f '$T/b.bz2' ]"
+fi
+if [ -x "$T/vgzip" ]; then
+    check "vgzip -dc round-trips" "'$T/vgzip' -c '$T/g.bin' > '$T/g3.gz' && '$T/vgzip' -dc '$T/g3.gz' | cmp -s - '$T/g.bin'"
+fi
+
+say "vtar"
+if [ -x "$T/vtar" ] && command -v tar >/dev/null; then
+    mkdir -p "$T/tt" && echo hello > "$T/tt/f.txt"
+    ( cd "$T/tt" && "$T/vtar" -cf a.tar f.txt ) 2>/dev/null
+    check "GNU tar reads what vtar writes"    "tar -tf '$T/tt/a.tar'"
+    # the traditional dashless form: 'tar xzf ...' is how most people write it
+    ( cd "$T/tt" && "$T/vtar" cf trad.tar f.txt ) 2>/dev/null
+    check "vtar accepts the dashless form"    "tar -tf '$T/tt/trad.tar'"
 fi
 
 say "text tools match GNU byte for byte"

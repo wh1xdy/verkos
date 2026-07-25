@@ -228,9 +228,23 @@ int main(int argc, char **argv) {
     int tostdout = !strcmp(me, "bzcat"), keep = 0, level = 9;
     const char *files[256]; int nf = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-d")) dec = 1; else if (!strcmp(argv[i], "-c")) tostdout = 1;
-        else if (!strcmp(argv[i], "-k")) keep = 1; else if (argv[i][0] == '-' && argv[i][1] >= '1' && argv[i][1] <= '9') level = argv[i][1] - '0';
-        else if (argv[i][0] != '-') files[nf++] = argv[i];
+        if (argv[i][0] == '-' && argv[i][1]) {
+            /* Combined short flags, as bzip2 accepts them — "-dc" is the usual
+             * way to write "decompress to stdout". An unrecognised flag is an
+             * error rather than something to ignore: falling through used to
+             * leave the tool in compress mode, which then replaced the named
+             * file with a .bz2 of itself and deleted the original. */
+            for (const char *f = argv[i] + 1; *f; f++) {
+                if      (*f == 'd') dec = 1;
+                else if (*f == 'c') tostdout = 1;
+                else if (*f == 'k') keep = 1;
+                else if (*f == 'z') dec = 0;
+                else if (*f >= '1' && *f <= '9') level = *f - '0';
+                else { fprintf(stderr, "%s: unknown option -%c\n", me, *f); return 1; }
+            }
+            continue;
+        }
+        if (argv[i][0] != '-') files[nf++] = argv[i];
     }
     if (nf == 0) {
         size_t n; unsigned char *in = slurp(stdin, &n); struct buf out = {0};

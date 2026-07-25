@@ -90,6 +90,14 @@ int main(int argc, char **argv) {
     int mode = 0; const char *arch = NULL; char *files[512]; int nf = 0;   /* mode: c/x/t */
     for (int i = 1; i < argc; i++) {
         char *a = argv[i];
+        /* tar's traditional form has no dash on the first argument — "tar xzf
+         * foo.tar.gz" is how most people still write it. Treat a leading
+         * operand made only of mode letters as if it had one. */
+        if (i == 1 && a[0] != '-' && a[0] && strspn(a, "cxtzvf") == strlen(a)) {
+            static char dashed[16];
+            snprintf(dashed, sizeof dashed, "-%.14s", a);
+            a = dashed;
+        }
         if (a[0] == '-' && a[1] != 'f' && strchr(a, 'f') == NULL && a[1]) {
             for (char *p = a + 1; *p; p++) { if (*p=='c') mode='c'; else if (*p=='x') mode='x'; else if (*p=='t') mode='t'; else if (*p=='z') gz=1; else if (*p=='v') verbose=1; }
         } else if (a[0] == '-' && strchr(a, 'f')) {
