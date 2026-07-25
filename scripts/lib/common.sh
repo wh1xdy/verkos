@@ -192,6 +192,7 @@ enter_rootfs() {
     if is_native; then
         sudo chroot "$ROOTFS" /usr/bin/env -i \
             HOME=/root TERM="$TERM" PATH=/usr/bin:/usr/sbin \
+            VERK_FULL_USERLAND="${VERK_FULL_USERLAND:-0}" \
             /bin/bash --login -c "$*"
     else
         # Foreign: rely on a statically-linked qemu-user copied into the rootfs
@@ -200,6 +201,7 @@ enter_rootfs() {
         [ -x "$ROOTFS$q" ] || die "foreign chroot needs $ROOTFS$q (run ensure_binfmt first)"
         sudo chroot "$ROOTFS" /usr/bin/env -i \
             HOME=/root TERM="$TERM" PATH=/usr/bin:/usr/sbin \
+            VERK_FULL_USERLAND="${VERK_FULL_USERLAND:-0}" \
             /bin/bash --login -c "$*"
     fi
 }

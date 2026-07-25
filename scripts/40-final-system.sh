@@ -328,6 +328,20 @@ make; make install
 ln -sfv gcc /usr/bin/cc
 cd /sources
 
+# The cross toolchain's libstdc++ is built before glibc exists, so it has no
+# thread support at all: _GLIBCXX_HAS_GTHREADS is undefined and std::mutex,
+# std::thread and std::condition_variable do not exist. This native rebuild is
+# what fixes that, so check it rather than assume — a compiler that silently
+# cannot build threaded C++ is worse than one that is missing.
+printf '#include <mutex>\n#include <thread>\nint main(){ std::mutex m; std::lock_guard<std::mutex> g(m); return 0; }\n' > /tmp/thrcheck.cpp
+if g++ -O2 -o /tmp/thrcheck /tmp/thrcheck.cpp 2>/dev/null; then
+    echo ":: libstdc++ has working threads"
+else
+    echo "!! the native gcc did not give libstdc++ threads — std::mutex is missing" >&2
+    exit 1
+fi
+rm -f /tmp/thrcheck /tmp/thrcheck.cpp
+
 # bison then flex (flex uses bison), then the GNU text/file tools
 say "bison ${BISON_VERSION}"
 d=$(unpack bison-${BISON_VERSION}.tar.xz); cd "$d"
@@ -386,6 +400,7 @@ ldconfig
 cd /sources
 mark e2fsprogs
 fi
+
 
 # 5c. LUKS support: popt, json-c, libdevmapper and cryptsetup. Only needed so
 # the installer can create an encrypted root and urverk can open it at boot.
