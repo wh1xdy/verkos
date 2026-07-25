@@ -26,7 +26,8 @@ say "compiles"
 for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcpio.c \
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
            pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
-           pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c; do
+           pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c pkg/vmkfs/vmkfs.c \
+           pkg/vinstall/vinstall.c; do
     name=$(basename "$src" .c)
     extra=""
     [ "$name" = vpk ] && extra="-lcurl -llzma -lz"
@@ -145,6 +146,35 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
         printf '  \033[33mskip\033[0m  TLS checks (no network)\n'
     fi
 else bad "vget does not compile"; fi
+
+say "vmkfs makes a filesystem the world agrees is FAT32"
+# The judge here is deliberately not us: fsck.fat and blkid are the tools that
+# would reject a malformed volume, and the firmware has to agree with them.
+if [ -x "$T/vmkfs" ]; then
+    truncate -s 64M "$T/esp.img" 2>/dev/null || dd if=/dev/zero of="$T/esp.img" bs=1M count=64 status=none
+    if "$T/vmkfs" -n VERKESP "$T/esp.img" 2>"$T/vmkfs.log"; then
+        if command -v fsck.fat >/dev/null 2>&1; then
+            check "fsck.fat accepts what vmkfs wrote" "fsck.fat -n '$T/esp.img'"
+        else
+            printf '  \033[33mskip\033[0m  fsck.fat check (dosfstools not installed)\n'
+        fi
+        if command -v blkid >/dev/null 2>&1; then
+            check "blkid sees a vfat volume"  "blkid -o value -s TYPE  '$T/esp.img' | grep -qx vfat"
+            check "blkid sees the label"      "blkid -o value -s LABEL '$T/esp.img' | grep -qx VERKESP"
+        fi
+        # A serial taken from the clock alone repeats for volumes made in the
+        # same second, and then two disks cannot be told apart.
+        truncate -s 64M "$T/esp2.img" 2>/dev/null || dd if=/dev/zero of="$T/esp2.img" bs=1M count=64 status=none
+        "$T/vmkfs" -n VERKESP "$T/esp2.img" 2>/dev/null
+        check "two filesystems made back to back get different serials" \
+              "! cmp -s <(dd if='$T/esp.img' bs=1 skip=67 count=4 2>/dev/null) \
+                        <(dd if='$T/esp2.img' bs=1 skip=67 count=4 2>/dev/null)"
+        # Below ~33 MB the cluster count puts it outside FAT32 by definition.
+        truncate -s 8M "$T/tiny.img" 2>/dev/null || dd if=/dev/zero of="$T/tiny.img" bs=1M count=8 status=none
+        check "a volume too small for FAT32 is refused, not silently mangled" \
+              "! '$T/vmkfs' '$T/tiny.img' 2>/dev/null"
+    else bad "vmkfs failed — $(head -1 "$T/vmkfs.log")"; fi
+else bad "vmkfs does not compile"; fi
 
 say "verkmod indexes a module tree"
 # Every bug below was real. A fake tree is enough: .modinfo is an ordinary ELF

@@ -311,3 +311,57 @@ ends, so `last` reports "gone - no logout" for finished `login` sessions.
 `/run/utmp` is created by urverk at boot (it is a fresh tmpfs each time, and
 `pututxline` cannot create the file itself) — without that, `who` and `w` had
 nothing to read at all.
+
+## D-014 — Making filesystems: our own FAT32, e2fsprogs for ext4
+
+**Decision:** `pkg/vmkfs/vmkfs.c` is VerkOS' own FAT32 formatter; ext4 is
+created by e2fsprogs, which is now built.
+
+**Why the split.** An installer that cannot create an EFI system partition
+cannot install anything, and UEFI requires that partition to be FAT. FAT32 is
+small and specified precisely enough to own: a boot sector describing the
+layout, two copies of a table of 32-bit cluster links, and a root directory
+that is itself a cluster chain. ext4 is a different proposition — journal,
+extents, group descriptors, checksums — and a subtle mistake there is silent
+until someone's data is gone. Owning the easy half and buying the hard half is
+the honest trade.
+
+**The judge is deliberately not us.** `fsck.fat` accepts what vmkfs writes at
+33 MB, 100 MB and 512 MB; `blkid` reports vfat with the right label; the kernel
+mounts it and files come back byte-identical, including after real use. The
+geometry lands within 12 sectors of dosfstools on the same volume.
+
+Testing found one defect: the volume serial came from `time()` alone, so every
+filesystem made in the same second shared a UUID and `blkid` could not tell two
+disks apart. It comes from `/dev/urandom` now, with the clock as fallback.
+
+**FAT32 only, on purpose.** FAT12 and FAT16 differ in the width of every table
+entry and in having a fixed-size root directory. Supporting them would roughly
+double the code to serve volumes under 33 MB — smaller than any sane ESP — so
+vmkfs refuses those rather than quietly producing something mislabelled.
+
+**e2fsprogs also wakes up a feature already written:** urverk has always had a
+boot-time fsck that skipped itself because no `fsck.ext4` existed.
+
+## D-015 — `vinstall`: the installer refuses rather than guesses
+
+**Decision:** `pkg/vinstall/vinstall.c` writes a running VerkOS onto a disk:
+GPT, a FAT32 ESP holding vboot and the kernel, an ext4 root, fstab and
+vboot.conf keyed by UUID.
+
+This is the only tool in VerkOS that destroys data on purpose, so the design
+rule is that it refuses instead of guessing. Verified: it rejects a target that
+is not a block device, one with anything mounted on it, one that does not
+exist, and the disk the running system booted from. It checks that every tool
+it needs exists **before** touching anything. `-n` leaves the disk
+byte-identical.
+
+**Confirmation is the disk's name, not "y".** The question is not "are you
+sure" — nobody misreads that carefully — it is "is this the disk you meant".
+
+**Root is referred to by UUID**, in both fstab and vboot.conf: the name a disk
+gets depends on what else is plugged in, and an installed system has to survive
+that.
+
+**`-s DIR` installs from a tree instead of the running system**, which is what
+an ISO will do, and what makes the installer testable without a live medium.

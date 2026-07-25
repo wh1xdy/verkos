@@ -28,6 +28,7 @@ LINUX_VERSION="6.12.9";      LINUX_SHA256="87be0360df0931b340d2bac35161a548070fb
 # --- Core userland ---------------------------------------------------------
 BASH_VERSION_PKG="5.2.37";   BASH_SHA256="9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff"
 COREUTILS_VERSION="9.5";     COREUTILS_SHA256="cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
+E2FSPROGS_VERSION="1.47.1";  E2FSPROGS_SHA256="5a33dc047fd47284bca4bb10c13cfe7896377ae3d01cb81a05d406025d99e0d1"
 UTIL_LINUX_VERSION="2.40.2"; UTIL_LINUX_SHA256="d78b37a66f5922d70edf3bdfb01a6b33d34ed3c3cafd6628203b2a2b67c8e8b3"
 M4_VERSION="1.4.19";         M4_SHA256="63aede5c6d33b6d9b13511cd0be2cac046f2e70fd0a07aa9573a04a82783af96"
 NCURSES_VERSION="6.5";       NCURSES_SHA256="136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
@@ -48,7 +49,6 @@ BZIP2_VERSION="1.0.8";       BZIP2_SHA256="ab5a03176ee106d3f0fa90e381da478ddae40
 GPERF_VERSION="3.1";         GPERF_SHA256="588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2"
 PKGCONF_VERSION="2.3.0";     PKGCONF_SHA256="3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
 PERL_VERSION="5.38.2";       PERL_SHA256="d91115e90b896520e83d4de6b52f8254ef2b70a8d545ffab33200ea9f1cf29e8"
-SHADOW_VERSION="4.16.0";     SHADOW_SHA256="b78e3921a95d53282a38e90628880624736bf6235e36eea50c50835f59a3530b"
 
 # --- Networking + SSH ------------------------------------------------------
 # kept for the vpk port only (not built into the base system)
@@ -104,6 +104,7 @@ URL_NCURSES="https://invisible-mirror.net/archives/ncurses"
 URL_XZ="https://github.com/tukaani-project/xz/releases/download"
 URL_SOURCEWARE="https://sourceware.org/pub"
 URL_DBUS="https://dbus.freedesktop.org/releases/dbus"
+URL_E2FSPROGS="https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs"
 URL_UTILLINUX="https://mirrors.edge.kernel.org/pub/linux/utils/util-linux"
 URL_LIBCAP="https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2"
 URL_EXPAT="https://github.com/libexpat/libexpat/releases/download"
@@ -119,7 +120,6 @@ URL_PKGCONF="https://distfiles.ariadne.space/pkgconf"
 URL_LIBXCRYPT="https://github.com/besser82/libxcrypt/releases/download"
 URL_LINUXPAM="https://github.com/linux-pam/linux-pam/releases/download"
 URL_PERL="https://www.cpan.org/src/5.0"
-URL_SHADOW="https://github.com/shadow-maint/shadow/releases/download"
 URL_DHCPCD="https://github.com/NetworkConfiguration/dhcpcd/releases/download"
 URL_OPENSSL="https://github.com/openssl/openssl/releases/download"
 URL_OPENSSH="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable"

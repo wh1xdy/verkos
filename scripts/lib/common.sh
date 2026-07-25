@@ -118,6 +118,7 @@ source_url() {
         bzip2-*)      echo "$URL_SOURCEWARE/bzip2/$pkg" ;;
         dbus-*)       echo "$URL_DBUS/$pkg" ;;
         util-linux-*) echo "$URL_UTILLINUX/v${UTIL_LINUX_VERSION%.*}/$pkg" ;;
+        e2fsprogs-*)  echo "$URL_E2FSPROGS/v${E2FSPROGS_VERSION}/$pkg" ;;
         libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
         expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;
         zlib-*)       echo "$URL_ZLIB/$pkg" ;;
@@ -130,7 +131,6 @@ source_url() {
         libxcrypt-*)  echo "$URL_LIBXCRYPT/v${LIBXCRYPT_VERSION}/$pkg" ;;
         Linux-PAM-*)  echo "$URL_LINUXPAM/v${LINUXPAM_VERSION}/$pkg" ;;
         perl-*)       echo "$URL_PERL/$pkg" ;;
-        shadow-*)     echo "$URL_SHADOW/${SHADOW_VERSION}/$pkg" ;;
         dhcpcd-*)     echo "$URL_DHCPCD/v${DHCPCD_VERSION}/$pkg" ;;
         openssl-*)    echo "$URL_OPENSSL/openssl-${OPENSSL_VERSION}/$pkg" ;;
         openssh-*)    echo "$URL_OPENSSH/$pkg" ;;

@@ -165,6 +165,8 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/verkmod/verkmod.c" "$ROOTFS/sources/verkmod.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vlogin/vlogin.c"   "$ROOTFS/sources/vlogin.c"   2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vmkfs/vmkfs.c"     "$ROOTFS/sources/vmkfs.c"     2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vinstall/vinstall.c" "$ROOTFS/sources/vinstall.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
     sudo rm -rf "$ROOTFS/sources/urverk-services"
     sudo cp -a "$VERK_ROOT/pkg/urverk/services" "$ROOTFS/sources/urverk-services" 2>/dev/null || true
@@ -360,6 +362,23 @@ d=$(unpack util-linux-${UTIL_LINUX_VERSION}.tar.xz); cd "$d"
 make; make install
 cd /sources
 mark util-linux
+fi
+
+# 5b. e2fsprogs — mkfs.ext4 and e2fsck. Needed to install VerkOS onto a disk,
+# and it switches on the boot-time filesystem check urverk already implements
+# but skips when no fsck is present. libblkid/libuuid/uuidd/fsck come from
+# util-linux above, so they are disabled here rather than built twice.
+if need e2fsprogs; then
+say "e2fsprogs ${E2FSPROGS_VERSION}"
+d=$(unpack e2fsprogs-${E2FSPROGS_VERSION}.tar.xz); cd "$d"
+mkdir -p build; cd build
+../configure --prefix=/usr --sysconfdir=/etc --enable-elf-shlibs \
+    --disable-libblkid --disable-libuuid --disable-uuidd --disable-fsck
+make
+make install
+ldconfig
+cd /sources
+mark e2fsprogs
 fi
 
 # 6-7b. zlib, xz, expat, libcap, gperf, libffi — link/build deps of the rest.
@@ -796,6 +815,24 @@ cd /sources; mark vfb
 fi
 # verkmod — our kernel module tools. kmod went with systemd; without a loader the
 # modules the kernel build installs are unreachable.
+# vmkfs.vfat — our own FAT32 formatter, so an EFI system partition can be
+# created without dosfstools. See docs/DECISIONS.md D-014.
+if need vmkfs; then
+say "vmkfs (VerkOS FAT32 formatter)"
+gcc -O2 -o /usr/bin/vmkfs.vfat /sources/vmkfs.c
+for t in mkfs.vfat mkfs.fat mkfs.msdos; do ln -sf vmkfs.vfat "/usr/bin/$t"; done
+for t in mkfs.vfat mkfs.fat mkfs.msdos vmkfs.vfat; do ln -sf ../bin/vmkfs.vfat "/usr/sbin/$t"; done
+cd /sources; mark vmkfs
+fi
+
+# vinstall — the installer: GPT + ESP + ext4 root + vboot, onto a real disk.
+if need vinstall; then
+say "vinstall (VerkOS installer)"
+gcc -O2 -o /usr/bin/vinstall /sources/vinstall.c
+ln -sf ../bin/vinstall /usr/sbin/vinstall
+cd /sources; mark vinstall
+fi
+
 if need verkmod; then
 say "verkmod (VerkOS module tools: insmod/rmmod/lsmod/modinfo/modprobe/depmod)"
 gcc -O2 -o /usr/bin/verkmod /sources/verkmod.c
@@ -1020,6 +1057,7 @@ reg pkgconf "$PKGCONF_VERSION";    reg libffi "$LIBFFI_VERSION"
 reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
 reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
 reg vlogin 0.1;                    reg linux-pam "$LINUXPAM_VERSION"
+reg e2fsprogs "$E2FSPROGS_VERSION"
 reg dbus "$DBUS_VERSION";          reg urverk 0.1
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 
@@ -1054,6 +1092,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
     reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1; reg vbzip2 0.1
     reg vpager 0.1; reg vfb 0.1; reg urverk 0.1; reg verkmod 0.1
+    reg vmkfs 0.1;  reg vinstall 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
