@@ -54,6 +54,20 @@ build_kernel() {
     if [ -d "$ROOTFS" ]; then
         make INSTALL_MOD_PATH="$ROOTFS" modules_install 2>/dev/null || \
             warn "modules_install skipped (rootfs not ready)"
+        local md="$ROOTFS/usr/lib/modules/${LINUX_VERSION}"
+        # modules_install leaves build/ and source/ symlinks pointing into this
+        # build tree — paths that do not exist on the installed system, and a
+        # second copy of every .ko for anything that walks the directory.
+        rm -f "$md/build" "$md/source"
+        # Index the modules with our own depmod so modprobe resolves
+        # dependencies on a freshly installed system, before anything runs
+        # depmod itself. -b/RELEASE index a kernel other than the running one.
+        if cc -O2 -o "$BUILD_DIR/verkmod-host" "$VERK_ROOT/pkg/verkmod/verkmod.c" 2>/dev/null; then
+            "$BUILD_DIR/verkmod-host" depmod -v -b "$ROOTFS" "$LINUX_VERSION" ||
+                warn "depmod failed — modules.dep not generated"
+        else
+            warn "verkmod would not build for the host; modules.dep not generated"
+        fi
     fi
     ok "kernel image → $OUT_DIR/vmlinuz-${LINUX_VERSION}"
 }

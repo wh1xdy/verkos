@@ -163,6 +163,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vtree/vtree.c" "$ROOTFS/sources/vtree.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vpager/vpager.c" "$ROOTFS/sources/vpager.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/verkmod/verkmod.c" "$ROOTFS/sources/verkmod.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
     sudo rm -rf "$ROOTFS/sources/urverk-services"
     sudo cp -a "$VERK_ROOT/pkg/urverk/services" "$ROOTFS/sources/urverk-services" 2>/dev/null || true
@@ -786,6 +787,13 @@ say "vfb (VerkOS framebuffer splash — first GUI)"
 gcc -O2 -o /usr/bin/vfb /sources/vfb.c
 cd /sources; mark vfb
 fi
+# verkmod — our kernel module tools. kmod went with systemd; without a loader the
+# modules the kernel build installs are unreachable.
+if need verkmod; then
+say "verkmod (VerkOS module tools: insmod/rmmod/lsmod/modinfo/modprobe/depmod)"
+gcc -O2 -o /usr/bin/verkmod /sources/verkmod.c
+cd /sources; mark verkmod
+fi
 # urverk — VerkOS' own init (the systemd replacement we are growing). Static so
 # the same binary works as the initramfs /init. Installed alongside systemd, not
 # instead of it: boot it with init=/sbin/urverk (vboot has a menu entry).
@@ -1036,7 +1044,7 @@ if [ -x /usr/bin/verkbox ]; then
     reg vdate 0.1; reg vstat 0.1
     reg vsys 0.1; reg vhex 0.1; reg vtree 0.1; reg vgzip 0.1
     reg vzip 0.1; reg vtar 0.1; reg vcpio 0.1; reg vawk 0.1; reg vbzip2 0.1
-    reg vpager 0.1; reg vfb 0.1; reg urverk 0.1
+    reg vpager 0.1; reg vfb 0.1; reg urverk 0.1; reg verkmod 0.1
 fi
 
 # The network tools take over the FAMILIAR command names, the same way verkbox
@@ -1078,6 +1086,8 @@ if [ -x /usr/bin/vip ]; then
     netln hexdump vhex
     netln xxd vhex
     netln tree vtree
+    # module tools: nothing else provides these now that kmod is gone
+    for m in insmod rmmod lsmod modinfo modprobe depmod; do netln "$m" verkmod; done
     # our own pager (raw-terminal less/more): paging, regex search, pan, multi-file.
     netln less vpager
     netln more vpager

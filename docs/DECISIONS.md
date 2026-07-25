@@ -223,3 +223,45 @@ made every existing install refuse to start.
 the bootloader); linking a crypto library (nothing to link against before the OS
 exists); UEFI Secure Boot with vendor keys (a different problem — that is about
 whose firmware trusts us, not whose kernel we trust).
+
+## D-012 — Our own module tools: `verkmod` replaces kmod
+
+**Decision:** one multi-call binary (`pkg/verkmod/verkmod.c`) provides `insmod`,
+`rmmod`, `lsmod`, `modinfo`, `modprobe` and `depmod`.
+
+**Why:** kmod was removed together with systemd, which left the ~1300 modules
+the kernel installs unloadable — the system booted only because everything it
+needed was compiled in. Loading is two syscalls (`finit_module`,
+`delete_module`); the only real work is answering "which file is module X, and
+what does it need first?", and the answer is in each module's `.modinfo` ELF
+section, which is where depmod reads it too.
+
+**`.modinfo` is the source of truth, `modules.dep` is a cache.** modprobe
+resolves dependencies by reading the modules themselves, so a stale or missing
+index can never cause the wrong module to load. `depmod` still writes
+`modules.dep` because other software and people expect the file, and
+`scripts/50-kernel.sh` runs it at build time (`depmod -b ROOTFS RELEASE`) so a
+freshly installed system has an index before anything runs depmod itself.
+
+**Verified by loading, not by exit codes** (the lesson from vbzip2): on a booted
+system `modprobe btrfs` pulls in `zstd_compress`, `raid6_pq`, `xor` — which
+itself needs `xor_neon` — and `libcrc32c`, after which the kernel reports the
+refcounts and btrfs appears in `/proc/filesystems`; `rmmod` of a module still in
+use is refused. Three bugs were found this way and none of them changed an exit
+code:
+
+- `load_deps` used `strtok` and recurses. The first dependency that had
+  dependencies of its own reset the shared parser state, so the outer loop
+  ended early and silently skipped the rest — the module then failed on an
+  unresolved symbol. Now `strtok_r`.
+- `depmod` re-walked the whole tree per dependency, ~1300 × 1300 stats. It now
+  walks once into an in-memory index: minutes to 0.5 s.
+- Dependency names use `-` and `_` interchangeably (`tps6594-core` for a file
+  named `tps6594_core.ko`). Normalising only the filenames hid the
+  dependencies of 300 modules.
+
+`modules_install` also leaves `build`/`source` symlinks pointing into the build
+tree, a second copy of every `.ko`; indexing them doubled the index and resolved
+dependencies to the build tree. They are removed at install time and skipped by
+the walker. `scripts/test.sh` covers all of this against a fixture tree built
+from ordinary executables carrying a `.modinfo` section.

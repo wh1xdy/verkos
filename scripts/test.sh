@@ -25,7 +25,8 @@ CC=${CC:-cc}
 say "compiles"
 for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcpio.c \
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
-           pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c; do
+           pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
+           pkg/verkmod/verkmod.c; do
     name=$(basename "$src" .c)
     extra=""
     [ "$name" = vpk ] && extra="-lcurl -llzma -lz"
@@ -139,6 +140,44 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
         printf '  \033[33mskip\033[0m  TLS checks (no network)\n'
     fi
 else bad "vget does not compile"; fi
+
+say "verkmod indexes a module tree"
+# Every bug below was real. A fake tree is enough: .modinfo is an ordinary ELF
+# section, so a plain executable carrying one parses exactly like a .ko.
+if [ -x "$T/verkmod" ]; then
+    mk_ko() {  # mk_ko <path> <name> <depends>
+        mkdir -p "$(dirname "$1")"
+        cat > "$T/fake.c" <<EOF
+static const char mi[] __attribute__((section(".modinfo"), used)) =
+    "name=$2\0depends=$3\0license=GPL";
+int main(void) { return 0; }
+EOF
+        $CC -O2 -w -o "$1" "$T/fake.c" 2>/dev/null
+    }
+    M="$T/fakeroot/usr/lib/modules/9.9.9-test"
+    mk_ko "$M/kernel/fs/alpha.ko"    alpha    "beta-mod"
+    mk_ko "$M/kernel/lib/beta_mod.ko" beta_mod ""
+    mk_ko "$M/kernel/fs/gamma.ko"    gamma    "alpha,beta-mod"
+    # a build/ symlink into the kernel source tree holds a second copy of every
+    # module; indexing it doubled the index and resolved deps to the wrong file
+    mkdir -p "$T/faketree/fs" && mk_ko "$T/faketree/fs/alpha.ko" alpha ""
+    ln -sf "$T/faketree" "$M/build"
+
+    "$T/verkmod" depmod -b "$T/fakeroot" 9.9.9-test >/dev/null 2>&1
+    D="$M/modules.dep"
+    if [ -s "$D" ]; then
+        check "depmod indexes each module once (skips build/)" \
+              "[ \"\$(wc -l < '$D')\" -eq 3 ]"
+        check "depmod resolves a dependency written with a hyphen" \
+              "grep -q '^kernel/fs/alpha.ko: kernel/lib/beta_mod.ko\$' '$D'"
+        check "depmod records every dependency, not just the first" \
+              "[ \"\$(grep -c ' ' <<<\"\$(grep '^kernel/fs/gamma.ko:' '$D')\")\" -ge 1 ] && \
+               grep '^kernel/fs/gamma.ko:' '$D' | grep -q alpha.ko && \
+               grep '^kernel/fs/gamma.ko:' '$D' | grep -q beta_mod.ko"
+        check "depmod never points a dependency into the build tree" \
+              "! grep -q 'build/' '$D'"
+    else bad "depmod wrote no index"; fi
+else bad "verkmod does not compile"; fi
 
 say "shell scripts parse"
 for f in scripts/*.sh scripts/lib/*.sh boot/*.sh config/*.sh config/targets/*.sh pkg/vboot/build.sh; do
