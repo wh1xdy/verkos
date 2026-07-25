@@ -306,6 +306,18 @@ if [ -x "$T/vtar" ]; then
           "cmp -s '$T/longout/tsrc/a_directory_with_quite_a_long_name/and_another_level_that_is_also_long/a_file_whose_full_path_comfortably_exceeds_one_hundred_characters.txt' \
                   '$deep/a_file_whose_full_path_comfortably_exceeds_one_hundred_characters.txt'"
 
+    # GCC installs its headers with "tar -cf - . | tar xpf -". Two things had to
+    # work for that: the p flag (preserve permissions), which vtar rejected as
+    # unknown, and "-" meaning standard input/output, which vtar treated as a
+    # file name — so the archive was written to a file literally called "-".
+    rm -rf "$T/pipesrc" "$T/pipedst"; mkdir -p "$T/pipesrc/sub" "$T/pipedst"
+    echo through > "$T/pipesrc/f"; echo nested > "$T/pipesrc/sub/g"
+    ( cd "$T/pipesrc" && "$T/vtar" -cf - . ) 2>/dev/null | ( cd "$T/pipedst" && "$T/vtar" xpf - ) 2>/dev/null
+    check "vtar pipes through stdin/stdout with -f -" \
+          "cmp -s '$T/pipedst/f' '$T/pipesrc/f' && cmp -s '$T/pipedst/sub/g' '$T/pipesrc/sub/g'"
+    check "vtar accepts the p flag instead of refusing it" \
+          "( cd '$T/pipesrc' && '$T/vtar' -cf '$T/p.tar' . ) && ( cd '$T/pipedst' && '$T/vtar' xpf '$T/p.tar' )"
+
     # The important half: never succeed having done nothing.
     echo "definitely not a tar archive" > "$T/notatar"
     head -c 4096 /dev/urandom > "$T/rand.bin"

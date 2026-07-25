@@ -18,6 +18,8 @@
 #include <time.h>
 
 static int verbose, gz;
+/* tar restores the archived modification time unless -m says otherwise. */
+static int keep_mtime = 1;
 
 /* ---- create ------------------------------------------------------------- */
 static void octal(char *f, int width, long v) { char t[32]; snprintf(t, sizeof t, "%0*lo", width - 1, v); memcpy(f, t, width - 1); }
@@ -177,7 +179,7 @@ static int do_extract(FILE *in, int listonly) {
             if (of) {
                 fclose(of);
                 chmod(name, mode & 07777);
-                if (mtime) {
+                if (mtime && keep_mtime) {
                     struct timespec ts[2];
                     ts[0].tv_sec = mtime; ts[0].tv_nsec = 0;
                     ts[1].tv_sec = mtime; ts[1].tv_nsec = 0;
@@ -212,15 +214,31 @@ int main(int argc, char **argv) {
         /* tar's traditional form has no dash on the first argument — "tar xzf
          * foo.tar.gz" is how most people still write it. Treat a leading
          * operand made only of mode letters as if it had one. */
-        if (i == 1 && a[0] != '-' && a[0] && strspn(a, "cxtzjJvf") == strlen(a)) {
+        if (i == 1 && a[0] != '-' && a[0] && strspn(a, "cxtzjJvfpmok") == strlen(a)) {
             static char dashed[16];
             snprintf(dashed, sizeof dashed, "-%.14s", a);
             a = dashed;
         }
         if (a[0] == '-' && a[1] != 'f' && strchr(a, 'f') == NULL && a[1]) {
-            for (char *p = a + 1; *p; p++) { if (*p=='c') mode='c'; else if (*p=='x') mode='x'; else if (*p=='t') mode='t'; else if (*p=='z') gz=1; else if (*p=='j') bz=1; else if (*p=='J') xzc=1; else if (*p=='v') verbose=1; }
+            for (char *p = a + 1; *p; p++) { if (*p=='c') mode='c'; else if (*p=='x') mode='x'; else if (*p=='t') mode='t'; else if (*p=='z') gz=1; else if (*p=='j') bz=1; else if (*p=='J') xzc=1; else if (*p=='v') verbose=1;
+                /* p/o/k: permissions and ownership are already handled the way
+                 * these ask for, so they are accepted rather than refused —
+                 * GCC installs its headers with "tar xpf -". m means the
+                 * opposite of what we now do by default. */
+                else if (*p=='p' || *p=='o' || *p=='k') ;
+                else if (*p=='m') keep_mtime=0;
+                else if (*p=='f') ;
+                else { fprintf(stderr, "tar: unknown option -%c\n", *p); return 1; } }
         } else if (a[0] == '-' && strchr(a, 'f')) {
-            for (char *p = a + 1; *p; p++) { if (*p=='c') mode='c'; else if (*p=='x') mode='x'; else if (*p=='t') mode='t'; else if (*p=='z') gz=1; else if (*p=='j') bz=1; else if (*p=='J') xzc=1; else if (*p=='v') verbose=1; }
+            for (char *p = a + 1; *p; p++) { if (*p=='c') mode='c'; else if (*p=='x') mode='x'; else if (*p=='t') mode='t'; else if (*p=='z') gz=1; else if (*p=='j') bz=1; else if (*p=='J') xzc=1; else if (*p=='v') verbose=1;
+                /* p/o/k: permissions and ownership are already handled the way
+                 * these ask for, so they are accepted rather than refused —
+                 * GCC installs its headers with "tar xpf -". m means the
+                 * opposite of what we now do by default. */
+                else if (*p=='p' || *p=='o' || *p=='k') ;
+                else if (*p=='m') keep_mtime=0;
+                else if (*p=='f') ;
+                else { fprintf(stderr, "tar: unknown option -%c\n", *p); return 1; } }
             if (i + 1 < argc) arch = argv[++i];
         } else if (a[0] != '-') files[nf++] = a;
     }
@@ -230,6 +248,10 @@ int main(int argc, char **argv) {
     if (mode == 'c') {
         FILE *o;
         const char *comp = gz ? "gzip" : bz ? "bzip2" : xzc ? "xz" : NULL;
+        /* "-" names standard input/output, as it does in every tar. Treating it
+         * as a file name made "tar -cf - ." write an archive into a file called
+         * "-", so the pipeline GCC installs its headers through moved nothing. */
+        if (arch && !strcmp(arch, "-")) arch = NULL;
         if (comp) { snprintf(cmd, sizeof cmd, "%s > '%s'", comp, arch ? arch : "/dev/stdout"); o = popen(cmd, "w"); }
         else o = arch ? fopen(arch, "wb") : stdout;
         if (!o) { fprintf(stderr, "tar: cannot write archive\n"); return 1; }
@@ -238,6 +260,7 @@ int main(int argc, char **argv) {
         if (gz) pclose(o); else if (arch) fclose(o);
     } else {
         FILE *in;
+        if (arch && !strcmp(arch, "-")) arch = NULL;      /* "-" is standard input */
         const char *dec = gz ? "gunzip" : bz ? "bzip2 -dc" : xzc ? "xz -dc" : sniff(arch);
         if (dec) { snprintf(cmd, sizeof cmd, "%s < '%s'", dec, arch ? arch : "/dev/stdin"); in = popen(cmd, "r"); }
         else in = arch ? fopen(arch, "rb") : stdin;
