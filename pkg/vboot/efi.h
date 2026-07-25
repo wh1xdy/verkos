@@ -14,6 +14,7 @@ typedef uint8_t   UINT8;
 typedef uint16_t  UINT16;
 typedef uint32_t  UINT32;
 typedef uint64_t  UINT64;
+typedef int16_t   INT16;
 typedef uint16_t  CHAR16;
 typedef uint8_t   BOOLEAN;
 typedef void     *EFI_HANDLE;
@@ -171,6 +172,52 @@ typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
     UINT64 Revision;
     EFI_STATUS (EFIAPI *OpenVolume)(struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL*, EFI_FILE_PROTOCOL**);
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
+/* ---- File info (needed to list a directory) ------------------------------ */
+#define EFI_FILE_INFO_GUID \
+    { 0x09576e92,0x6d3f,0x11d2,{0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b} }
+typedef struct {
+    UINT16 Year; UINT8 Month, Day, Hour, Minute, Second, Pad1;
+    UINT32 Nanosecond; INT16 TimeZone; UINT8 Daylight, Pad2;
+} EFI_TIME;
+typedef struct {
+    UINT64 Size, FileSize, PhysicalSize;
+    EFI_TIME CreateTime, LastAccessTime, ModificationTime;
+    UINT64 Attribute;
+    CHAR16 FileName[1];        /* variable length */
+} EFI_FILE_INFO;
+#define EFI_FILE_DIRECTORY 0x0000000000000010ULL
+
+/* ---- Graphics Output (for a graphical boot menu) ------------------------- */
+#define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
+    { 0x9042a9de,0x23dc,0x4a38,{0x96,0xfb,0x7a,0xde,0xd0,0x80,0x51,0x6a} }
+typedef struct { UINT8 Blue, Green, Red, Reserved; } EFI_GRAPHICS_OUTPUT_BLT_PIXEL;
+typedef enum {
+    EfiBltVideoFill, EfiBltVideoToBltBuffer, EfiBltBufferToVideo, EfiBltVideoToVideo
+} EFI_GRAPHICS_OUTPUT_BLT_OPERATION;
+typedef struct {
+    UINT32 Version, HorizontalResolution, VerticalResolution;
+    UINT32 PixelFormat;
+    UINT32 PixelInformation[4];
+    UINT32 PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+typedef struct {
+    UINT32 MaxMode, Mode;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    UINTN SizeOfInfo;
+    EFI_PHYSICAL_ADDRESS FrameBufferBase;
+    UINTN FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+struct _EFI_GRAPHICS_OUTPUT_PROTOCOL;
+typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *QueryMode)(struct _EFI_GRAPHICS_OUTPUT_PROTOCOL*, UINT32, UINTN*,
+                                   EFI_GRAPHICS_OUTPUT_MODE_INFORMATION**);
+    EFI_STATUS (EFIAPI *SetMode)(struct _EFI_GRAPHICS_OUTPUT_PROTOCOL*, UINT32);
+    EFI_STATUS (EFIAPI *Blt)(struct _EFI_GRAPHICS_OUTPUT_PROTOCOL*, EFI_GRAPHICS_OUTPUT_BLT_PIXEL*,
+                             EFI_GRAPHICS_OUTPUT_BLT_OPERATION, UINTN, UINTN, UINTN, UINTN,
+                             UINTN, UINTN, UINTN);
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 /* ---- Device paths + LoadFile2 (how a modern kernel takes its initrd) ------
  * Linux >= 5.8 no longer reads initrd= off the command line in the EFI stub.

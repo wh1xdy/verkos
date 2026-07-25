@@ -213,9 +213,80 @@ static void builtin_defaults(void) {
           L"root=/dev/vda rw console=ttyAMA0 init=/usr/lib/systemd/systemd", CMDLINE_MAX);
 }
 
+/* Scan the root of the ESP for kernels and add an entry for any that the config
+ * did not already mention, so dropping in a new vmlinuz is enough to boot it. */
+static int have_kernel(CHAR16 *name) {
+    for (int i = 0; i < n_entries; i++) {
+        CHAR16 *k = entries[i].kernel;
+        if (k[0] == L'\\') k++;                       /* compare without the leading \ */
+        UINTN a = 0;
+        while (k[a] && name[a] && k[a] == name[a]) a++;
+        if (!k[a] && !name[a]) return 1;
+    }
+    return 0;
+}
+static void scan_kernels(EFI_FILE_PROTOCOL *root) {
+    if (!root) return;
+    EFI_FILE_PROTOCOL *dir = 0;
+    if (EFI_ERROR(root->Open(root, &dir, L"\\", EFI_FILE_MODE_READ, 0))) return;
+    unsigned char buf[512];
+    for (;;) {
+        UINTN sz = sizeof buf;
+        if (EFI_ERROR(dir->Read(dir, &sz, buf)) || sz == 0) break;   /* 0 = end of dir */
+        EFI_FILE_INFO *fi = (EFI_FILE_INFO *)buf;
+        if (fi->Attribute & EFI_FILE_DIRECTORY) continue;
+        CHAR16 *nm = fi->FileName;
+        /* anything called vmlinuz... is a kernel */
+        if (nm[0] != L'v' || nm[1] != L'm' || nm[2] != L'l' || nm[3] != L'i' ||
+            nm[4] != L'n' || nm[5] != L'u' || nm[6] != L'z') continue;
+        if (have_kernel(nm)) continue;
+        if (n_entries >= MAX_ENTRIES) break;
+        entry_t *e = &entries[n_entries++];
+        scopy(e->title, L"VerkOS (found: ", TITLE_MAX);
+        UINTN t = slen(e->title);
+        for (UINTN i = 0; nm[i] && t < TITLE_MAX - 2; i++) e->title[t++] = nm[i];
+        e->title[t++] = L')'; e->title[t] = 0;
+        e->kernel[0] = L'\\';
+        scopy(e->kernel + 1, nm, PATH_MAX - 1);
+        e->initrd[0] = 0;
+        scopy(e->cmdline, L"root=/dev/vda rw console=ttyAMA0 init=/sbin/urverk", CMDLINE_MAX);
+    }
+    dir->Close(dir);
+}
+
+/* ---- graphical logo (optional; text still drives the menu) --------------- */
+static EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+static void gop_fill(UINTN x, UINTN y, UINTN w, UINTN h, UINT8 r, UINT8 g, UINT8 b) {
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL px;
+    px.Red = r; px.Green = g; px.Blue = b; px.Reserved = 0;
+    gop->Blt(gop, &px, EfiBltVideoFill, 0, 0, x, y, w, h, 0);
+}
+/* The VerkOS V, drawn as two converging arms in the cyan->purple gradient. */
+static void draw_logo(void) {
+    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    if (!gop && EFI_ERROR(BS->LocateProtocol(&gop_guid, 0, (void **)&gop))) { gop = 0; return; }
+    if (!gop || !gop->Mode || !gop->Mode->Info) return;
+    UINTN W = gop->Mode->Info->HorizontalResolution;
+    UINTN H = gop->Mode->Info->VerticalResolution;
+    if (!W || !H) return;
+
+    gop_fill(0, 0, W, H, 0x0a, 0x0e, 0x16);            /* deep background */
+    UINTN top = H / 12, height = H / 4, half = height * 3 / 5, thick = height / 7;
+    for (UINTN i = 0; i < height; i++) {
+        /* cyan (0x5ef1ff) -> purple (0xb026d3) down the stroke */
+        UINT8 r = (UINT8)(0x5e + (0xb0 - 0x5e) * i / height);
+        UINT8 g = (UINT8)(0xf1 - (0xf1 - 0x26) * i / height);
+        UINT8 b = (UINT8)(0xff - (0xff - 0xd3) * i / height);
+        UINTN off = half * i / height;
+        gop_fill(W / 2 - half + off,         top + i, thick, 1, r, g, b);
+        gop_fill(W / 2 + half - off - thick, top + i, thick, 1, r, g, b);
+    }
+}
+
 /* ---- menu ---------------------------------------------------------------- */
 static void draw_banner(void) {
     ST->ConOut->ClearScreen(ST->ConOut);
+    draw_logo();          /* no-op when the firmware has no GOP */
     attr(EFI_LIGHTCYAN);
     at(2, 1); print(L"##   ##   VerkOS");
     attr(EFI_CYAN);
@@ -360,6 +431,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     if (root) {
         unsigned char *cfg = read_file(root, CONFIG_PATH, 0);
         if (cfg) { parse_config(cfg); BS->FreePool(cfg); }
+        scan_kernels(root);      /* add any kernel the config did not mention */
     }
     /* validate whatever the config gave us */
     for (int i = 0; i < n_entries; i++)
