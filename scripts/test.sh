@@ -147,6 +147,32 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
     fi
 else bad "vget does not compile"; fi
 
+say "vtar refuses what it cannot extract"
+# This one bit for real: `tar -xf foo.tar.xz` extracted nothing and exited 0,
+# because vtar only knew -z and never checked the ustar signature. A build
+# resumed after the verkbox takeover then failed with no useful error.
+if [ -x "$T/vtar" ]; then
+    mkdir -p "$T/tsrc/sub"
+    echo one > "$T/tsrc/a.txt"; echo two > "$T/tsrc/sub/b.txt"
+    ( cd "$T" && tar -cf t.tar tsrc && tar -czf t.tar.gz tsrc \
+                 && tar -cjf t.tar.bz2 tsrc && tar -cJf t.tar.xz tsrc ) 2>/dev/null
+    for a in t.tar t.tar.gz t.tar.bz2 t.tar.xz; do
+        [ -f "$T/$a" ] || continue
+        rm -rf "$T/tout"; mkdir -p "$T/tout"
+        if ( cd "$T/tout" && "$T/vtar" -xf "../$a" ) 2>/dev/null &&
+           cmp -s "$T/tout/tsrc/a.txt" "$T/tsrc/a.txt"
+        then ok "vtar extracts $a (compression detected from the file)"
+        else bad "vtar could not extract $a"; fi
+    done
+    # The important half: never succeed having done nothing.
+    echo "definitely not a tar archive" > "$T/notatar"
+    head -c 4096 /dev/urandom > "$T/rand.bin"
+    echo hello | gzip > "$T/plain.gz" 2>/dev/null
+    check "vtar rejects a short non-archive"     "! '$T/vtar' -xf '$T/notatar' 2>/dev/null"
+    check "vtar rejects random bytes"            "! '$T/vtar' -xf '$T/rand.bin' 2>/dev/null"
+    check "vtar rejects a gzip that is not a tar" "! '$T/vtar' -xf '$T/plain.gz' 2>/dev/null"
+else bad "vtar does not compile"; fi
+
 say "vmkfs makes a filesystem the world agrees is FAT32"
 # The judge here is deliberately not us: fsck.fat and blkid are the tools that
 # would reject a malformed volume, and the firmware has to agree with them.

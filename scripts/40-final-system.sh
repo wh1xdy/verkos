@@ -210,7 +210,13 @@ NST=/var/lib/vpk-build-stamps; mkdir -p "$NST"
 need(){ [ -f "$NST/$1" ] && { echo ":: $1 already built, skipping"; return 1; } || return 0; }
 mark(){ touch "$NST/$1"; }
 say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-unpack(){ tar -xf "$1"; echo "${1%.tar.*}"; }
+# Extract a tarball and echo where it landed. This runs in a command
+# substitution, so the cd is local to the subshell — its job is to make the
+# result independent of the caller's working directory. Returning a relative
+# path used to work only because every package block ended with `cd /sources`;
+# the first block after a run of already-built (skipped) ones inherited whatever
+# directory the script started in, and its `cd "$d"` failed.
+unpack(){ cd /sources; tar -xf "$1"; echo "/sources/${1%.tar.*}"; }
 
 # 1. glibc — SKIPPED. The cross-toolchain (stage 20) already installed a working
 # glibc ${GLIBC_VERSION} into the rootfs from the same source. A native rebuild
@@ -1208,9 +1214,16 @@ if enter_rootfs '/root/build-native.sh'; then
 else
     warn "Native build stopped before completion — inspect the log above."
     warn "Re-run 'make system ARCH=$ARCH' to resume (completed packages are installed)."
+    NATIVE_INCOMPLETE=1
 fi
 
 unstage_sources
 umount_vfs
 echo
+# Stop here rather than let 'make all' go on to build a kernel and an image out
+# of a rootfs that is missing packages: an image that is quietly incomplete is
+# worse than no image, because it looks finished.
+if [ "${NATIVE_INCOMPLETE:-0}" = 1 ]; then
+    die "the final system is incomplete — not continuing to the kernel and image"
+fi
 ok "Stage 40 finished for $ARCH"

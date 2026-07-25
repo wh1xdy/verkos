@@ -319,6 +319,26 @@ static void on_signal(int sig) {
 }
 
 /* ---- filesystems the real root needs ------------------------------------ */
+/* Look a group up by reading /etc/group directly. getgrnam would be the obvious
+ * call, but urverk is linked statically and getgrnam pulls in NSS, which wants
+ * shared libraries that do not exist in the initramfs — the linker warns about
+ * exactly this. The file is three fields deep; read it. */
+static gid_t group_gid(const char *name, gid_t fallback) {
+    FILE *f = fopen("/etc/group", "r");
+    if (!f) return fallback;
+    char line[512];
+    gid_t g = fallback;
+    size_t n = strlen(name);
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, name, n) || line[n] != ':') continue;
+        const char *p = strchr(line + n + 1, ':');      /* past the password field */
+        if (p) g = (gid_t)strtoul(p + 1, NULL, 10);
+        break;
+    }
+    fclose(f);
+    return g;
+}
+
 static void mount_system(void) {
     /* the root was mounted read-only by stage 1 (or by the kernel); make it
      * writable now that we are past the point of no return */
@@ -338,8 +358,8 @@ static void mount_system(void) {
     mkdir("/run/lock", 01777);
     int utmp_fd = open("/run/utmp", O_WRONLY | O_CREAT, 0664);
     if (utmp_fd >= 0) {
-        struct group *utg = getgrnam("utmp");
-        if (utg) { if (fchown(utmp_fd, 0, utg->gr_gid)) { /* stays root:root */ } }
+        gid_t g = group_gid("utmp", 13);
+        if (fchown(utmp_fd, 0, g)) { /* not fatal: it stays root:root */ }
         close(utmp_fd);
     } else if (debug) warn_errno("create /run/utmp");
     /* cgroup v2, so services can be given memory and CPU limits */
