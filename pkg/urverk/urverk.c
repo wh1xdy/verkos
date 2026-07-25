@@ -45,6 +45,8 @@
 #include <sys/un.h>
 #include <sys/swap.h>
 #include <grp.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 
 #define NEWROOT "/newroot"
 
@@ -329,6 +331,46 @@ static void logline(const char *a, const char *b) {
     char buf[512];
     int n = snprintf(buf, sizeof buf, "%s%s\n", a, b ? b : "");
     ssize_t w = write(logfd, buf, n); (void)w;
+}
+
+/* Tell vboot this boot actually made it to userspace.
+ *
+ * vboot marks the entry it is about to start as "trying" in the VbootLast EFI
+ * variable; if it still says that on the next boot, the entry never came up and
+ * vboot stops the countdown instead of looping into it again. Clearing the flag
+ * here is the confirmation. efivarfs files are immutable by default, so the
+ * flag has to come off before the write. */
+#define EFIVARS "/sys/firmware/efi/efivars"
+#define VBOOT_VAR EFIVARS "/VbootLast-5645524b-4f53-4256-4f4f-540000000001"
+static void confirm_boot(void) {
+    mkdir("/sys/firmware/efi/efivars", 0755);
+    if (mount("efivarfs", EFIVARS, "efivarfs", 0, NULL) && errno != EBUSY) {
+        warn_errno("mount efivarfs");
+        return;                                  /* not a UEFI boot: nothing to do */
+    }
+    /* efivarfs files are immutable, so O_RDWR is refused outright (EPERM). Read
+     * first, take the flag off, then reopen for writing. */
+    int fd = open(VBOOT_VAR, O_RDONLY);
+    if (fd < 0) { if (debug) warn_errno("open " VBOOT_VAR); return; }
+    unsigned char buf[8];
+    ssize_t n = read(fd, buf, sizeof buf);
+    if (n < 8) { say("vboot variable too short to confirm"); close(fd); return; }
+    if (!(buf[6] & 0x01)) { close(fd); return; }   /* already confirmed */
+    buf[6] &= (unsigned char)~0x01;                /* this boot reached userspace */
+
+    int flags = 0;
+    if (!ioctl(fd, FS_IOC_GETFLAGS, &flags) && (flags & FS_IMMUTABLE_FL)) {
+        flags &= ~FS_IMMUTABLE_FL;
+        if (ioctl(fd, FS_IOC_SETFLAGS, &flags)) warn_errno("clearing the immutable flag");
+    }
+    close(fd);
+
+    fd = open(VBOOT_VAR, O_WRONLY);
+    if (fd < 0) { warn_errno("reopen " VBOOT_VAR); return; }
+    /* efivarfs wants the whole variable — attributes and data — in one write */
+    if (write(fd, buf, 8) == 8) say("confirmed this boot to vboot");
+    else warn_errno("writing the vboot variable");
+    close(fd);
 }
 
 static void set_hostname_from_file(void) {
@@ -792,6 +834,7 @@ static int stage2(void) {
     say2("services: ", n_svcs ? "starting" : "none configured");
     start_all();
 
+    confirm_boot();                  /* stop vboot from treating this as a failed boot */
     fputs("\n  [urverk] VerkOS is up\n\n", stderr);
 
     ctl_open();

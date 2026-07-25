@@ -33,6 +33,7 @@ typedef struct {
 
 static EFI_SYSTEM_TABLE  *ST;
 static EFI_BOOT_SERVICES *BS;
+static EFI_RUNTIME_SERVICES *RT;
 static entry_t  entries[MAX_ENTRIES];
 static int      n_entries, cfg_default, cfg_timeout = 5;
 
@@ -222,7 +223,7 @@ static void draw_banner(void) {
     at(2, 3); print(L"  ###     our own UEFI bootloader");
     at(2, 4); print(L"   #");
     attr(EFI_DARKGRAY);
-    at(2, 6); print(L"select with arrows or a number, Enter boots, Esc cancels the timer");
+    at(2, 6); print(L"arrows/number select  Enter boot  e edit cmdline  r reboot  s shutdown  f firmware");
     attr(EFI_LIGHTGRAY);
 }
 static void draw_entries(int sel) {
@@ -241,6 +242,68 @@ static void draw_timer(int secs, int cancelled) {
     if (cancelled) print(L"timer cancelled — press Enter to boot          ");
     else { print(L"booting in "); print_num(secs); print(L"s...            "); }
     attr(EFI_LIGHTGRAY);
+}
+
+/* Edit a CHAR16 string in place on the bottom line: printable keys insert,
+ * backspace deletes, Enter accepts, Esc cancels. Enough to fix a boot without
+ * mounting the ESP from another machine. */
+static int edit_line(CHAR16 *buf, UINTN cap, CHAR16 *label) {
+    UINTN len = slen(buf);
+    for (;;) {
+        at(0, MENU_ROW + n_entries + 3);
+        attr(EFI_LIGHTGRAY);
+        print(L"\r"); print(label); print(buf);
+        print(L"                                                            ");
+        at(slen(label) + len, MENU_ROW + n_entries + 3);
+        EFI_INPUT_KEY k;
+        if (!ST->ConIn || EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, &k))) { BS->Stall(20000); continue; }
+        if (k.UnicodeChar == L'\r') return 1;
+        if (k.ScanCode == SCAN_ESC)  return 0;
+        if (k.UnicodeChar == 8 || k.UnicodeChar == 127) { if (len) buf[--len] = 0; continue; }
+        if (k.UnicodeChar >= 32 && len + 1 < cap) { buf[len++] = k.UnicodeChar; buf[len] = 0; }
+    }
+}
+
+/* ---- firmware actions ---------------------------------------------------- */
+static void do_reset(EFI_RESET_TYPE type) {
+    if (RT && RT->ResetSystem) RT->ResetSystem(type, EFI_SUCCESS, 0, 0);
+    for (;;) BS->Stall(1000000);
+}
+/* Ask the firmware to come up in its setup UI on the next boot, then reboot. */
+static void boot_to_firmware(void) {
+    EFI_GUID gv = EFI_GLOBAL_VARIABLE_GUID;
+    UINT64 ind = EFI_OS_INDICATIONS_BOOT_TO_FW_UI;
+    if (RT && RT->SetVariable)
+        RT->SetVariable(L"OsIndications", &gv,
+                        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                        EFI_VARIABLE_RUNTIME_ACCESS, sizeof ind, &ind);
+    do_reset(EfiResetCold);
+}
+
+/* ---- remembering the last choice ------------------------------------------
+ * Written to an EFI variable rather than the ESP so it also works when the
+ * volume is read-only. The same variable doubles as the failed-boot marker:
+ * it is set to "trying N" before starting an entry and cleared by the running
+ * system (urverk), so an entry that never reaches userspace is not retried. */
+static void remember_choice(int idx, int trying) {
+    EFI_GUID gv = VERKOS_VBOOT_GUID;
+    UINT32 v = ((UINT32)idx & 0xffff) | (trying ? 0x10000u : 0u);
+    if (!RT || !RT->SetVariable) { print(L"  [!!] no runtime services for VbootLast\r\n"); return; }
+    EFI_STATUS st = RT->SetVariable(L"VbootLast", &gv,
+                        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                        EFI_VARIABLE_RUNTIME_ACCESS, sizeof v, &v);
+    if (EFI_ERROR(st)) fail(L"SetVariable(VbootLast)", st);
+}
+/* Returns the remembered entry, or -1. *failed is set when the last boot was
+ * still marked as in progress, i.e. it never came up. */
+static int recall_choice(int *failed) {
+    EFI_GUID gv = VERKOS_VBOOT_GUID;
+    UINT32 v = 0; UINTN sz = sizeof v;
+    *failed = 0;
+    if (!RT || !RT->GetVariable) return -1;
+    if (EFI_ERROR(RT->GetVariable(L"VbootLast", &gv, 0, &sz, &v))) return -1;
+    *failed = (v & 0x10000u) ? 1 : 0;
+    return (int)(v & 0xffff);
 }
 
 /* ---- boot ---------------------------------------------------------------- */
@@ -291,7 +354,7 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
 }
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
-    ST = systab; BS = systab->BootServices;
+    ST = systab; BS = systab->BootServices; RT = systab->RuntimeServices;
 
     EFI_FILE_PROTOCOL *root = volume_root(image);
     if (root) {
@@ -304,8 +367,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     if (n_entries == 0) builtin_defaults();
     if (cfg_default < 0 || cfg_default >= n_entries) cfg_default = 0;
 
-    int sel = cfg_default, cancelled = 0, remain = cfg_timeout;
+    /* Prefer whatever booted successfully last time. If the previous attempt was
+     * never confirmed by the running system, do not silently retry it — select
+     * it but stop the countdown so a person can choose. */
+    int last_failed = 0, last = recall_choice(&last_failed);
+    int sel = (last >= 0 && last < n_entries) ? last : cfg_default;
+    int cancelled = 0, remain = cfg_timeout;
+    /* Give a person time to intervene, but still boot on its own: a headless
+     * machine must never be stranded at the menu because a confirmation was
+     * missed. */
+    if (last_failed && remain < 15) remain = 15;
     draw_banner();
+    if (last_failed) {
+        at(4, MENU_ROW + n_entries + 2);
+        attr(EFI_WHITE);
+        print(L"the last boot did not finish starting — pick an entry");
+        attr(EFI_LIGHTGRAY);
+    }
     draw_entries(sel);
     draw_timer(remain, cancelled);
 
@@ -317,6 +395,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
             else if (key.ScanCode == SCAN_DOWN) { sel = (sel + 1) % n_entries;    cancelled = 1; }
             else if (key.ScanCode == SCAN_ESC)  { cancelled = 1; }
             else if (key.UnicodeChar == L'\r')  break;              /* boot it */
+            else if (key.UnicodeChar == L'e' || key.UnicodeChar == L'E') {
+                /* edit this entry's command line, then redraw */
+                cancelled = 1;
+                edit_line(entries[sel].cmdline, CMDLINE_MAX, L"cmdline: ");
+                draw_banner(); draw_entries(sel);
+            }
+            else if (key.UnicodeChar == L'r' || key.UnicodeChar == L'R') do_reset(EfiResetCold);
+            else if (key.UnicodeChar == L's' || key.UnicodeChar == L'S') do_reset(EfiResetShutdown);
+            else if (key.UnicodeChar == L'f' || key.UnicodeChar == L'F') boot_to_firmware();
             else if (key.UnicodeChar >= L'1' && key.UnicodeChar < L'1' + n_entries) {
                 sel = key.UnicodeChar - L'1'; break;                /* number = pick + boot */
             } else cancelled = 1;
@@ -331,6 +418,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     }
 
     if (!root) { fail(L"opening the boot volume", EFI_NOT_FOUND); goto hang; }
+    remember_choice(sel, 1);            /* "trying"; urverk clears it once up */
     boot_entry(image, root, &entries[sel]);
 
 hang:

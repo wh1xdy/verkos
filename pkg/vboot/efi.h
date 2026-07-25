@@ -203,13 +203,38 @@ typedef struct _EFI_LOAD_FILE2_PROTOCOL {
 
 typedef enum { EFI_NATIVE_INTERFACE } EFI_INTERFACE_TYPE;
 
+/* ---- Runtime Services (reset, and the variables that survive a reboot) ---- */
+#define EFI_GLOBAL_VARIABLE_GUID \
+    { 0x8BE4DF61,0x93CA,0x11d2,{0xAA,0x0D,0x00,0xE0,0x98,0x03,0x2B,0x8C} }
+#define EFI_OS_INDICATIONS_BOOT_TO_FW_UI  0x0000000000000001ULL
+/* Our own vendor namespace. Firmware validates names in the GLOBAL namespace
+ * against the spec's list and rejects anything else with EFI_INVALID_PARAMETER,
+ * so vboot's private state must live under a GUID we own. */
+#define VERKOS_VBOOT_GUID \
+    { 0x5645524b,0x4f53,0x4256,{0x4f,0x4f,0x54,0x00,0x00,0x00,0x00,0x01} }
+#define EFI_VARIABLE_NON_VOLATILE         0x01
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS   0x02
+#define EFI_VARIABLE_RUNTIME_ACCESS       0x04
+typedef enum { EfiResetCold, EfiResetWarm, EfiResetShutdown } EFI_RESET_TYPE;
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *GetTime, *SetTime, *GetWakeupTime, *SetWakeupTime;
+    void *SetVirtualAddressMap, *ConvertPointer;
+    EFI_STATUS (EFIAPI *GetVariable)(CHAR16*, EFI_GUID*, UINT32*, UINTN*, void*);
+    void *GetNextVariableName;
+    EFI_STATUS (EFIAPI *SetVariable)(CHAR16*, EFI_GUID*, UINT32, UINTN, void*);
+    void *GetNextHighMonotonicCount;
+    void (EFIAPI *ResetSystem)(EFI_RESET_TYPE, EFI_STATUS, UINTN, void*);
+} EFI_RUNTIME_SERVICES;
+
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     CHAR16 *FirmwareVendor; UINT32 FirmwareRevision;
     EFI_HANDLE ConsoleInHandle; EFI_SIMPLE_TEXT_INPUT_PROTOCOL *ConIn;
     EFI_HANDLE ConsoleOutHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE StandardErrorHandle; EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
-    void *RuntimeServices;
+    EFI_RUNTIME_SERVICES *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     UINTN NumberOfTableEntries; void *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
