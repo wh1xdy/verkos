@@ -168,7 +168,15 @@ static void parse_script(char *script) {
             default: fprintf(stderr, "sed: unknown command: %c\n", op); exit(1);
         }
         ncmd++;
-        while (*s && *s != ';' && *s != '\n' && *s != '}') s++;
+        /* Skip whatever follows a command up to the next separator — but NOT
+         * after a brace. A '{' is followed immediately by the first command of
+         * its block ("/./ {s/a/b/}"), and skipping to the next separator
+         * swallowed that command whole, silently: the block was entered and
+         * did nothing. Commands on later lines of the same block still parsed,
+         * so a multi-line script would apply some of its substitutions and not
+         * others, which is how cmake came out half-configured. */
+        if (op != '{' && op != '}')
+            while (*s && *s != ';' && *s != '\n' && *s != '}') s++;
     }
     /* resolve { } nesting and b/t/T labels */
     int stack[256], sp = 0;

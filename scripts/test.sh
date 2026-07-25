@@ -148,6 +148,22 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
     fi
 else bad "vget does not compile"; fi
 
+say "vsed handles the sed scripts real software writes"
+# cmake's bootstrap substitutes its namespace with a multi-line block script.
+# vsed entered the block and did nothing: the command written immediately after
+# "{" was swallowed by the skip-to-next-separator, while commands on later lines
+# still ran — so the header came out half-substituted and the build failed a
+# thousand lines later with "not a member of cmSystemTools".
+if [ -x "$T/vsed" ] && command -v sed >/dev/null 2>&1; then
+    printf 'aaa\n' > "$T/sedin.txt"
+    for script in '/./ {s/a/X/}' '/./ { s/a/X/ }' '{s/a/X/}' '/./ {s/a/X/;s/X/Y/}' '/b/ {s/a/X/}'; do
+        ours=$("$T/vsed" "$script" "$T/sedin.txt" 2>&1)
+        gnu=$(sed "$script" "$T/sedin.txt" 2>&1)
+        if [ "$ours" = "$gnu" ]; then ok "vsed matches sed on: $script"
+        else bad "vsed on '$script': got '$ours', sed gives '$gnu'"; fi
+    done
+fi
+
 say "no tool reports success while doing nothing"
 # A sweep for the shape that has bitten this project repeatedly: the tool
 # notices the problem, prints about it, and exits 0 anyway. Every case below
