@@ -18,7 +18,7 @@ ARCH   ?= x86_64
 SHELL  := /bin/bash
 BUILD  := scripts/build.sh
 
-.PHONY: all check pin fetch toolchain temp system kernel image run clean distclean help
+.PHONY: all check pin fetch toolchain temp system kernel image boot run clean distclean help
 
 all:        ; @bash $(BUILD) all       $(ARCH)
 check:      ; @bash $(BUILD) check     $(ARCH)
@@ -29,6 +29,7 @@ temp:       ; @bash $(BUILD) temp      $(ARCH)
 system:     ; @bash $(BUILD) system    $(ARCH)
 kernel:     ; @bash $(BUILD) kernel    $(ARCH)
 image:      ; @bash $(BUILD) image     $(ARCH)
+boot:       ; @bash $(BUILD) boot      $(ARCH)
 
 run:
 	@bash boot/qemu-$(ARCH).sh
