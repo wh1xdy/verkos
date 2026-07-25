@@ -1,8 +1,8 @@
 /* efi.h — a minimal, from-scratch subset of the UEFI ABI for vboot.
  *
- * Just the types + protocols vboot needs — no gnu-efi, no vendor headers. On
- * aarch64 UEFI uses the ordinary AAPCS64 calling convention (unlike x86_64,
- * which needs ms_abi), so plain C function pointers match the firmware ABI.
+ * Just the types + protocols vboot needs — no gnu-efi, no vendor headers.
+ * Builds for both aarch64 and x86_64; the only architectural difference is the
+ * calling convention (see EFIAPI below).
  */
 #ifndef VERK_EFI_H
 #define VERK_EFI_H
@@ -24,7 +24,14 @@ typedef UINT64    EFI_PHYSICAL_ADDRESS;
 typedef UINT64    EFI_VIRTUAL_ADDRESS;
 typedef UINT64    EFI_LBA;
 
-#define EFIAPI                              /* aarch64: standard AAPCS, no attr */
+/* Calling convention. x86_64 UEFI uses the Microsoft x64 ABI, so every function
+ * the firmware calls (and every function pointer we call through) must be
+ * declared ms_abi. aarch64 UEFI is plain AAPCS64 and needs no attribute. */
+#if defined(__x86_64__)
+#define EFIAPI __attribute__((ms_abi))
+#else
+#define EFIAPI
+#endif
 #define IN
 #define OUT
 #define EFIERR(n)      (0x8000000000000000ULL | (n))

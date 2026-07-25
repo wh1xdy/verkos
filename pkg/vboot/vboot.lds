@@ -6,8 +6,8 @@
  * an image whose .text sits at RVA 0 (overlapping the headers) with
  * EFI_UNSUPPORTED — this is exactly how the distro's systemd-bootaa64.efi is
  * laid out (.text @ 0x1000, SizeOfHeaders=4096). */
-OUTPUT_FORMAT("elf64-littleaarch64")
-OUTPUT_ARCH(aarch64)
+/* No OUTPUT_FORMAT/OUTPUT_ARCH: ld takes them from the input objects, so this
+ * one script serves both the aarch64 and the x86_64 build. */
 ENTRY(efi_main)
 SECTIONS
 {
