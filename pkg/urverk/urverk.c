@@ -43,17 +43,21 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/swap.h>
 
 #define NEWROOT "/newroot"
 
 static int debug;
 
 /* ---- console output (we are PID 1; keep it dependency-free) -------------- */
+static void logline(const char *a, const char *b);
 static void say(const char *s) {
     fputs("  [urverk] ", stderr); fputs(s, stderr); fputc('\n', stderr);
+    logline(s, NULL);
 }
 static void say2(const char *s, const char *t) {
     fputs("  [urverk] ", stderr); fputs(s, stderr); fputs(t, stderr); fputc('\n', stderr);
+    logline(s, t);
 }
 static void warn_errno(const char *what) {
     fputs("  [urverk] ", stderr); fputs(what, stderr);
@@ -208,6 +212,113 @@ static void mount_system(void) {
     if (mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777")
         && errno != EBUSY && debug) warn_errno("mount /tmp");
 }
+/* ---- /etc/fstab ----------------------------------------------------------
+ * urverk mounts the handful of pseudo-filesystems itself, but a real machine
+ * has more: a separate /boot or /home, swap, an ESP. Honour fstab so an
+ * installed system comes up the way its admin described it. */
+#define MAX_MOUNTS 24
+static char mounted[MAX_MOUNTS][128];
+static int  n_mounted;
+
+/* translate the options field: known flags become mount() bits, the rest is
+ * passed through as filesystem-specific data (gid=5,mode=620, …) */
+static unsigned long parse_opts(const char *opts, char *data, size_t cap) {
+    unsigned long flags = 0;
+    data[0] = 0;
+    char buf[256]; snprintf(buf, sizeof buf, "%s", opts);
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        if      (!strcmp(tok, "ro"))          flags |= MS_RDONLY;
+        else if (!strcmp(tok, "rw"))          flags &= ~MS_RDONLY;
+        else if (!strcmp(tok, "nosuid"))      flags |= MS_NOSUID;
+        else if (!strcmp(tok, "nodev"))       flags |= MS_NODEV;
+        else if (!strcmp(tok, "noexec"))      flags |= MS_NOEXEC;
+        else if (!strcmp(tok, "noatime"))     flags |= MS_NOATIME;
+        else if (!strcmp(tok, "nodiratime"))  flags |= MS_NODIRATIME;
+        else if (!strcmp(tok, "relatime"))    flags |= MS_RELATIME;
+        else if (!strcmp(tok, "sync"))        flags |= MS_SYNCHRONOUS;
+        else if (!strcmp(tok, "defaults") || !strcmp(tok, "auto") ||
+                 !strcmp(tok, "noauto")   || !strcmp(tok, "nofail")) continue;
+        else {                                  /* filesystem-specific */
+            if (data[0]) strncat(data, ",", cap - strlen(data) - 1);
+            strncat(data, tok, cap - strlen(data) - 1);
+        }
+    }
+    return flags;
+}
+static int opt_present(const char *opts, const char *want) {
+    char buf[256]; snprintf(buf, sizeof buf, "%s", opts);
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ","))
+        if (!strcmp(tok, want)) return 1;
+    return 0;
+}
+/* is this path already a mount point? avoids stacking a second mount on top of
+ * the pseudo-filesystems urverk brought up itself */
+static int already_mounted(const char *mnt) {
+    FILE *m = fopen("/proc/mounts", "r");
+    if (!m) return 0;
+    char line[512], dev[128], where[128];
+    int hit = 0;
+    while (fgets(line, sizeof line, m))
+        if (sscanf(line, "%127s %127s", dev, where) == 2 && !strcmp(where, mnt)) { hit = 1; break; }
+    fclose(m);
+    return hit;
+}
+static void mount_fstab(void) {
+    FILE *f = fopen("/etc/fstab", "r");
+    if (!f) { if (debug) say("no /etc/fstab"); return; }
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || !*p) continue;
+        char dev[128], mnt[128], type[64], opts[256];
+        if (sscanf(p, "%127s %127s %63s %255s", dev, mnt, type, opts) < 3) continue;
+        if (sscanf(p, "%127s %127s %63s %255s", dev, mnt, type, opts) < 4)
+            snprintf(opts, sizeof opts, "defaults");
+        if (opt_present(opts, "noauto")) continue;
+
+        if (!strcmp(type, "swap")) {
+            if (swapon(dev, 0) == 0) say2("swap on ", dev);
+            else if (debug) warn_errno(dev);
+            continue;
+        }
+        if (!strcmp(mnt, "/")) continue;            /* already our root */
+        if (already_mounted(mnt)) { if (debug) say2("already mounted: ", mnt); continue; }
+        char data[256];
+        unsigned long flags = parse_opts(opts, data, sizeof data);
+        mkdir(mnt, 0755);
+        if (mount(dev, mnt, type, flags, data[0] ? data : NULL) == 0) {
+            if (n_mounted < MAX_MOUNTS) snprintf(mounted[n_mounted++], 128, "%s", mnt);
+            if (debug) say2("mounted ", mnt);
+        } else if (errno != EBUSY && debug) {
+            warn_errno(mnt);
+        }
+    }
+    fclose(f);
+}
+
+/* ---- logging -------------------------------------------------------------
+ * Everything urverk says goes to the console; once the root is writable it is
+ * also appended to /var/log/urverk.log so the boot can be read back later. */
+static int logfd = -1;
+static void log_open(void) {
+    mkdir("/var", 0755); mkdir("/var/log", 0755);
+    logfd = open("/var/log/urverk.log", O_WRONLY | O_CREAT | O_APPEND, 0640);
+    if (logfd >= 0) {
+        time_t t = time(NULL);
+        char hdr[128];
+        int n = snprintf(hdr, sizeof hdr, "\n=== urverk boot at %ld ===\n", (long)t);
+        ssize_t w = write(logfd, hdr, n); (void)w;
+    }
+}
+/* append one message to the log; a no-op until log_open() has run */
+static void logline(const char *a, const char *b) {
+    if (logfd < 0) return;
+    char buf[512];
+    int n = snprintf(buf, sizeof buf, "%s%s\n", a, b ? b : "");
+    ssize_t w = write(logfd, buf, n); (void)w;
+}
+
 static void set_hostname_from_file(void) {
     int fd = open("/etc/hostname", O_RDONLY);
     if (fd < 0) return;
@@ -368,9 +479,7 @@ static void start_service(svc_t *s) {
         _exit(127);
     }
     s->pid = p;
-    fputs("  [urverk] started ", stderr); fputs(s->name, stderr);
-    if (s->desc[0]) { fputs(" — ", stderr); fputs(s->desc, stderr); }
-    fputc('\n', stderr);
+    say2("started ", s->name[0] ? s->name : "(unnamed)");
 }
 static svc_t *svc_by_pid(pid_t p) {
     for (int i = 0; i < n_svcs; i++) if (svcs[i].pid == p) return &svcs[i];
@@ -444,7 +553,7 @@ static void ctl_handle(int fd) {
         for (int i = 0; i < n_svcs; i++) {
             char line[256];
             svc_t *s = &svcs[i];
-            snprintf(line, sizeof line, "%-12s %-9s %s\n", s->name,
+            snprintf(line, sizeof line, "%-12.63s %-9.9s %.100s\n", s->name,
                      s->pid > 0 ? "running" : (s->respawn == RESPAWN_NO ? "stopped" : "dead"),
                      s->desc);
             strncat(out, line, sizeof out - strlen(out) - 1);
@@ -486,6 +595,8 @@ static void stop_everything(void) {
     kill(-1, SIGKILL);
     say("unmounting filesystems");
     sync();
+    /* fstab mounts first, deepest last-mounted first, then our own */
+    for (int i = n_mounted - 1; i >= 0; i--) umount(mounted[i]);
     umount("/tmp"); umount("/run"); umount("/dev/shm"); umount("/dev/pts");
     mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
@@ -513,6 +624,8 @@ static int stage2(void) {
     say("VerkOS init (stage 2) — Urverk");
     mount_pseudo();
     mount_system();
+    log_open();                      /* root is writable from here on */
+    mount_fstab();
     set_hostname_from_file();
 
     load_services();
