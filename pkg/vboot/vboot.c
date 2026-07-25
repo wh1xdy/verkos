@@ -16,6 +16,8 @@
  *        cmdline root=/dev/vda rw console=ttyAMA0 init=/usr/lib/systemd/systemd
  */
 #include "efi.h"
+#include "ed25519.h"
+#include "vboot-key.h"
 
 #define CONFIG_PATH   L"\\vboot.conf"
 #define MAX_ENTRIES   8
@@ -377,6 +379,51 @@ static int recall_choice(int *failed) {
     return (int)(v & 0xffff);
 }
 
+/* ---- signature verification ---------------------------------------------
+ * Secure boot, VerkOS style: the public key is compiled into vboot, and a
+ * payload is only started if <name>.sig verifies against it. The trust root is
+ * therefore vboot itself, which the firmware loads.
+ *
+ * Enforcement is deliberately conditional on a key being configured: an image
+ * built without one boots exactly as before, so signing can be adopted without
+ * every existing install refusing to start. Once a key IS embedded, a missing
+ * or bad signature stops the boot. */
+static int key_configured(void) {
+    for (int i = 0; i < 32; i++) if (VBOOT_PUBKEY[i]) return 1;
+    return 0;
+}
+/* Verify buf against PATH.sig from the same volume. 0 = trusted. */
+static int verify_payload(EFI_FILE_PROTOCOL *root, CHAR16 *path,
+                          unsigned char *buf, UINTN len) {
+    if (!key_configured()) return 0;                  /* unsigned build: allow */
+
+    CHAR16 sigpath[PATH_MAX + 8];
+    UINTN i = 0;
+    for (; path[i] && i < PATH_MAX; i++) sigpath[i] = path[i];
+    sigpath[i++] = L'.'; sigpath[i++] = L's'; sigpath[i++] = L'i'; sigpath[i++] = L'g';
+    sigpath[i] = 0;
+
+    UINTN slen_ = 0;
+    unsigned char *sig = read_file(root, sigpath, &slen_);
+    if (!sig) {
+        attr(EFI_WHITE);
+        print(L"  [!!] no signature for "); print(path); print(L"\r\n");
+        attr(EFI_LIGHTGRAY);
+        return -1;
+    }
+    if (slen_ < 64) { BS->FreePool(sig); return -1; }
+    int rc = ed25519_verify(sig, buf, len, VBOOT_PUBKEY);
+    BS->FreePool(sig);
+    if (rc) {
+        attr(EFI_WHITE);
+        print(L"  [!!] SIGNATURE INVALID for "); print(path); print(L"\r\n");
+        attr(EFI_LIGHTGRAY);
+        return -1;
+    }
+    print(L"  [ok] signature verified\r\n");
+    return 0;
+}
+
 /* ---- boot ---------------------------------------------------------------- */
 static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t *e) {
     EFI_GUID li_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
@@ -390,6 +437,10 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
     void *kbuf = read_file(root, e->kernel, &ksize);
     if (!kbuf) { fail(L"reading the kernel", EFI_NOT_FOUND); return EFI_NOT_FOUND; }
     print(L"  [ok] kernel loaded, "); print_num(ksize); print(L" bytes\r\n");
+    if (verify_payload(root, e->kernel, kbuf, ksize)) {
+        print(L"\r\n  refusing to boot an unverified kernel.\r\n");
+        return EFI_LOAD_ERROR;
+    }
 
     /* optional initrd — published via LoadFile2 for the EFI stub to collect */
     EFI_HANDLE ih = 0;
@@ -401,6 +452,9 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
         } else if (!(ih = publish_initrd())) {
             fail(L"publishing the initrd", EFI_LOAD_ERROR);
             initrd_buf = 0; initrd_size = 0;
+        } else if (verify_payload(root, e->initrd, initrd_buf, initrd_size)) {
+            print(L"\r\n  refusing to boot an unverified initramfs.\r\n");
+            return EFI_LOAD_ERROR;
         } else {
             print(L"  [ok] initrd loaded, "); print_num(initrd_size); print(L" bytes\r\n");
         }
