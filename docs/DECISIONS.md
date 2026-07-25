@@ -559,3 +559,54 @@ cryptsetup, and those needed a native GCC — which had never been built here,
 because the flag that enables it never reached the chroot. Getting through that
 found eight defects in VerkOS' own tools, most of which produced a wrong answer
 with a zero exit status. They are listed in D-021.
+
+## D-021 — What building cryptsetup found in our own tools
+
+Adding one feature put VerkOS' own userland in front of real third-party build
+systems — autotools, gnulib, kwsys, libtool, pax archives — for the first time
+at that scale. Eight defects surfaced. Most produced a **wrong answer with a
+zero exit status**, and none was found by reading code:
+
+**vtar** (five). Requiring the ustar magic rejected pre-POSIX archives, which
+popt still ships — a header is told from garbage by its checksum instead.
+Extraction discarded modification times, so an unpacked tree looked newer than
+its own generated files and autotools tried to re-run automake. Paths over 100
+characters were truncated: not merely lost, but written to the *wrong* path,
+which cost 465 of cmake's 26212 files. `-p` was refused, and `-` was treated as
+a file name rather than standard input, so GCC's header install moved nothing.
+
+**vawk** (three). An FS longer than one character is an extended regular
+expression, not a literal; using only its first character made `-F'[(, ]+'`
+split on `[`. A regex literal's `\t` was passed to regcomp, which reads it as
+the letter t. Both produced empty fields where GCC expected CPU names, and its
+build refused to continue with an error naming a generated file.
+
+**vsed** (two). A command written immediately after `{` was swallowed by the
+skip to the next separator, so a block ran and did nothing — cmake's namespace
+substitution came out half-applied. `w FILE` was parsed and discarded, so
+gnulib's generated headers never appeared.
+
+**verkbox** (three). `sort` had no `-c`, so libtool's duplicate-object check
+always "failed" and it reported conflicts in archives that had none. It had no
+`-t`/`-k` either, so LVM2's version script was written empty and ld reported a
+syntax error on line 0. `rm` had no `-v`.
+
+**The lesson is about where to look.** A deliberate sweep for silent failures
+earlier in the same session — running every tool through unknown flags, wrong
+formats, missing files — found eighteen problems and none of these. Synthetic
+probes test what we thought to ask. Real software asks things we did not think
+of, and it asks them in combinations: `sort -nt_ -k5`, `tar xpf -`,
+`sed -n -e 'w $@-t'`. Every one of these was found by a build failing somewhere
+far from the cause.
+
+**Also worth knowing, not bugs:**
+- The cross toolchain's `libstdc++.a` is a stub — no sized delete, no
+  `basic_string`. **Static C++ linking does not work** until a native GCC has
+  been built. GCC's own build links its tools that way, so it needs
+  `--with-stage1-ldflags=no`.
+- An interrupted `make install` of GCC leaves the system unable to rebuild
+  itself: the new driver is in place but its internal headers are not, so gcc
+  cannot find `stddef.h` and g++ segfaults. Recovery depended on the cross
+  toolchain's own drivers still being present, which is luck rather than design.
+- 46 GB for one package's build directory on a 79 GB volume is not sustainable;
+  the build does not clean up after itself.
