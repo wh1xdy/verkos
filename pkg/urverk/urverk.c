@@ -829,7 +829,7 @@ static void socket_listen(svc_t *s) {
     } else port = atoi(s->listen);
     if (port <= 0) { say2("bad listen address: ", s->listen); return; }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { warn_errno("socket"); return; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -903,7 +903,11 @@ static int ctl_fd = -1;
 static void ctl_open(void) {
     struct sockaddr_un a;
     unlink(CTL_SOCK);
-    ctl_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    /* CLOEXEC matters here: start_service() forks while a control connection is
+     * open, and without it the service inherits the socket. urverk closes its
+     * own copy, the child keeps one, so the client never sees EOF and hangs
+     * forever waiting for a reply that was already sent. */
+    ctl_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (ctl_fd < 0) { warn_errno("control socket"); return; }
     memset(&a, 0, sizeof a);
     a.sun_family = AF_UNIX;
@@ -1113,6 +1117,15 @@ static int stage2(void) {
     sigaction(SIGINT,  &sa, NULL);           /* ctrl-alt-del via the kernel */
     sigaction(SIGUSR1, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+    /* PID 1 must never be stoppable. A getty takes the console as its
+     * controlling terminal, which leaves urverk writing to a tty it is no
+     * longer the foreground process group of — the kernel answers that with
+     * SIGTTOU, whose default action is to STOP the process. An init frozen
+     * mid-boot looks exactly like a hang: services keep running, but nothing
+     * is ever reaped, restarted or shut down again. */
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
     /* PID 1 must claim ctrl-alt-del or the kernel reboots without asking us */
     reboot(RB_DISABLE_CAD);
 
@@ -1151,7 +1164,11 @@ static int stage2(void) {
             if (!(pfd[k].revents & POLLIN)) continue;
             if (idx[k] < 0) {                                  /* the control socket */
                 int c = accept(ctl_fd, NULL, NULL);
-                if (c >= 0) { ctl_handle(c); close(c); }
+                if (c >= 0) {
+                    fcntl(c, F_SETFD, FD_CLOEXEC);   /* never inherited by a service */
+                    ctl_handle(c);
+                    close(c);
+                }
             } else {                                           /* someone connected */
                 svc_t *s = &svcs[idx[k]];
                 say2("connection — starting ", s->name);
