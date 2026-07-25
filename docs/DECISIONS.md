@@ -39,7 +39,11 @@ compatibility for desktop software; revisit if we ever want a tiny embedded Verk
 
 ---
 
-## D-003 — systemd as PID 1
+## D-003 — systemd as PID 1  *(superseded by D-009)*
+
+> **Reversed on 2026-07-25.** systemd is no longer built or installed; VerkOS'
+> own init, `urverk`, is PID 1. The reasoning below is kept because it was right
+> at the time — the reason it stopped applying is in D-009.
 
 **Decision:** Use **systemd** as the init system and service manager.
 
@@ -87,7 +91,11 @@ have three machines — QEMU user-mode lets one host build for all).
 
 ---
 
-## D-006 — QEMU direct kernel boot now, GRUB later
+## D-006 — QEMU direct kernel boot now, GRUB later  *(superseded by D-010)*
+
+> **Reversed on 2026-07-25.** VerkOS boots through its own UEFI bootloader,
+> `vboot`; GRUB was never adopted. See D-010.
+
 
 **Decision:** During development, boot with **QEMU loading the kernel + initramfs
 directly** (`-kernel`/`-initrd`). Add **GRUB** and disk images when we target real
@@ -112,7 +120,7 @@ embedded build). VerkOS is the flagship glibc+systemd desktop-track distro.
 
 ---
 
-## D-008 — systemd's Python build tools, staged offline
+## D-008 — Python build tools, staged offline
 
 **Decision:** systemd is built with meson/ninja and needs python3 + jinja2. We
 build **libffi, Python, and ninja from source** inside the chroot, and install
@@ -126,8 +134,92 @@ Python needs no TLS for pip) and no Perl. All sources are still fetched and
 present before the build starts, matching how the rest of VerkOS is built.
 
 **Cost we accept:** `make fetch` needs a host `pip`. If it's absent, the tools
-aren't staged and the systemd step stops with a clear message rather than
+aren't staged and the build stops with a clear message rather than
 failing deep in the build.
 
 **Rejected:** Building OpenSSL + Perl so Python can pip-install over the network
 mid-chroot (larger, network-dependent build); hand-vendoring meson (brittle).
+
+---
+
+## D-009 — Our own init: `urverk` replaces systemd
+
+**Decision:** Write VerkOS' init and service manager, **urverk**, and remove
+systemd from the build entirely.
+
+**Why:** By the time the question came up, most of what systemd was chosen for
+(D-003) had already been replaced by our own tools — networking by `vdhcp`, the
+console login by `vgetty`, the userland by `verkbox` and the vX tools. systemd
+was left doing service supervision and early boot, both of which are tractable,
+and it was the largest remaining component nobody in the project understood
+end to end. Owning PID 1 is also what makes the rest coherent: one binary is both
+the initramfs `/init` and PID 1, so there is a single place where "how VerkOS
+starts" lives.
+
+**Cost we accept:** everything systemd quietly did now has to be done
+explicitly, and each omission is a bug we get to find. The loopback interface was
+one — nothing brought `lo` up after the removal, and every connection to
+127.0.0.1 hung until urverk took the job over. Expect more of that shape.
+
+**Also:** shadow had to be rebuilt with `--disable-logind`, because its
+`login`/`su`/`passwd` link `libsystemd` by default. Removing systemd without that
+would have made it impossible to log in.
+
+**Rejected:** keeping systemd for logind/udev alone (it is the whole package or
+nothing); runit or s6 (excellent, but adopting someone else's init contradicts
+the point).
+
+---
+
+## D-010 — Our own bootloader: `vboot`, not GRUB
+
+**Decision:** Write a **UEFI bootloader in C** rather than adopting GRUB.
+
+**Why:** GRUB solves a much larger problem than we have — BIOS, dozens of
+filesystems, its own scripting language — and cross-building it is notoriously
+awkward. A UEFI application, by contrast, is an ordinary C program: the firmware
+gives us services, the kernel is already a valid EFI binary through
+`CONFIG_EFI_STUB`, so loading it is `LoadImage` + `StartImage` with no
+architecture-specific boot protocol to reimplement. One source tree covers both
+aarch64 and x86_64; the only real difference is the calling convention.
+
+**Cost we accept:** UEFI only. There is no BIOS path, so genuinely old x86
+hardware cannot boot VerkOS. That is a deliberate trade for a bootloader we can
+read in an afternoon.
+
+**Cost we did not expect:** producing a PE/COFF image that a strict EDK2 loader
+accepts took three separate fixes — section layout, the relocations-stripped
+flag, and keeping dynamic-linking metadata out of `.data`. All three are recorded
+in `pkg/vboot/build.sh` and the linker script, because each one presented as a
+silent, misleading failure.
+
+**Rejected:** GRUB (size and cross-build pain); systemd-boot (would have meant
+keeping systemd); writing a BIOS bootloader (16-bit assembly for hardware we do
+not target).
+
+---
+
+## D-011 — Verify what boots, with our own Ed25519
+
+**Decision:** vboot verifies the kernel and initramfs against a public key
+compiled into it, using an Ed25519 implementation in the tree.
+
+**Why:** The bootloader is the only place where "is this the software I
+installed?" can still be asked before anything untrusted runs. Since the
+firmware loads vboot, embedding the key in vboot makes the bootloader itself the
+trust root. Ed25519 was chosen for small keys and signatures and an
+implementation that fits in a header with no libc.
+
+**Cost we accept:** rolling our own crypto, which is normally poor advice. It is
+mitigated by testing rather than confidence: `pkg/vboot/ed25519-test.c` checks
+the RFC 8032 vectors and that tampering is rejected, and it runs in CI. The rule
+is that the crypto is not trusted until those pass.
+
+**Enforcement is conditional:** with no key configured (the default, an all-zero
+key) vboot boots without checking. Otherwise turning the feature on would have
+made every existing install refuse to start.
+
+**Rejected:** a pinned SHA-256 (no way to re-sign a kernel without rebuilding
+the bootloader); linking a crypto library (nothing to link against before the OS
+exists); UEFI Secure Boot with vendor keys (a different problem — that is about
+whose firmware trusts us, not whose kernel we trust).
