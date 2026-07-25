@@ -234,6 +234,32 @@ static Map *get_array(const char *name) { for (int i = 0; i < narr; i++) if (!st
 static char *g_line; static char *fields[256]; static int NF;
 static char FS_[64] = " ", OFS[64] = " ", ORS[64] = "\n";
 static long NR, FNR;
+/* An awk regex literal carries C-style escapes: /[ \t]+/ means space-or-tab.
+ * POSIX EREs have no \t, so regcomp reads it as the letter 't' — the pattern
+ * silently becomes "space or t" and matches the wrong things. GCC's own build
+ * counts parentheses with gsub(/[ \t]+/, " ", s) and lost 38 macro definitions
+ * to this. Translate the escapes awk defines, and pass everything else through
+ * untouched so \. and \* still mean what they mean to the ERE. */
+static const char *awk_re(const char *pat) {
+    static char buf[4096];
+    size_t o = 0;
+    for (const char *q = pat; *q && o + 2 < sizeof buf; q++) {
+        if (*q != '\\' || !q[1]) { buf[o++] = *q; continue; }
+        switch (q[1]) {
+            case 't': buf[o++] = '\t'; q++; break;
+            case 'n': buf[o++] = '\n'; q++; break;
+            case 'r': buf[o++] = '\r'; q++; break;
+            case 'f': buf[o++] = '\f'; q++; break;
+            case 'v': buf[o++] = '\v'; q++; break;
+            case 'a': buf[o++] = '\a'; q++; break;
+            case '/': buf[o++] = '/';  q++; break;
+            default:  buf[o++] = *q; buf[o++] = q[1]; q++; break;
+        }
+    }
+    buf[o] = 0;
+    return buf;
+}
+
 static void split_fields(void) {
     for (int i = 1; i <= NF; i++) { free(fields[i]); fields[i] = NULL; }
     NF = 0; char *s = g_line;
@@ -250,7 +276,7 @@ static void split_fields(void) {
          * aarch64 tune table this way and stopped because the table came out
          * empty; that is how this was found. */
         regex_t fre;
-        if (regcomp(&fre, FS_, REG_EXTENDED)) {
+        if (regcomp(&fre, awk_re(FS_), REG_EXTENDED)) {
             char fc = FS_[0]; char *st = s;
             for (;; s++) { if (*s == fc || *s == 0) { int l = s - st; fields[++NF] = malloc(l + 1); memcpy(fields[NF], st, l); fields[NF][l] = 0; if (!*s) break; st = s + 1; } }
             return;
@@ -302,7 +328,7 @@ static void set_var(const char *name, Val v) {
     Val *slot = map_get(&globals, name); free(slot->str); *slot = v.isnum ? vnum(v.num) : vstr(v.str);
 }
 
-static int rx_match(const char *s, const char *pat) { regex_t re; if (regcomp(&re, pat, REG_EXTENDED)) return 0; int r = regexec(&re, s, 0, NULL, 0) == 0; regfree(&re); return r; }
+static int rx_match(const char *s, const char *pat) { regex_t re; if (regcomp(&re, awk_re(pat), REG_EXTENDED)) return 0; int r = regexec(&re, s, 0, NULL, 0) == 0; regfree(&re); return r; }
 
 static Val call_builtin(Node *n) {
     char b1[64], b2[64];
@@ -323,10 +349,10 @@ static Val call_builtin(Node *n) {
     if (!strcmp(name,"rand")) return vnum((double)rand() / ((double)RAND_MAX + 1));
     if (!strcmp(name,"srand")) { srand(n->nlist ? (unsigned)to_num(ARG(0)) : (unsigned)time(NULL)); return vnum(0); }
     if (!strcmp(name,"system")) { Val a = ARG(0); return vnum(system(to_str(a, b1))); }
-    if (!strcmp(name,"match")) { Val a = ARG(0), b = ARG(1); regex_t re; regmatch_t m; if (regcomp(&re, to_str(b, b2), REG_EXTENDED)) return vnum(0); int r = regexec(&re, to_str(a, b1), 1, &m, 0); regfree(&re); if (r) { set_var("RSTART", vnum(0)); set_var("RLENGTH", vnum(-1)); return vnum(0); } set_var("RSTART", vnum(m.rm_so + 1)); set_var("RLENGTH", vnum(m.rm_eo - m.rm_so)); return vnum(m.rm_so + 1); }
+    if (!strcmp(name,"match")) { Val a = ARG(0), b = ARG(1); regex_t re; regmatch_t m; if (regcomp(&re, awk_re(to_str(b, b2)), REG_EXTENDED)) return vnum(0); int r = regexec(&re, to_str(a, b1), 1, &m, 0); regfree(&re); if (r) { set_var("RSTART", vnum(0)); set_var("RLENGTH", vnum(-1)); return vnum(0); } set_var("RSTART", vnum(m.rm_so + 1)); set_var("RLENGTH", vnum(m.rm_eo - m.rm_so)); return vnum(m.rm_so + 1); }
     if (!strcmp(name,"sprintf")) { char out[8192]; char fmt[1024]; Val f = ARG(0); snprintf(fmt, sizeof fmt, "%s", to_str(f, b1)); int oi = 0, ai = 1; for (char *p = fmt; *p; ) { if (*p != '%') { out[oi++] = *p++; continue; } char spec[64]; int si = 0; spec[si++] = *p++; while (*p && !strchr("diouxXeEfgGcs%", *p)) spec[si++] = *p++; if (*p) spec[si++] = *p; spec[si] = 0; char conv = *p ? *p++ : 's'; if (conv == '%') { out[oi++] = '%'; continue; } Val a = ai < n->nlist ? eval(n->list[ai++]) : vstr(""); if (conv == 's') oi += sprintf(out + oi, spec, to_str(a, b2)); else if (conv == 'c') { char cc[2]; const char *sv = a.isnum ? NULL : a.str; cc[0] = a.isnum ? (char)(long)a.num : (sv ? sv[0] : 0); cc[1] = 0; strcpy(spec + si - 1, "s"); oi += sprintf(out + oi, spec, cc); } else if (strchr("diouxX", conv)) oi += sprintf(out + oi, spec, (long)to_num(a)); else oi += sprintf(out + oi, spec, to_num(a)); } out[oi] = 0; return vstr(out); }
     if (!strcmp(name,"split")) { Val s = ARG(0); const char *str = strdup(to_str(s, b1)); const char *an = n->list[1]->kind == N_VAR ? n->list[1]->str : "SPLIT"; Map *arr = get_array(an); for (int i = 0; i < HN; i++) { while (arr->b[i]) { Ent *e = arr->b[i]; arr->b[i] = e->next; free(e->key); free(e); } } char sep = n->nlist > 2 ? (n->list[2]->kind==N_ERE ? n->list[2]->str[0] : to_str(eval(n->list[2]), b2)[0]) : (FS_[0] == ' ' ? ' ' : FS_[0]); int cnt = 0; char *cp = strdup(str), *tok, key[32]; if (sep == ' ') { tok = strtok(cp, " \t\n"); while (tok) { sprintf(key, "%d", ++cnt); *map_get(arr, key) = vstr(tok); tok = strtok(NULL, " \t\n"); } } else { char *st = cp; for (char *q = cp;; q++) { if (*q == sep || *q == 0) { char sc = *q; *q = 0; sprintf(key, "%d", ++cnt); *map_get(arr, key) = vstr(st); if (!sc) break; st = q + 1; *q = sep; } } } free(cp); free((void*)str); return vnum(cnt); }
-    if (!strcmp(name,"sub") || !strcmp(name,"gsub")) { int global = name[0]=='g'; const char *pat = n->list[0]->kind==N_ERE ? n->list[0]->str : to_str(eval(n->list[0]), b1); Val rv = eval(n->list[1]); char rep[1024]; snprintf(rep, sizeof rep, "%s", to_str(rv, b2)); Node *tgt = n->nlist > 2 ? n->list[2] : NULL; const char *cur_s = tgt ? (tgt->kind==N_FIELD ? get_field((int)to_num(eval(tgt->a))) : to_str(get_var(tgt->str), b1)) : g_line; char work[8192]; snprintf(work, sizeof work, "%s", cur_s ? cur_s : ""); regex_t re; if (regcomp(&re, pat, REG_EXTENDED)) return vnum(0); char out[8192]; int oi = 0, cnt = 0; char *p = work; regmatch_t m; while (regexec(&re, p, 1, &m, p==work?0:REG_NOTBOL) == 0) { memcpy(out + oi, p, m.rm_so); oi += m.rm_so; for (char *r = rep; *r; r++) { if (*r == '&') { memcpy(out+oi, p+m.rm_so, m.rm_eo-m.rm_so); oi += m.rm_eo-m.rm_so; } else if (*r=='\\'&&r[1]=='&'){out[oi++]='&';r++;} else out[oi++] = *r; } cnt++; if (m.rm_eo == m.rm_so) { if (p[m.rm_eo]) out[oi++] = p[m.rm_eo]; p += m.rm_eo + 1; } else p += m.rm_eo; if (!global) break; } strcpy(out + oi, p); regfree(&re); if (cnt) { if (tgt) { if (tgt->kind==N_FIELD) set_field((int)to_num(eval(tgt->a)), out); else set_var(tgt->str, vstr(out)); } else set_line(out); } return vnum(cnt); }
+    if (!strcmp(name,"sub") || !strcmp(name,"gsub")) { int global = name[0]=='g'; const char *pat = n->list[0]->kind==N_ERE ? n->list[0]->str : to_str(eval(n->list[0]), b1); Val rv = eval(n->list[1]); char rep[1024]; snprintf(rep, sizeof rep, "%s", to_str(rv, b2)); Node *tgt = n->nlist > 2 ? n->list[2] : NULL; const char *cur_s = tgt ? (tgt->kind==N_FIELD ? get_field((int)to_num(eval(tgt->a))) : to_str(get_var(tgt->str), b1)) : g_line; char work[8192]; snprintf(work, sizeof work, "%s", cur_s ? cur_s : ""); regex_t re; if (regcomp(&re, awk_re(pat), REG_EXTENDED)) return vnum(0); char out[8192]; int oi = 0, cnt = 0; char *p = work; regmatch_t m; while (regexec(&re, p, 1, &m, p==work?0:REG_NOTBOL) == 0) { memcpy(out + oi, p, m.rm_so); oi += m.rm_so; for (char *r = rep; *r; r++) { if (*r == '&') { memcpy(out+oi, p+m.rm_so, m.rm_eo-m.rm_so); oi += m.rm_eo-m.rm_so; } else if (*r=='\\'&&r[1]=='&'){out[oi++]='&';r++;} else out[oi++] = *r; } cnt++; if (m.rm_eo == m.rm_so) { if (p[m.rm_eo]) out[oi++] = p[m.rm_eo]; p += m.rm_eo + 1; } else p += m.rm_eo; if (!global) break; } strcpy(out + oi, p); regfree(&re); if (cnt) { if (tgt) { if (tgt->kind==N_FIELD) set_field((int)to_num(eval(tgt->a)), out); else set_var(tgt->str, vstr(out)); } else set_line(out); } return vnum(cnt); }
     return vstr("");
     #undef ARG
 }

@@ -161,6 +161,16 @@ if [ -x "$T/vawk" ] && command -v awk >/dev/null 2>&1; then
     theirs=$(awk -F'[(, ]+' -f "$T/cores.awk" "$T/cores.def" 2>&1)
     if [ "$ours" = "$theirs" ]; then ok "vawk matches awk on a regex field separator"
     else bad "vawk -F regex: got '$ours', awk gives '$theirs'"; fi
+    # An awk regex literal carries C-style escapes, and POSIX EREs do not:
+    # /[ \t]+/ has to become space-or-tab before regcomp sees it, or it means
+    # space-or-the-letter-t. GCC counts parentheses with exactly this and lost
+    # 38 macro definitions, which surfaced as "'BINOP' was not declared".
+    printf 'BEGIN { s = "a  b\tc"; n = gsub(/[ \t]+/, " ", s); print n, s }\n' > "$T/esc.awk"
+    o=$("$T/vawk" -f "$T/esc.awk" </dev/null 2>&1)
+    g=$(awk -f "$T/esc.awk" </dev/null 2>&1)
+    if [ "$o" = "$g" ]; then ok "vawk understands \\t inside a regex literal"
+    else bad "vawk regex escapes: got '$o', awk gives '$g'"; fi
+
     for fs in ':' '[0-9]+' '::' ' '; do
         o=$(printf 'a1b22c:d::e f\n' | "$T/vawk" -F"$fs" '{print NF ":" $2}' 2>&1)
         g=$(printf 'a1b22c:d::e f\n' | awk -F"$fs" '{print NF ":" $2}' 2>&1)
