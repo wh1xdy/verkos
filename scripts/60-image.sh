@@ -62,6 +62,9 @@ trim_rootfs() {
     $SUDO rm -f  "$ROOTFS"/usr/lib/libpython3*.so* \
                  "$ROOTFS"/usr/bin/{python3,python3.*,python3-config,python3.*-config} \
                  "$ROOTFS"/usr/bin/{pip3,pip3.*,meson,ninja,wheel,idle3,idle3.*,2to3,2to3-*,pydoc3,pydoc3.*}
+    # cmake is build tooling too — it exists only so json-c can be built.
+    $SUDO rm -rf "$ROOTFS"/usr/share/cmake-* "$ROOTFS"/usr/share/aclocal/cmake*
+    $SUDO rm -f  "$ROOTFS"/usr/bin/{cmake,ctest,cpack,ccmake,cmake-gui}
 
     # Strip debug info. The LFS recipe: never touch the dynamic loader, keep
     # symbols in libraries and modules, take everything from executables.

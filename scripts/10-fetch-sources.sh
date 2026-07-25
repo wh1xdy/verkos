@@ -53,6 +53,11 @@ fetch_one "nano-${NANO_VERSION}.tar.xz"               "$NANO_SHA256"
 # so no pinned hash; it's a cert store, not built source.
 fetch_one "cacert.pem"                                ""
 fetch_one "e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"      "$E2FSPROGS_SHA256"
+fetch_one "cmake-${CMAKE_VERSION}.tar.gz"               "$CMAKE_SHA256"
+fetch_one "popt-${POPT_VERSION}.tar.gz"                "$POPT_SHA256"
+fetch_one "json-c-${JSONC_VERSION}.tar.gz"             "$JSONC_SHA256"
+fetch_one "LVM2.${LVM2_VERSION}.tgz"                   "$LVM2_SHA256"
+fetch_one "cryptsetup-${CRYPTSETUP_VERSION}.tar.xz"    "$CRYPTSETUP_SHA256"
 fetch_one "util-linux-${UTIL_LINUX_VERSION}.tar.xz"   "$UTIL_LINUX_SHA256"
 fetch_one "dbus-${DBUS_VERSION}.tar.xz"               "$DBUS_SHA256"
 

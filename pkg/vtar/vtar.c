@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <time.h>
 
 static int verbose, gz;
@@ -63,8 +64,20 @@ static void add_path(FILE *o, const char *path) {
 /* ---- extract / list ----------------------------------------------------- */
 static long from_octal(const char *p, int n) { long v = 0; for (int i = 0; i < n && p[i]; i++) { if (p[i] < '0' || p[i] > '7') continue; v = v * 8 + (p[i] - '0'); } return v; }
 /* Returns how many entries were handled, or -1 if this was not a tar archive. */
+static int header_ok(const unsigned char *h) {
+    long want = from_octal((const char *)h + 148, 8);
+    long sum = 0, ssum = 0;
+    for (int i = 0; i < 512; i++) {
+        int c = (i >= 148 && i < 156) ? ' ' : h[i];      /* the field reads as spaces */
+        sum += c;
+        ssum += (i >= 148 && i < 156) ? ' ' : (signed char)h[i];
+    }
+    return sum == want || ssum == want;                  /* some old writers signed it */
+}
+
 static int do_extract(FILE *in, int listonly) {
     char h[512];
+    char pending[4096] = "";      /* a long name announced by the previous header */
     int count = 0, first = 1;
     for (;;) {
         size_t got = fread(h, 1, 512, in);
@@ -78,19 +91,80 @@ static int do_extract(FILE *in, int listonly) {
         }
         int zero = 1; for (int i = 0; i < 512; i++) if (h[i]) { zero = 0; break; }
         if (zero) break;
-        /* A ustar archive says so at offset 257. Without this check, handing
-         * tar something that is not a tar — a still-compressed file, say —
-         * reads compressed bytes as headers, extracts nothing, and exits 0.
-         * A silent success is worse than any error message. */
-        if (first && memcmp(h + 257, "ustar", 5)) {
-            fprintf(stderr, "tar: not a tar archive (no ustar signature)\n");
+        /* Tell a header from garbage. The ustar magic at 257 is NOT the way:
+         * archives written in the old pre-POSIX format have zeros there and are
+         * perfectly valid — popt still ships one. Every format back to V7 has
+         * an octal checksum at 148, computed over the header with that field
+         * read as spaces, so check that instead. Without some check, handing
+         * tar a file that is not a tar reads its bytes as headers, extracts
+         * nothing, and exits 0. */
+        if (!header_ok(h)) {
+            fprintf(stderr, "tar: %s (bad header checksum)\n",
+                    first ? "not a tar archive" : "archive is corrupt");
             return -1;
         }
         first = 0;
         count++;
-        char name[256]; snprintf(name, sizeof name, "%.100s", h);
+        char type_c = h[156];
+        long esize = from_octal(h + 124, 12);
+
+        /* A tar header holds 100 bytes of name. Longer paths are carried three
+         * different ways, and ignoring them does not merely lose files: the
+         * next header still has a truncated name, so the contents land at the
+         * wrong path. Extracting cmake this way silently lost 465 files and
+         * wrote others over each other. */
+        if (type_c == 'x' || type_c == 'g') {         /* pax extended header */
+            char rec[8192];
+            long want = esize < (long)sizeof rec - 1 ? esize : (long)sizeof rec - 1;
+            long got = (long)fread(rec, 1, (size_t)want, in);
+            rec[got > 0 ? got : 0] = 0;
+            for (long skip = esize - got; skip > 0; skip--) fgetc(in);
+            for (long pad = (512 - (esize % 512)) % 512; pad > 0; pad--) fgetc(in);
+            /* records are "<len> key=value\n"; only the path matters here */
+            for (char *r = rec; r < rec + got; ) {
+                char *sp = strchr(r, ' ');
+                if (!sp) break;
+                long rlen = strtol(r, NULL, 10);
+                if (rlen <= 0 || r + rlen > rec + got) break;
+                if (!strncmp(sp + 1, "path=", 5)) {
+                    long vlen = rlen - (sp + 6 - r) - 1;
+                    if (vlen > 0 && vlen < (long)sizeof pending) {
+                        memcpy(pending, sp + 6, (size_t)vlen);
+                        pending[vlen] = 0;
+                    }
+                }
+                r += rlen;
+            }
+            continue;
+        }
+        if (type_c == 'L' || type_c == 'K') {          /* GNU long name/linkname */
+            char buf2[4096];
+            long want = esize < (long)sizeof buf2 - 1 ? esize : (long)sizeof buf2 - 1;
+            long got = (long)fread(buf2, 1, (size_t)want, in);
+            buf2[got > 0 ? got : 0] = 0;
+            for (long skip = esize - got; skip > 0; skip--) fgetc(in);
+            for (long pad = (512 - (esize % 512)) % 512; pad > 0; pad--) fgetc(in);
+            if (type_c == 'L') snprintf(pending, sizeof pending, "%s", buf2);
+            continue;
+        }
+
+        char name[512];
+        if (pending[0]) { snprintf(name, sizeof name, "%s", pending); pending[0] = 0; }
+        else if (!memcmp(h + 257, "ustar", 5) && h[345]) {
+            /* POSIX ustar splits a long path into a prefix and the name. */
+            char pre[156];
+            snprintf(pre, sizeof pre, "%.155s", h + 345);
+            snprintf(name, sizeof name, "%s/%.100s", pre, h);
+        }
+        else snprintf(name, sizeof name, "%.100s", h);
         long size = from_octal(h + 124, 12);
         long mode = from_octal(h + 100, 8);
+        /* Restoring the archived modification time is not cosmetic: make and
+         * the autotools decide what to rebuild by comparing timestamps, so an
+         * extraction that stamps everything "now" makes a source tree look
+         * newer than its own generated files and triggers a regeneration that
+         * needs tools the system does not have. */
+        long mtime = from_octal(h + 136, 12);
         char type = h[156];
         if (listonly) { printf("%s\n", name); }
         if (type == '5' || (name[0] && name[strlen(name)-1] == '/')) {
@@ -100,7 +174,16 @@ static int do_extract(FILE *in, int listonly) {
             if (!listonly) { for (char *s = strchr(name, '/'); s; s = strchr(s + 1, '/')) { *s = 0; mkdir(name, 0755); *s = '/'; } of = fopen(name, "wb"); if (verbose) fprintf(stderr, "%s\n", name); }
             long rem = size; char buf[512];
             while (rem > 0) { if (fread(buf, 1, 512, in) != 512) break; long w = rem < 512 ? rem : 512; if (of) fwrite(buf, 1, w, of); rem -= 512; }
-            if (of) { fclose(of); chmod(name, mode & 07777); }
+            if (of) {
+                fclose(of);
+                chmod(name, mode & 07777);
+                if (mtime) {
+                    struct timespec ts[2];
+                    ts[0].tv_sec = mtime; ts[0].tv_nsec = 0;
+                    ts[1].tv_sec = mtime; ts[1].tv_nsec = 0;
+                    utimensat(AT_FDCWD, name, ts, 0);
+                }
+            }
         }
     }
     return count;

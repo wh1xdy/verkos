@@ -44,6 +44,14 @@ build_kernel() {
     ./scripts/config --enable DRM --enable DRM_KMS_HELPER --enable DRM_VIRTIO_GPU \
                      --enable DRM_FBDEV_EMULATION --enable FB --enable FRAMEBUFFER_CONSOLE \
                      --enable INPUT --enable INPUT_EVDEV --enable VIRTIO_INPUT
+    # Root on LUKS: the device mapper and its crypto target have to be in the
+    # kernel image, not modules. A module would have to be loaded from inside
+    # the initramfs before the root filesystem can be opened, which means
+    # carrying the modules and a loader in there for no benefit.
+    ./scripts/config --enable BLK_DEV_DM --enable DM_CRYPT \
+                     --enable CRYPTO_XTS --enable CRYPTO_AES \
+                     --enable CRYPTO_SHA256 --enable CRYPTO_SHA512 \
+                     --enable CRYPTO_USER_API_SKCIPHER --enable CRYPTO_USER_API_HASH
     make olddefconfig
 
     make -j"$JOBS"

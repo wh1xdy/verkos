@@ -204,6 +204,43 @@ if [ -x "$T/vtar" ]; then
         then ok "vtar extracts $a (compression detected from the file)"
         else bad "vtar could not extract $a"; fi
     done
+    # Archives older than POSIX have no ustar magic and are still valid — popt
+    # still ships one, and requiring the magic rejected it. The header checksum
+    # is the portable test, so make sure an old-format archive still works.
+    if tar --format=v7 -cf "$T/v7.tar" -C "$T" tsrc 2>/dev/null; then
+        rm -rf "$T/v7out"; mkdir -p "$T/v7out"
+        if ( cd "$T/v7out" && "$T/vtar" -xf "$T/v7.tar" ) 2>/dev/null &&
+           cmp -s "$T/v7out/tsrc/a.txt" "$T/tsrc/a.txt"
+        then ok "vtar extracts a pre-POSIX (v7) archive"
+        else bad "vtar cannot read an old-format tar"; fi
+    fi
+
+    # Timestamps are not cosmetic: make and the autotools decide what to rebuild
+    # by comparing them, so stamping everything "now" made an extracted source
+    # tree look newer than its own generated files and triggered a regeneration
+    # needing tools that are not installed.
+    touch -d "2020-01-02 03:04:05" "$T/tsrc/a.txt"
+    ( cd "$T" && tar -cf stamp.tar tsrc ) 2>/dev/null
+    rm -rf "$T/stampout"; mkdir -p "$T/stampout"
+    ( cd "$T/stampout" && "$T/vtar" -xf "$T/stamp.tar" ) 2>/dev/null
+    check "vtar restores the archived modification time" \
+          "[ \"\$(stat -c%Y '$T/stampout/tsrc/a.txt' 2>/dev/null)\" = \"\$(stat -c%Y '$T/tsrc/a.txt')\" ]"
+
+    # A tar header holds 100 bytes of name; longer paths are carried in a pax
+    # header, a GNU LongLink entry, or the ustar prefix field. Handling none of
+    # them did not merely lose files — the following header still had a
+    # truncated name, so contents landed at the wrong path. Extracting cmake
+    # this way lost 465 files and overwrote others.
+    deep="$T/tsrc/a_directory_with_quite_a_long_name/and_another_level_that_is_also_long"
+    mkdir -p "$deep"
+    echo deepfile > "$deep/a_file_whose_full_path_comfortably_exceeds_one_hundred_characters.txt"
+    ( cd "$T" && tar -cf long.tar tsrc ) 2>/dev/null
+    rm -rf "$T/longout"; mkdir -p "$T/longout"
+    ( cd "$T/longout" && "$T/vtar" -xf "$T/long.tar" ) 2>/dev/null
+    check "vtar keeps paths longer than 100 characters" \
+          "cmp -s '$T/longout/tsrc/a_directory_with_quite_a_long_name/and_another_level_that_is_also_long/a_file_whose_full_path_comfortably_exceeds_one_hundred_characters.txt' \
+                  '$deep/a_file_whose_full_path_comfortably_exceeds_one_hundred_characters.txt'"
+
     # The important half: never succeed having done nothing.
     echo "definitely not a tar archive" > "$T/notatar"
     head -c 4096 /dev/urandom > "$T/rand.bin"

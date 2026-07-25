@@ -387,6 +387,63 @@ cd /sources
 mark e2fsprogs
 fi
 
+# 5c. LUKS support: popt, json-c, libdevmapper and cryptsetup. Only needed so
+# the installer can create an encrypted root and urverk can open it at boot.
+if need popt; then
+say "popt ${POPT_VERSION}"
+d=$(unpack popt-${POPT_VERSION}.tar.gz); cd "$d"
+./configure --prefix=/usr --disable-static
+make; make install
+ldconfig; cd /sources; mark popt
+fi
+
+# cmake is build tooling, like meson/ninja/python: json-c has been cmake-only
+# since 0.14, and json-c is what cryptsetup parses LUKS2 headers with. Stage 60
+# deletes it from the image again.
+if need cmake; then
+say "cmake ${CMAKE_VERSION} (build tooling for json-c)"
+d=$(unpack cmake-${CMAKE_VERSION}.tar.gz); cd "$d"
+./bootstrap --prefix=/usr --parallel=$(nproc 2>/dev/null || echo 2) --no-qt-gui
+make; make install
+cd /sources; mark cmake
+fi
+
+if need json-c; then
+say "json-c ${JSONC_VERSION}"
+d=$(unpack json-c-${JSONC_VERSION}.tar.gz); cd "$d"
+mkdir -p build; cd build
+# json-c is cmake-only; configure by hand is not an option, so use the cmake
+# we have if there is one, and fall back to the plain autotools files it ships.
+cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+      -DBUILD_STATIC_LIBS=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release ..
+make; make install
+ldconfig; cd /sources; mark json-c
+fi
+
+# Only libdevmapper is wanted here, not LVM itself: cryptsetup talks to the
+# kernel's device mapper through it, and nothing in VerkOS uses logical volumes.
+if need libdevmapper; then
+say "libdevmapper (from LVM2 ${LVM2_VERSION})"
+d=$(unpack LVM2.${LVM2_VERSION}.tgz); cd "$d"
+./configure --prefix=/usr --enable-pkgconfig --disable-selinux \
+    --disable-udev_sync --with-udev-prefix=/usr --disable-nls || \
+    ./configure --prefix=/usr --enable-pkgconfig --disable-selinux --disable-udev_sync
+make device-mapper
+make install_device-mapper
+ldconfig; cd /sources; mark libdevmapper
+fi
+
+if need cryptsetup; then
+say "cryptsetup ${CRYPTSETUP_VERSION}"
+d=$(unpack cryptsetup-${CRYPTSETUP_VERSION}.tar.xz); cd "$d"
+# OpenSSL is already built and is the crypto backend; the extra tools are not
+# wanted, and neither is the systemd integration that no longer exists here.
+./configure --prefix=/usr --disable-ssh-token --disable-asciidoc \
+    --with-crypto_backend=openssl --disable-static
+make; make install
+ldconfig; cd /sources; mark cryptsetup
+fi
+
 # 6-7b. zlib, xz, expat, libcap, gperf, libffi — link/build deps of the rest.
 # Stamped as a group: one-time builds that must NOT rebuild on a `make system`
 # re-run (kmod's libtool chokes re-linking over a dirty tree, and the re-run's
@@ -1079,6 +1136,8 @@ reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
 reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
 reg vlogin 0.1;                    reg linux-pam "$LINUXPAM_VERSION"
 reg e2fsprogs "$E2FSPROGS_VERSION"
+reg cryptsetup "$CRYPTSETUP_VERSION"; reg popt "$POPT_VERSION"
+reg json-c "$JSONC_VERSION";          reg lvm2 "$LVM2_VERSION"
 reg dbus "$DBUS_VERSION";          reg urverk 0.1
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 

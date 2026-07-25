@@ -119,6 +119,11 @@ source_url() {
         dbus-*)       echo "$URL_DBUS/$pkg" ;;
         util-linux-*) echo "$URL_UTILLINUX/v${UTIL_LINUX_VERSION%.*}/$pkg" ;;
         e2fsprogs-*)  echo "$URL_E2FSPROGS/v${E2FSPROGS_VERSION}/$pkg" ;;
+        cmake-*)      echo "$URL_CMAKE/v${CMAKE_VERSION}/$pkg" ;;
+        popt-*)       echo "$URL_POPT/$pkg" ;;
+        json-c-*)     echo "$URL_JSONC/$pkg" ;;
+        LVM2.*)       echo "$URL_LVM2/$pkg" ;;
+        cryptsetup-*) echo "$URL_CRYPTSETUP/v${CRYPTSETUP_VERSION%.*}/$pkg" ;;
         libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
         expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;
         zlib-*)       echo "$URL_ZLIB/$pkg" ;;
