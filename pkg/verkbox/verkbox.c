@@ -2400,6 +2400,48 @@ static int a_touch(int argc, char **argv)
  * equal to the previous line; a final line lacking a newline still counts and
  * every output line is newline-terminated. */
 static int sort_nflag, sort_rflag, sort_fflag, sort_bflag;
+/* -t SEP and -k N[,M] select which part of the line is compared. Without them
+ * "sort -nt_ -k5" is rejected outright, and LVM2 builds its linker version
+ * script with exactly that: the command failed, the loop around it ran zero
+ * times, and .export.sym came out empty — which ld reports as "syntax error in
+ * VERSION script" at line 0. */
+static int sort_tsep = -1;              /* -1: whitespace-separated fields */
+static int sort_kstart, sort_kend;      /* 1-based; 0 means "not given" */
+
+/* Copy the -k range of <line> into <buf>. With -t, fields are separated by that
+ * character exactly; without it, by runs of blanks, as sort specifies. */
+static const char *sort_key(const char *line, char *buf, size_t cap) {
+    if (!sort_kstart) return line;
+    const char *p = line;
+    int field = 1;
+    const char *start = NULL, *end = NULL;
+    while (*p || field <= sort_kend) {
+        const char *fs, *fe;
+        if (sort_tsep >= 0) {
+            fs = p;
+            while (*p && *p != (char)sort_tsep) p++;
+            fe = p;
+            if (*p) p++;
+        } else {
+            while (*p == ' ' || *p == '\t') p++;
+            fs = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            fe = p;
+        }
+        if (field == sort_kstart) start = fs;
+        if (field == (sort_kend ? sort_kend : sort_kstart)) { end = fe; break; }
+        if (!*p && !*fs) break;
+        field++;
+        if (!*p && fe == fs) break;
+    }
+    if (!start) return "";
+    if (!end || end < start) end = start + strlen(start);
+    size_t n = (size_t)(end - start);
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, start, n);
+    buf[n] = 0;
+    return buf;
+}
 
 /* true if the numeric prefix at p has zero magnitude ("0", "0.0", "", "abc"...) */
 static int sort_iszero(const char *p) {
@@ -2463,7 +2505,8 @@ static int sort_foldcmp(const char *a, const char *b) {
 
 /* key comparison honouring -n/-f/-b; no last-resort, no reverse */
 static int sort_keycmp(const char *a, const char *b) {
-    const char *pa = a, *pb = b;
+    char ka[1024], kb[1024];
+    const char *pa = sort_key(a, ka, sizeof ka), *pb = sort_key(b, kb, sizeof kb);
     if (sort_bflag) {
         while (*pa == ' ' || *pa == '\t') pa++;
         while (*pb == ' ' || *pb == '\t') pb++;
@@ -2503,6 +2546,7 @@ static char *sort_readline(FILE *fp) {
 
 static int a_sort(int argc, char **argv) {
     sort_nflag = sort_rflag = sort_fflag = sort_bflag = 0;
+    sort_tsep = -1; sort_kstart = sort_kend = 0;
     /* -c/-C check whether the input is already ordered instead of sorting it.
      * libtool uses "ar t LIB | sort | sort -uc" to detect duplicate object
      * names; without -c that pipeline always failed, and libtool reported
@@ -2525,6 +2569,25 @@ static int a_sort(int argc, char **argv) {
                     case 'f': sort_fflag = 1; break;
                     case 'b': sort_bflag = 1; break;
                     case 'c': cflag = 1; break;
+                    case 't':
+                        if (p[1]) { sort_tsep = (unsigned char)p[1]; p++; }
+                        else if (i + 1 < argc) sort_tsep = (unsigned char)argv[++i][0];
+                        break;
+                    case 'k': {
+                        const char *v = p[1] ? p + 1 : (i + 1 < argc ? argv[++i] : "");
+                        sort_kstart = atoi(v);
+                        const char *comma = strchr(v, ',');
+                        sort_kend = comma ? atoi(comma + 1) : 0;
+                        /* per-key modifiers, e.g. -k5n */
+                        for (const char *m = v; *m; m++) {
+                            if (*m == 'n') sort_nflag = 1;
+                            else if (*m == 'r') sort_rflag = 1;
+                            else if (*m == 'f') sort_fflag = 1;
+                            else if (*m == 'b') sort_bflag = 1;
+                        }
+                        while (p[1]) p++;      /* the value consumed the rest */
+                        break;
+                    }
                     case 'C': cflag = 1; quiet_check = 1; break;
                     default:
                         fprintf(stderr, "sort: invalid option -- '%c'\n", *p);

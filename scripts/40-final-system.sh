@@ -216,7 +216,7 @@ say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 # path used to work only because every package block ended with `cd /sources`;
 # the first block after a run of already-built (skipped) ones inherited whatever
 # directory the script started in, and its `cd "$d"` failed.
-unpack(){ cd /sources; tar -xf "$1"; echo "/sources/${1%.tar.*}"; }
+unpack(){ cd /sources; tar -xf "$1"; local d="${1%.tar.*}"; d="${d%.tgz}"; echo "/sources/$d"; }
 
 # 1. glibc — SKIPPED. The cross-toolchain (stage 20) already installed a working
 # glibc ${GLIBC_VERSION} into the rootfs from the same source. A native rebuild

@@ -162,6 +162,21 @@ if [ -x "$T/verkbox" ]; then
           "! printf 'b\na\n' | '$T/verkbox' sort -c 2>/dev/null"
     check "sort -c accepts a duplicate when -u is not given" \
           "printf 'a\na\n' | '$T/verkbox' sort -c"
+    # LVM2 orders its symbol-version files with "sort -nt_ -k5". Without -t and
+    # -k the command was rejected outright, the loop around it ran zero times,
+    # and the linker version script came out empty — reported by ld as a syntax
+    # error on line 0 of a file nobody had looked at.
+    printf '.sym.DM_1_02_100\n.sym.DM_1_02_97\n.sym.Base\n.sym.DM_1_02_9\n' > "$T/keys.txt"
+    if command -v sort >/dev/null 2>&1; then
+        o=$("$T/verkbox" sort -nt. -k4 "$T/keys.txt" 2>&1)
+        g=$(sort -nt. -k4 "$T/keys.txt" 2>&1)
+        if [ "$o" = "$g" ]; then ok "sort -t/-k matches GNU sort"
+        else bad "sort -t/-k: got '$o', sort gives '$g'"; fi
+        printf 'b:2\na:10\nc:1\n' > "$T/k2.txt"
+        o=$("$T/verkbox" sort -t: -k2 -n "$T/k2.txt" 2>&1); g=$(sort -t: -k2 -n "$T/k2.txt" 2>&1)
+        if [ "$o" = "$g" ]; then ok "sort -t: -k2 -n matches GNU sort"
+        else bad "sort -t: -k2 -n: got '$o', sort gives '$g'"; fi
+    fi
     check "sort still sorts" \
           "[ \"\$(printf 'c\na\nb\n' | '$T/verkbox' sort | tr -d '\n')\" = abc ]"
 fi
