@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <regex.h>
 #include <ctype.h>
@@ -301,6 +302,28 @@ static int next_line_append(struct str *into) {
 }
 
 /* returns: 0 normal cycle end, 1 quit(print done), 2 quit(no print) */
+/* w FILE — write the pattern space to a file. The file is truncated the first
+ * time it is used and stays open for the rest of the run, so later writes
+ * accumulate, which is what sed specifies. This was parsed and then silently
+ * discarded: sed exited 0 and the file never appeared. gnulib generates its
+ * replacement headers with "sed -n -e 'w $@-t'", so the build died on
+ * "mv: cannot stat 'lib/selinux/context.h-t'" with nothing to say why. */
+static struct { char *name; FILE *fp; } wfiles[32];
+static int nwfiles;
+static FILE *wfile(const char *name) {
+    for (int i = 0; i < nwfiles; i++)
+        if (!strcmp(wfiles[i].name, name)) return wfiles[i].fp;
+    if (nwfiles >= (int)(sizeof wfiles / sizeof *wfiles)) return NULL;
+    FILE *f;
+    if (!strcmp(name, "/dev/stdout")) f = stdout;
+    else if (!strcmp(name, "/dev/stderr")) f = stderr;
+    else f = fopen(name, "w");
+    if (!f) { fprintf(stderr, "sed: couldn't open file %s: %s\n", name, strerror(errno)); exit(4); }
+    wfiles[nwfiles].name = strdup(name);
+    wfiles[nwfiles].fp = f;
+    return wfiles[nwfiles++].fp;
+}
+
 static int run_line(FILE *o) {
     int pc = 0, autoprint = !nflag, deleted = 0;
 restart:
@@ -337,6 +360,9 @@ restart:
                       if (c->naddr < 2 || !c->in_range) { fwrite(c->text, 1, strlen(c->text), o); fputc('\n', o); }
                       goto endcycle;
             case 'r': queue_file(c->text); break;
+            case 'w': { FILE *wf = wfile(c->text);
+                        if (wf) { fwrite(PS.s, 1, PS.len, wf); fputc('\n', wf); fflush(wf); }
+                        break; }
             case 'b': pc = c->jump; goto restart;
             case 't': if (subst_since_t) { subst_since_t = 0; pc = c->jump; goto restart; } break;
             case 'T': if (!subst_since_t) { pc = c->jump; goto restart; } break;

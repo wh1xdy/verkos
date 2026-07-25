@@ -213,6 +213,20 @@ if [ -x "$T/vsed" ] && command -v sed >/dev/null 2>&1; then
     done
 fi
 
+say "vsed writes the files its scripts ask for"
+# gnulib generates its replacement headers with
+#   sed -e 1h -e '1s|...|' -e 1G -n -e 'w FILE-t' IN
+# vsed parsed the w command and then discarded it: exit 0, no file, and the
+# build died on "mv: cannot stat 'lib/selinux/context.h-t'".
+if [ -x "$T/vsed" ] && command -v sed >/dev/null 2>&1; then
+    printf 'line one\nline two\nline three\n' > "$T/win.txt"
+    rm -f "$T/w-ours.txt" "$T/w-gnu.txt"
+    "$T/vsed" -e 1h -e '1s|one|ONE|' -e 1G -n -e "w $T/w-ours.txt" "$T/win.txt" >/dev/null 2>&1
+    sed        -e 1h -e '1s|one|ONE|' -e 1G -n -e "w $T/w-gnu.txt"  "$T/win.txt" >/dev/null 2>&1
+    check "vsed w writes a file at all" "[ -s '$T/w-ours.txt' ]"
+    check "vsed w matches sed byte for byte" "cmp -s '$T/w-ours.txt' '$T/w-gnu.txt'"
+fi
+
 say "no tool reports success while doing nothing"
 # A sweep for the shape that has bitten this project repeatedly: the tool
 # notices the problem, prints about it, and exits 0 anyway. Every case below

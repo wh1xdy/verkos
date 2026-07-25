@@ -332,7 +332,12 @@ esac
 # attempt survive otherwise, and make considers them up to date — a run
 # after fixing the generator still compiles against the broken output.
 rm -rf build && mkdir build && cd build
-../configure --prefix=/usr LD=ld --enable-languages=c,c++ \
+# --with-stage1-ldflags=no: configure otherwise links gcc's own build tools
+# with -static-libstdc++, and the target libstdc++.a that came from the cross
+# toolchain is a stub — it has neither sized delete nor basic_string, so the
+# generators fail to link. Building them against the shared library works and
+# is what we want anyway, since this build replaces libstdc++ a moment later.
+../configure --prefix=/usr LD=ld --with-stage1-ldflags=no --enable-languages=c,c++ \
     --enable-default-pie --enable-default-ssp \
     --disable-multilib --disable-bootstrap --disable-fixincludes \
     --with-system-zlib
