@@ -26,11 +26,16 @@ say "compiles"
 for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcpio.c \
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
            pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
-           pkg/verkmod/verkmod.c; do
+           pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c; do
     name=$(basename "$src" .c)
     extra=""
     [ "$name" = vpk ] && extra="-lcurl -llzma -lz"
     [ "$name" = vawk ] && extra="-lm"      # fmod/pow/sqrt
+    [ "$name" = vlogin ] && extra="-lcrypt"
+    # vlogin needs libxcrypt (crypt_gensalt); skip where there is none
+    if [ "$name" = vlogin ] && ! echo "#include <crypt.h>" | $CC -E - >/dev/null 2>&1; then
+        printf '  \033[33mskip\033[0m  %s (no crypt.h here)\n' "$name"; continue
+    fi
     # urverk is Linux-only (mount, cgroups); skip it elsewhere rather than fail
     if [ "$name" = urverk ] && [ "$(uname -s)" != Linux ]; then
         printf '  \033[33mskip\033[0m  %s (needs Linux headers)\n' "$name"; continue

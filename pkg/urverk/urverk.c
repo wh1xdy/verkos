@@ -332,6 +332,16 @@ static void mount_system(void) {
         && errno != EBUSY && debug) warn_errno("mount /run");
     if (mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777")
         && errno != EBUSY && debug) warn_errno("mount /tmp");
+    /* /run is a fresh tmpfs every boot, so the session file has to be recreated
+     * here or `who` and `w` have nothing to read: login records the session but
+     * pututxline cannot create /run/utmp itself. /run/lock is the same story. */
+    mkdir("/run/lock", 01777);
+    int utmp_fd = open("/run/utmp", O_WRONLY | O_CREAT, 0664);
+    if (utmp_fd >= 0) {
+        struct group *utg = getgrnam("utmp");
+        if (utg) { if (fchown(utmp_fd, 0, utg->gr_gid)) { /* stays root:root */ } }
+        close(utmp_fd);
+    } else if (debug) warn_errno("create /run/utmp");
     /* cgroup v2, so services can be given memory and CPU limits */
     mkdir("/sys/fs/cgroup", 0755);
     if (mount("cgroup2", "/sys/fs/cgroup", "cgroup2", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL)

@@ -164,6 +164,7 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vpager/vpager.c" "$ROOTFS/sources/vpager.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/verkmod/verkmod.c" "$ROOTFS/sources/verkmod.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vlogin/vlogin.c"   "$ROOTFS/sources/vlogin.c"   2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
     sudo rm -rf "$ROOTFS/sources/urverk-services"
     sudo cp -a "$VERK_ROOT/pkg/urverk/services" "$ROOTFS/sources/urverk-services" 2>/dev/null || true
@@ -463,27 +464,33 @@ cd /sources
 mark libxcrypt
 fi
 
-# 8.6 shadow — /bin/login, passwd, useradd, /etc/shadow. util-linux's login was
-# disabled, so this is what makes the getty login prompt actually work.
-if need shadow; then
-say "shadow ${SHADOW_VERSION}"
-d=$(unpack shadow-${SHADOW_VERSION}.tar.xz); cd "$d"
-sed -i 's/groups$(EXEEXT) //' src/Makefile.in
-find man -name Makefile.in -exec sed -i 's/groups\.1 / /'   {} \;
-find man -name Makefile.in -exec sed -i 's/getspnam\.3 / /' {} \;
-find man -name Makefile.in -exec sed -i 's/passwd\.5 / /'   {} \;
-sed -e 's:#ENCRYPT_METHOD DES:ENCRYPT_METHOD YESCRYPT:' \
-    -e 's:/var/spool/mail:/var/mail:' -e '/PATH=/{s@/sbin:@@;s@/usr/sbin:@@}' \
-    -i etc/login.defs
-# --disable-logind: shadow enables logind support by default, which links
-# login/su/passwd against libsystemd. VerkOS' init is urverk, so drop it —
-# otherwise systemd cannot be removed without breaking the ability to log in.
-./configure --sysconfdir=/etc --disable-static \
-    --without-libbsd --with-{b,yes}crypt --without-selinux \
-    --without-libpam --disable-logind
-make; make exec_prefix=/usr install
+# 8.6 vlogin — our own login/su/passwd/useradd, replacing shadow entirely.
+# Built here rather than with the other VerkOS tools further down because the
+# root password is set later in this same script, and that needs pwconv and
+# chpasswd to already exist. Links libxcrypt (8.5) for the hashing itself.
+if need vlogin; then
+say "vlogin (VerkOS account tools: login/su/passwd/useradd/... replaces shadow)"
+gcc -O2 -o /usr/bin/vlogin /sources/vlogin.c -lcrypt
+# Names that only need to reach the binary. The account-management tools also
+# answer from /usr/sbin, where shadow put them and where scripts look for them.
+for t in login chpasswd useradd usermod userdel groupadd groupdel pwconv nologin; do
+    ln -sf vlogin "/usr/bin/$t"
+done
+for t in chpasswd useradd usermod userdel groupadd groupdel pwconv nologin; do
+    ln -sf ../bin/vlogin "/usr/sbin/$t"
+done
+# su and passwd are the exception: an ordinary user runs them but they must
+# read and write /etc/shadow, which is 0640 root-owned. A symlink cannot carry
+# the setuid bit, so these two are copies.
+for t in su passwd; do
+    cp /usr/bin/vlogin "/usr/bin/$t"
+    chown root:root "/usr/bin/$t"
+    chmod 4755 "/usr/bin/$t"
+done
+# /bin and /sbin are symlinks into /usr, so /bin/login (what vgetty execs) and
+# /sbin/nologin (a shell for accounts that must not be used) already resolve.
 cd /sources
-mark shadow
+mark vlogin
 fi
 
 # 8.7 Linux-PAM — pluggable authentication (systemd-logind + login use it).
@@ -931,11 +938,13 @@ PROF
 # Users/passwords: create /etc/shadow from /etc/passwd, then set a known root
 # password. DEV DEFAULT: root / "verkos" — CHANGE BEFORE ANY REAL USE.
 sed -i 's|^root::|root:x:|' /etc/passwd    # undo the earlier empty-password hack
-if command -v pwconv >/dev/null; then
-    pwconv
-    echo "root:verkos" | chpasswd
+if [ -x /usr/bin/vlogin ]; then
+    /usr/bin/vlogin pwconv
+    echo "root:verkos" | /usr/bin/vlogin chpasswd
 else
-    sed -i 's|^root:x:|root::|' /etc/passwd  # no shadow tools: fall back to empty
+    # Without an account tool there is no way to write a hash, and leaving
+    # root:x: with no shadow entry would lock the system out entirely.
+    sed -i 's|^root:x:|root::|' /etc/passwd
 fi
 
 # Serial-console autologin: drop straight to a root shell on boot (handy for dev
@@ -1010,7 +1019,7 @@ reg gperf "$GPERF_VERSION"
 reg pkgconf "$PKGCONF_VERSION";    reg libffi "$LIBFFI_VERSION"
 reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
 reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
-reg shadow "$SHADOW_VERSION";      reg linux-pam "$LINUXPAM_VERSION"
+reg vlogin 0.1;                    reg linux-pam "$LINUXPAM_VERSION"
 reg dbus "$DBUS_VERSION";          reg urverk 0.1
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
 

@@ -265,3 +265,49 @@ tree, a second copy of every `.ko`; indexing them doubled the index and resolved
 dependencies to the build tree. They are removed at install time and skipped by
 the walker. `scripts/test.sh` covers all of this against a fixture tree built
 from ordinary executables carrying a `.modinfo` section.
+
+## D-013 — Our own account tools: `vlogin` replaces shadow
+
+**Decision:** one multi-call binary (`pkg/vlogin/vlogin.c`) provides `login`,
+`su`, `passwd`, `chpasswd`, `useradd`, `usermod`, `userdel`, `groupadd`,
+`groupdel`, `pwconv` and `nologin`. shadow is no longer built or fetched.
+
+**Password hashing stays libxcrypt's, deliberately.** Everything else in VerkOS
+is ours, including the Ed25519 in vboot (D-011), but a hand-rolled password hash
+is a different bet: it is the one place where a subtle mistake is silent,
+permanent and only discovered by an attacker. `crypt_gensalt(NULL)` picks the
+strongest scheme libxcrypt supports (yescrypt) and `crypt()` verifies every
+scheme it knows, so hashes shadow already wrote keep working — verified by
+logging in as root with the password shadow's `chpasswd` had set, using a
+`$y$` hash it produced.
+
+**Reads go through libc** (`getpwnam`/`getspnam`/`getgrnam`) so nsswitch still
+applies; **writes** rewrite the file into a sibling temp file, fsync, and
+rename, under `lckpwdf()` — the same lock shadow takes. A crash mid-write
+cannot leave `/etc/shadow` truncated, which would lock everyone out.
+
+**`su` and `passwd` are setuid root; nothing else is.** They are the only tools
+an unprivileged user runs that must reach `/etc/shadow` (0640). This is exactly
+where the test suite earned its keep: with the binaries not yet setuid, `su`
+rejected the *correct* password, because as an ordinary user it could not read
+the hash at all. Privilege is dropped in the order that matters — `setgid`,
+then `initgroups`, then `setuid`, every return value checked — and then proved
+gone by asserting `setuid(0)` fails. Verified on a booted system: the shell su
+starts has both real and effective uid 1000, cannot become root without a
+password, cannot read `/etc/shadow`, cannot add or remove accounts, and cannot
+use `login -f` to skip authentication.
+
+**A new account is locked (`!`), never passwordless** — `useradd` writes a
+locked shadow entry, so an account that exists but has had no password set
+cannot be logged into.
+
+**Not carried over from shadow:** `chage`, `chfn`, `chsh`, `expiry`, `faillog`,
+`gpasswd`, `newgrp`, `sg`, `groupmod`, `groupmems`, `grpck`, `pwck`,
+`pwunconv`, `vipw`, `vigr`, `newusers`, `chgpasswd`, `logoutd`. They can come
+back if something needs them.
+
+**Known limitation:** a session's utmp entry is not marked dead when the session
+ends, so `last` reports "gone - no logout" for finished `login` sessions.
+`/run/utmp` is created by urverk at boot (it is a fresh tmpfs each time, and
+`pututxline` cannot create the file itself) — without that, `who` and `w` had
+nothing to read at all.
