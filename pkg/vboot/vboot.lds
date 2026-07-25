@@ -22,9 +22,7 @@ SECTIONS
   . = ALIGN(0x1000);
   .data : {
     *(.sdata) *(.data) *(.data.*) *(.gnu.linkonce.d.*)
-    *(.got.plt) *(.got) *(.dynamic)
-    *(.rela) *(.rela.*)
-    *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash)
+    *(.got.plt) *(.got)
     /* .bss MUST live inside a loaded section. objcopy only emits PROGBITS, so a
      * separate NOBITS .bss would fall outside SizeOfImage and every global would
      * be written to memory the firmware never allocated. Folding it in here
@@ -34,6 +32,19 @@ SECTIONS
   }
   . = ALIGN(0x1000);
   .reloc : { *(.reloc) }
+
+  /* Dynamic-linking metadata must be kept OUT of .data. We only link -shared to
+   * get position-independent code; the firmware never consults these. Left in
+   * .data, ld lays the string/symbol tables over the START of our real data —
+   * that silently overwrote the initrd device-path header (its Length field
+   * became garbage, so the firmware's path walk never terminated). They live in
+   * their own sections here, past .data, and objcopy simply does not copy them. */
+  .dynamic : { *(.dynamic) }
+  .dynsym  : { *(.dynsym) }
+  .dynstr  : { *(.dynstr) }
+  .hashtab : { *(.hash) *(.gnu.hash) }
+  .relatab : { *(.rela) *(.rela.*) }
+
   /DISCARD/ : {
     *(.rel.reloc) *(.eh_frame) *(.note.*) *(.comment) *(.interp)
   }
