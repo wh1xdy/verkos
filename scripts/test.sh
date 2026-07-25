@@ -27,7 +27,8 @@ for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcp
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
            pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
            pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c pkg/vmkfs/vmkfs.c \
-           pkg/vinstall/vinstall.c; do
+           pkg/vinstall/vinstall.c pkg/vhex/vhex.c pkg/vtree/vtree.c \
+           pkg/vdate/vdate.c pkg/vxargs/vxargs.c pkg/vip/vip.c; do
     name=$(basename "$src" .c)
     extra=""
     [ "$name" = vpk ] && extra="-lcurl -llzma -lz"
@@ -146,6 +147,45 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
         printf '  \033[33mskip\033[0m  TLS checks (no network)\n'
     fi
 else bad "vget does not compile"; fi
+
+say "no tool reports success while doing nothing"
+# A sweep for the shape that has bitten this project repeatedly: the tool
+# notices the problem, prints about it, and exits 0 anyway. Every case below
+# was a real defect found by running the tools, not by reading them.
+for t in vgzip vhex vtree vdate vawk vcpio vxargs; do
+    [ -x "$T/$t" ] || continue
+    check "$t rejects an unknown option" "! '$T/$t' --zzz-not-a-real-option </dev/null 2>/dev/null"
+done
+if [ -x "$T/vsed" ]; then
+    check "vsed fails on a file it cannot read" "! '$T/vsed' s/a/b/ /no/such/file 2>/dev/null"
+fi
+if [ -x "$T/vawk" ]; then
+    check "vawk fails on a file it cannot read" "! '$T/vawk' '{print}' /no/such/file 2>/dev/null"
+fi
+if [ -x "$T/vtree" ]; then
+    check "vtree fails on a directory that is not there" "! '$T/vtree' /no/such/dir 2>/dev/null"
+fi
+if [ -x "$T/vdate" ]; then
+    # Silently ignoring -d printed the current time as though it were the asked-for one.
+    check "vdate refuses a -d form it cannot parse" "! '$T/vdate' -d 'next tuesday' 2>/dev/null"
+    check "vdate fails on -r with a missing file" "! '$T/vdate' -r /no/such/file 2>/dev/null"
+fi
+if [ -x "$T/vcpio" ]; then
+    head -c 2048 /dev/urandom > "$T/notcpio.bin"
+    check "vcpio fails on something that is not an archive" \
+          "! '$T/vcpio' -i < '$T/notcpio.bin' 2>/dev/null"
+    # An archived name must never be able to write outside where it is unpacked.
+    mkdir -p "$T/cp/inner"; echo outside > "$T/cp/outside.txt"
+    ( cd "$T/cp/inner" && echo ../outside.txt | "$T/vcpio" -o > "$T/cp/trav.cpio" ) 2>/dev/null
+    mkdir -p "$T/cp/dest"
+    check "vcpio refuses an entry that climbs out with .." \
+          "! ( cd '$T/cp/dest' && '$T/vcpio' -i < '$T/cp/trav.cpio' ) 2>/dev/null"
+    ( cd "$T/cp" && echo "$T/cp/outside.txt" | "$T/vcpio" -o > "$T/cp/abs.cpio" ) 2>/dev/null
+    mkdir -p "$T/cp/dest2"
+    ( cd "$T/cp/dest2" && "$T/vcpio" -i < "$T/cp/abs.cpio" ) 2>/dev/null
+    check "vcpio strips a leading / instead of writing outside" \
+          "[ -z \"\$(find '$T/cp/dest2' -type f -newer '$T/cp/abs.cpio' -path '*/outside.txt' -prune -o -type f -print 2>/dev/null | head -1)\" ] && find '$T/cp/dest2' -name outside.txt | grep -q ."
+fi
 
 say "vtar refuses what it cannot extract"
 # This one bit for real: `tar -xf foo.tar.xz` extracted nothing and exited 0,

@@ -71,17 +71,44 @@ static int do_create(FILE *o) {
 }
 
 static unsigned rdhex(FILE *in) { char b[9]; if (fread(b, 1, 8, in) != 8) return 0xffffffff; b[8] = 0; return (unsigned)strtoul(b, NULL, 16); }
+static int warned_abs = 0;
 static int do_extract(FILE *in, int listonly) {
     char magic[7]; long pos = 0;
     for (;;) {
         if (fread(magic, 1, 6, in) != 6) break;
         magic[6] = 0; pos += 6;
-        if (strcmp(magic, "070701")) { fprintf(stderr, "cpio: bad magic\n"); break; }
+        if (strcmp(magic, "070701")) {
+            /* Not a newc archive. Saying so and then exiting 0 is how a build
+             * unpacks nothing and carries on — return the failure. */
+            fprintf(stderr, "cpio: bad magic (not a newc archive)\n");
+            return -1;
+        }
         unsigned f[13]; for (int i = 0; i < 13; i++) f[i] = rdhex(in); pos += 13 * 8;
         unsigned mode = f[1], filesize = f[6], nsize = f[11];
         char name[4096]; if (nsize > sizeof name) nsize = sizeof name; fread(name, 1, nsize, in); pos += nsize; name[nsize ? nsize - 1 : 0] = 0;
         while (pos % 4) { fgetc(in); pos++; }
         if (!strcmp(name, "TRAILER!!!")) break;
+        /* An entry may only ever land under the current directory. cpio
+         * traditionally honours the archived path, so "/etc/passwd" in an
+         * archive overwrites the real one, silently, wherever you unpack it.
+         * Strip the leading slash the way tar does, and refuse ".." outright. */
+        char *nm = name;
+        if (*nm == '/') {
+            while (*nm == '/') nm++;
+            if (!warned_abs) { fprintf(stderr, "cpio: removing leading '/' from names\n"); warned_abs = 1; }
+        }
+        int traversal = 0;
+        for (char *c = nm; *c; ) {
+            if (c[0] == '.' && c[1] == '.' && (c[2] == '/' || c[2] == 0)) { traversal = 1; break; }
+            char *nx = strchr(c, '/');
+            if (!nx) break;
+            c = nx + 1;
+        }
+        if (traversal || !*nm) {
+            fprintf(stderr, "cpio: refusing entry outside the destination: %s\n", name);
+            return -1;
+        }
+        memmove(name, nm, strlen(nm) + 1);
         if (listonly) printf("%s\n", name);
         FILE *of = NULL;
         if (!listonly && S_ISREG(mode)) { for (char *s = strchr(name, '/'); s; s = strchr(s + 1, '/')) { *s = 0; mkdir(name, 0755); *s = '/'; } of = fopen(name, "wb"); if (verbose) fprintf(stderr, "%s\n", name); }
@@ -117,10 +144,15 @@ int main(int argc, char **argv) {
     int mode = 0, listonly = 0;
     for (int i = 1; i < argc; i++)
         for (char *p = argv[i] + (argv[i][0] == '-' ? 1 : 0); argv[i][0] == '-' && *p; p++) {
-            if (*p == 'o') mode = 'o'; else if (*p == 'i') mode = 'i'; else if (*p == 't') listonly = 1; else if (*p == 'v') verbose = 1;
+            if (*p == 'o') mode = 'o';
+            else if (*p == 'i') mode = 'i';
+            else if (*p == 't') listonly = 1;
+            else if (*p == 'v') verbose = 1;
+            else if (*p == '-') continue;                /* --long forms */
+            else { fprintf(stderr, "cpio: unknown option -%c\n", *p); return 1; }
         }
     if (mode == 'o') return do_create(stdout);
-    if (mode == 'i') return do_extract(stdin, listonly);
+    if (mode == 'i') return do_extract(stdin, listonly) ? 1 : 0;
     fprintf(stderr, "usage: cpio -o | -i[t] [-v]\n");
     return 1;
 }

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -50,9 +51,25 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-a")) showall = 1;
         else if (!strcmp(argv[i], "-d")) dirsonly = 1;
         else if (!strcmp(argv[i], "-L") && i + 1 < argc) maxlevel = atoi(argv[++i]) - 1;
+        /* An option we do not know must not be quietly treated as a file name:
+         * that is how a typo turns into the wrong thing done silently. */
+        else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "tree: unknown option %s\n", argv[i]); return 1;
+        }
         else if (argv[i][0] != '-') path = argv[i];
     }
     if (!path) path = ".";
+    /* A directory that is not there printed a heading and "0 directories, 0
+     * files" and exited 0, which reads exactly like an empty directory. */
+    struct stat pst;
+    if (stat(path, &pst) != 0) {
+        fprintf(stderr, "tree: %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    if (!S_ISDIR(pst.st_mode)) {
+        fprintf(stderr, "tree: %s: not a directory\n", path);
+        return 1;
+    }
     printf("%s\n", path);
     walk(path, "", 0);
     printf("\n%ld director%s, %ld file%s\n", ndirs, ndirs == 1 ? "y" : "ies", nfiles, nfiles == 1 ? "" : "s");

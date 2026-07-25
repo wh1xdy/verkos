@@ -63,6 +63,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--no-run-if-empty")) ;  /* our default already skips empty */
         else if (!strncmp(argv[i], "-n", 2)) maxn = atoi(argv[i][2] ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : "0"));
         else if (!strncmp(argv[i], "-I", 2)) { repl = argv[i][2] ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : "{}"); maxn = 1; }
+        /* Anything else starting with '-' would silently become the command to
+         * run, so a mistyped option turns into "command not found" at best and
+         * running the wrong thing at worst. */
+        else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "xargs: unknown option %s\n", argv[i]); return 1;
+        }
         else break;
     }
     for (; i < argc && nb < 250; i++) base[nb++] = argv[i];

@@ -414,3 +414,38 @@ control characters, which the shell rejected as a syntax error.
 
 The lesson is the same one vbzip2 taught: a tool that fails without saying so
 does not merely fail to work, it leaves damage somewhere nobody is looking.
+
+## D-017 — Hunting the tools that succeed without working
+
+A probe ran every VerkOS tool through cases that must fail — unknown options,
+input in the wrong format, missing files, unwritable output — and reported any
+that exited 0. Eighteen did. This is the shape that has cost this project the
+most: vbzip2 `-dc` destroyed the file it was given, vtar extracted nothing from
+a `.tar.xz` and scattered 36 garbage-named files into `/`, and both reported
+success.
+
+Fixed, worst first:
+
+- **vcpio extracted outside the directory it was unpacked in.** An archived
+  `/etc/passwd` overwrote the real one; `../` climbed out. Leading slashes are
+  stripped with a notice, as tar does, and a `..` component is refused.
+- **vcpio read a non-archive, printed "bad magic", and exited 0.**
+- **vsed and vawk printed "cannot open" for a missing input file and exited 0**,
+  so a script could not tell an unreadable file from an empty one. Both exit 2
+  now, matching GNU.
+- **vip installed a route without its gateway** when the gateway address did not
+  parse — quietly not the route that was asked for.
+- **vdate ignored `-d` forms it could not parse** and printed the current time
+  as though it were the requested one. It also ignored `-r FILE` when the file
+  was missing.
+- **vtree printed "0 directories, 0 files" for a directory that did not exist**,
+  which reads exactly like an empty one.
+- **vgzip, vhex, vtree, vdate, vawk, vcpio and vxargs ignored unknown options.**
+  In vxargs the unknown option silently became the command to run.
+
+Left deliberately: `vpager` ignores unknown flags (less has dozens, and a pager
+that refuses `-R` is worse than one that ignores it — and its output is on
+screen, so nothing is hidden), and `ved` treats an unknown argument as a file
+name, which is what vi does.
+
+`scripts/test.sh` now runs the whole class as regression tests.

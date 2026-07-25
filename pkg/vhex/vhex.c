@@ -56,6 +56,11 @@ int main(int argc, char **argv) {
     int canon = 0; const char *file = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-C")) canon = 1;
+        /* An option we do not know must not be quietly treated as a file name:
+         * that is how a typo turns into the wrong thing done silently. */
+        else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "hexdump: unknown option %s\n", argv[i]); return 1;
+        }
         else if (argv[i][0] != '-') file = argv[i];
     }
     FILE *f = file ? fopen(file, "rb") : stdin;

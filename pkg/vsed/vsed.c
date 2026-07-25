@@ -368,12 +368,15 @@ int main(int argc, char **argv) {
     if (!script) { fprintf(stderr, "usage: sed [OPTION]... SCRIPT [FILE]...\n"); return 1; }
     parse_script(script);
 
+    /* GNU sed exits 2 when it cannot read an input file. Reporting the problem
+     * and then exiting 0 lets a script carry on as though the file were empty. */
+    int rc = 0;
     if (inplace && nf > 0) {
         for (int i = 0; i < nf; i++) {
             for (int k = 0; k < ncmd; k++) cmds[k].in_range = 0;
-            FILE *in = fopen(files[i], "r"); if (!in) { fprintf(stderr, "sed: %s: cannot open\n", files[i]); continue; }
+            FILE *in = fopen(files[i], "r"); if (!in) { fprintf(stderr, "sed: %s: cannot open\n", files[i]); rc = 2; continue; }
             char tmp[600]; snprintf(tmp, sizeof tmp, "%s.sedtmp", files[i]);
-            FILE *out = fopen(tmp, "w"); if (!out) { fclose(in); continue; }
+            FILE *out = fopen(tmp, "w"); if (!out) { fprintf(stderr, "sed: %s: cannot write\n", tmp); fclose(in); rc = 4; continue; }
             FILE *ins[1] = { in }; process(ins, 1, out);
             fclose(in); fclose(out); rename(tmp, files[i]);
         }
@@ -382,8 +385,8 @@ int main(int argc, char **argv) {
     if (nf == 0) { FILE *ins[1] = { stdin }; process(ins, 1, stdout); }
     else {
         FILE *ins[512]; int n = 0;
-        for (int i = 0; i < nf; i++) { FILE *f = fopen(files[i], "r"); if (!f) { fprintf(stderr, "sed: %s: cannot open\n", files[i]); continue; } ins[n++] = f; }
+        for (int i = 0; i < nf; i++) { FILE *f = fopen(files[i], "r"); if (!f) { fprintf(stderr, "sed: %s: cannot open\n", files[i]); rc = 2; continue; } ins[n++] = f; }
         if (n) process(ins, n, stdout);
     }
-    return 0;
+    return rc;
 }

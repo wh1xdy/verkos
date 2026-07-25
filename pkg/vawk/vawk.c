@@ -407,6 +407,12 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "-F", 2) && argv[i][2]) snprintf(FS_, sizeof FS_, "%s", argv[i]+2);
         else if (!strcmp(argv[i], "-v") && i+1 < argc) snprintf(preassign[npre++], 256, "%s", argv[++i]);
         else if (!strcmp(argv[i], "-f") && i+1 < argc) { FILE *f = fopen(argv[++i], "r"); if (!f) { fprintf(stderr,"awk: cannot open program\n"); return 2; } static char pbuf[65536]; size_t r = fread(pbuf,1,sizeof pbuf-1,f); pbuf[r]=0; fclose(f); prog = pbuf; }
+        /* "--" ends the options; anything else starting with '-' is a mistyped
+         * option, not a program. Taking it as the program hid the typo. */
+        else if (!strcmp(argv[i], "--")) { i++; break; }
+        else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "awk: unknown option %s\n", argv[i]); return 2;
+        }
         else break;
     }
     if (!prog) { if (i >= argc) { fprintf(stderr, "usage: awk [-F sep] [-v v=x] 'PROGRAM' [FILE...]\n"); return 2; } prog = argv[i++]; }
@@ -418,6 +424,8 @@ int main(int argc, char **argv) {
 
     for (int r = 0; r < nrules && !exit_flag; r++) if (rules[r].begin) exec_stmt(rules[r].act);
 
+    /* An input file we could not read is a failure, not an empty file. */
+    int file_error = 0;
     int has_main = 0, has_end = 0;
     for (int r = 0; r < nrules; r++) { if (!rules[r].begin && !rules[r].end) has_main = 1; if (rules[r].end) has_end = 1; }
     if ((has_main || has_end) && !exit_flag) {
@@ -425,7 +433,7 @@ int main(int argc, char **argv) {
         int fi = 0;
         FILE *in = nf ? NULL : stdin;
         do {
-            if (nf) { in = fopen(files[fi], "r"); if (!in) { fprintf(stderr, "awk: %s: cannot open\n", files[fi]); continue; } FNR = 0; }
+            if (nf) { in = fopen(files[fi], "r"); if (!in) { fprintf(stderr, "awk: %s: cannot open\n", files[fi]); file_error = 2; continue; } FNR = 0; }
             if (in) while ((rd = getline(&line, &cap, in)) != -1) { if (rd && line[rd-1]=='\n') line[rd-1]=0; set_line(line); run_record(); if (exit_flag) break; }
             if (nf && in) fclose(in);
         } while (nf && ++fi < nf && !exit_flag);
@@ -433,5 +441,5 @@ int main(int argc, char **argv) {
     }
     exit_flag = 0;
     for (int r = 0; r < nrules; r++) if (rules[r].end) exec_stmt(rules[r].act);
-    return exit_code;
+    return exit_code ? exit_code : file_error;
 }

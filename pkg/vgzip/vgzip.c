@@ -265,6 +265,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-c")) tostdout = 1;
         else if (!strcmp(argv[i], "-k")) keep = 1;
         else if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "-n") || !strcmp(argv[i], "-q")) ;
+        /* An option we do not know must not be quietly treated as a file name:
+         * that is how a typo turns into the wrong thing done silently. */
+        else if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "%s: unknown option %s\n", me, argv[i]); return 1;
+        }
         else if (argv[i][0] != '-') files[nf++] = argv[i];
     }
 

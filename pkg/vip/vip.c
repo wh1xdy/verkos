@@ -237,10 +237,25 @@ static int route_mod(int add, int argc, char **argv) {
     uint32_t dest = 0, gw = 0; int prefix = 0, metric = 0; const char *dev = NULL; int have_dest = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "default")) { dest = 0; prefix = 0; have_dest = 1; }
-        else if (!strcmp(argv[i], "via") && i + 1 < argc) { struct in_addr in; if (inet_aton(argv[++i], &in)) gw = in.s_addr; }
+        else if (!strcmp(argv[i], "via") && i + 1 < argc) {
+            /* A gateway that does not parse used to be dropped silently, and the
+             * route was then installed as a direct one — quietly not the route
+             * that was asked for. */
+            struct in_addr in;
+            if (!inet_aton(argv[++i], &in)) {
+                fprintf(stderr, "vip: %s is not an IPv4 address\n", argv[i]); return 1;
+            }
+            gw = in.s_addr;
+        }
         else if (!strcmp(argv[i], "dev") && i + 1 < argc) dev = argv[++i];
         else if (!strcmp(argv[i], "metric") && i + 1 < argc) metric = atoi(argv[++i]);
-        else if (!have_dest) { if (parse_cidr(argv[i], &dest, &prefix, 32) == 0) have_dest = 1; }
+        else if (!have_dest) {
+            if (parse_cidr(argv[i], &dest, &prefix, 32) != 0) {
+                fprintf(stderr, "vip: %s is not an address or CIDR range\n", argv[i]); return 1;
+            }
+            have_dest = 1;
+        }
+        else { fprintf(stderr, "vip: unexpected argument %s\n", argv[i]); return 1; }
     }
     if (!have_dest) { fprintf(stderr, "usage: vip route %s default|DEST/PREFIX [via GW] [dev IF]\n", add ? "add" : "del"); return 1; }
     uint32_t mask = mask_of(prefix);
