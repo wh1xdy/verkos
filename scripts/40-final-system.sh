@@ -1271,6 +1271,23 @@ if [ -x /usr/bin/vip ]; then
     netln bzcat vbzip2
 fi
 
+# Every package is installed by now, so the unpacked trees under /sources are
+# scratch — and they are not small: gcc's build directory alone reached 46 GB on
+# a 79 GB volume, which is what stopped this build the first time round. The
+# tarballs stay; anything here can be unpacked again. Only on success, so a
+# failed build still has its tree to look at. VERK_KEEP_SRC=1 keeps them.
+if [ -z "${VERK_KEEP_SRC:-}" ]; then
+    freed=0
+    for d in /sources/*/; do
+        n=${d%/}
+        case "${n##*/}" in pip|vpk-recipes) continue ;; esac
+        [ -d "$n" ] || continue
+        sz=$(du -sm "$n" 2>/dev/null | cut -f1)
+        rm -rf "$n" 2>/dev/null && freed=$((freed + ${sz:-0}))
+    done
+    [ "$freed" -gt 0 ] && echo "==> reclaimed ${freed} MB of unpacked sources (tarballs kept)"
+fi
+
 echo
 echo "==> Native build complete: full core userland + urverk as /usr/sbin/init"
 NATIVE
