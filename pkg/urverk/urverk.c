@@ -49,6 +49,8 @@
 #include <linux/fs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <stdint.h>
 
 #define NEWROOT "/newroot"
@@ -481,6 +483,40 @@ static void confirm_boot(void) {
     /* efivarfs wants the whole variable — attributes and data — in one write */
     if (write(fd, buf, 8) == 8) say("confirmed this boot to vboot");
     else warn_errno("writing the vboot variable");
+    close(fd);
+}
+
+/* Bring up loopback.
+ *
+ * Nothing else does this now that systemd is gone, and a machine without lo is
+ * subtly broken: anything that talks to 127.0.0.1 — local services, package
+ * tools, a compositor — just hangs. */
+static void bring_up_loopback(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { warn_errno("socket for lo"); return; }
+    struct ifreq r;
+    struct sockaddr_in *a = (struct sockaddr_in *)&r.ifr_addr;
+
+    memset(&r, 0, sizeof r);
+    snprintf(r.ifr_name, IFNAMSIZ, "lo");
+    a->sin_family = AF_INET;
+    a->sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (ioctl(fd, SIOCSIFADDR, &r) && debug) warn_errno("lo address");
+
+    memset(&r, 0, sizeof r);
+    snprintf(r.ifr_name, IFNAMSIZ, "lo");
+    a = (struct sockaddr_in *)&r.ifr_netmask;
+    a->sin_family = AF_INET;
+    a->sin_addr.s_addr = inet_addr("255.0.0.0");
+    if (ioctl(fd, SIOCSIFNETMASK, &r) && debug) warn_errno("lo netmask");
+
+    memset(&r, 0, sizeof r);
+    snprintf(r.ifr_name, IFNAMSIZ, "lo");
+    if (!ioctl(fd, SIOCGIFFLAGS, &r)) {
+        r.ifr_flags |= IFF_UP | IFF_RUNNING;
+        if (ioctl(fd, SIOCSIFFLAGS, &r)) warn_errno("bringing lo up");
+        else say("loopback is up");
+    } else warn_errno("reading lo flags");
     close(fd);
 }
 
@@ -1050,6 +1086,7 @@ static int stage2(void) {
     mount_system();
     log_open();                      /* root is writable from here on */
     mount_fstab();
+    bring_up_loopback();
     set_hostname_from_file();
 
     load_services();
