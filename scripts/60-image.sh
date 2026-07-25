@@ -8,9 +8,58 @@
 source "$(dirname "$0")/lib/common.sh"
 mkdirs
 
+# Trim the rootfs down to what a shipped system actually needs. Runs here, after
+# every stage has installed into it, so it catches the kernel modules too. Set
+# VERK_NO_TRIM=1 to keep a fat development rootfs.
+#
+# This is worth a lot: unstripped binaries alone are most of the image (gcc's
+# internals in /usr/libexec were 983 MB, 109 MB stripped). Measured effect on
+# aarch64: 4.0 GB -> 603 MB of content, and a 5.1 GB -> 1.1 GB image file.
+trim_rootfs() {
+    [ "${VERK_NO_TRIM:-0}" = "1" ] && { log "trim skipped (VERK_NO_TRIM=1)"; return 0; }
+    local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
+    local before after
+    before=$($SUDO du -sm "$ROOTFS" | cut -f1)
+
+    # Build-time leftovers and caches — none of this belongs in a shipped image.
+    $SUDO rm -rf "$ROOTFS"/var/cache/vpk/* "$ROOTFS"/var/tmp/* "$ROOTFS"/tmp/* \
+                 "$ROOTFS"/root/*.c "$ROOTFS"/sources/* 2>/dev/null || true
+
+    # Message translations, info pages and package docs.
+    $SUDO rm -rf "$ROOTFS"/usr/share/{locale,i18n,info,doc}
+
+    # Python/meson/ninja are build tooling (dbus is built with meson); the running
+    # system has no use for them. pip's wheels go too.
+    $SUDO rm -rf "$ROOTFS"/usr/lib/python3.* "$ROOTFS"/usr/include/python3.* \
+                 "$ROOTFS"/usr/lib/pkgconfig/python*.pc
+    $SUDO rm -f  "$ROOTFS"/usr/lib/libpython3*.so* \
+                 "$ROOTFS"/usr/bin/{python3,python3.*,python3-config,python3.*-config} \
+                 "$ROOTFS"/usr/bin/{pip3,pip3.*,meson,ninja,wheel,idle3,idle3.*,2to3,2to3-*,pydoc3,pydoc3.*}
+
+    # Strip debug info. The LFS recipe: never touch the dynamic loader, keep
+    # symbols in libraries and modules, take everything from executables.
+    local STRIP=strip
+    command -v "${VERK_TARGET:-}-strip" >/dev/null 2>&1 && STRIP="${VERK_TARGET}-strip"
+    $SUDO find "$ROOTFS"/usr/lib -type f -name '*.so*' ! -name 'ld-*' \
+        -exec "$STRIP" --strip-unneeded {} ';' 2>/dev/null || true
+    $SUDO find "$ROOTFS"/usr/lib -type f -name '*.a' \
+        -exec "$STRIP" --strip-debug {} ';' 2>/dev/null || true
+    $SUDO find "$ROOTFS"/usr/lib/modules -type f -name '*.ko' \
+        -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
+    local d
+    for d in bin sbin libexec; do
+        [ -d "$ROOTFS/usr/$d" ] && $SUDO find "$ROOTFS/usr/$d" -type f ! -name 'ld-*' \
+            -exec "$STRIP" --strip-all {} ';' 2>/dev/null || true
+    done
+
+    after=$($SUDO du -sm "$ROOTFS" | cut -f1)
+    ok "trimmed rootfs: ${before} MB -> ${after} MB"
+}
+
 build_ext4_image() {
     [ -d "$ROOTFS" ] || die "no rootfs at $ROOTFS — build stages 30-40 first"
     command -v mkfs.ext4 >/dev/null || die "mkfs.ext4 (e2fsprogs) is required"
+    trim_rootfs
 
     local img="$OUT_DIR/verkos-${ARCH}.ext4"
     # Size the image to the rootfs usage + 25% headroom (min 2 GB), so it also
@@ -24,8 +73,11 @@ build_ext4_image() {
     local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
     local kb size_mb
     kb=$($SUDO du -sk "$ROOTFS" | cut -f1)
-    size_mb=$(( kb / 1024 + ${VERK_IMAGE_HEADROOM_MB:-4096} ))
-    [ "$size_mb" -lt 4096 ] && size_mb=4096
+    # Headroom over the actual content. 512 MiB is plenty for a system that boots
+    # and installs packages; override with VERK_IMAGE_HEADROOM_MB for a fat dev
+    # image. (This used to default to 4 GiB, which made a 1 GiB system a 5 GiB file.)
+    size_mb=$(( kb / 1024 + ${VERK_IMAGE_HEADROOM_MB:-512} ))
+    [ "$size_mb" -lt 1024 ] && size_mb=1024
 
     $SUDO rm -f "$img"
     log "creating ${size_mb} MiB ext4 image from $ROOTFS"
