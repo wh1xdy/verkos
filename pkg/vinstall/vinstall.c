@@ -189,6 +189,171 @@ static void get_uuid(const char *dev, char *out, size_t cap) {
         die("cannot read the UUID of %s", dev);
 }
 
+/* ---- telling the firmware we exist --------------------------------------
+ * Writing \EFI\BOOT\BOOTAA64.EFI is only correct on a disk we own: that path
+ * is the removable-media fallback, and on a machine that already boots
+ * something else it belongs to that something else. The right way to be
+ * bootable alongside another system is a Boot#### variable, which is what
+ * efibootmgr does and what we do here through efivarfs.
+ *
+ * The variable holds: attributes, the length of the device path, a UTF-16
+ * description, then a device path naming the partition (by its GPT GUID, so it
+ * survives being renumbered) and the file on it. */
+#define EFI_GLOBAL_GUID "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+#define EFIVARS "/sys/firmware/efi/efivars"
+
+static int efi_available(void) {
+    struct stat st;
+    return stat(EFIVARS, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/* sysfs knows where a partition starts and how long it is, in 512-byte units. */
+static unsigned long long sysfs_num(const char *part, const char *attr) {
+    const char *base = strrchr(part, '/');
+    base = base ? base + 1 : part;
+    char out[64];
+    if (capture(out, sizeof out, "cat /sys/class/block/%s/%s 2>/dev/null", base, attr) != 0)
+        return 0;
+    return strtoull(out, NULL, 10);
+}
+
+static void put_le16(unsigned char *p, unsigned v) { p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; }
+static void put_le32(unsigned char *p, unsigned long v) {
+    p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; p[2] = (v >> 16) & 0xff; p[3] = (v >> 24) & 0xff;
+}
+static void put_le64(unsigned char *p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (v >> (8 * i)) & 0xff;
+}
+/* ASCII to UTF-16LE, NUL terminated. Returns bytes written. */
+static size_t put_utf16(unsigned char *p, const char *s) {
+    size_t n = 0;
+    for (; *s; s++) { put_le16(p + n, (unsigned char)*s); n += 2; }
+    put_le16(p + n, 0); n += 2;
+    return n;
+}
+/* A GPT PARTUUID is printed with the first three fields byte-swapped; the
+ * device path wants the raw little-endian bytes back. */
+static int guid_to_bytes(const char *uuid, unsigned char out[16]) {
+    unsigned b[16];
+    if (sscanf(uuid, "%2x%2x%2x%2x-%2x%2x-%2x%2x-%2x%2x-%2x%2x%2x%2x%2x%2x",
+               &b[0],&b[1],&b[2],&b[3],&b[4],&b[5],&b[6],&b[7],
+               &b[8],&b[9],&b[10],&b[11],&b[12],&b[13],&b[14],&b[15]) != 16) return -1;
+    out[0]=b[3]; out[1]=b[2]; out[2]=b[1]; out[3]=b[0];
+    out[4]=b[5]; out[5]=b[4];
+    out[6]=b[7]; out[7]=b[6];
+    for (int i = 8; i < 16; i++) out[i] = b[i];
+    return 0;
+}
+
+/* efivarfs marks variables immutable; the flag has to come off before writing,
+ * and the file has to be written in a single call including the attributes. */
+static int efivar_write(const char *name, const unsigned char *data, size_t len) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s-%s", EFIVARS, name, EFI_GLOBAL_GUID);
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        int flags = 0;
+        if (ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0 && (flags & FS_IMMUTABLE_FL)) {
+            flags &= ~FS_IMMUTABLE_FL;
+            ioctl(fd, FS_IOC_SETFLAGS, &flags);
+        }
+        close(fd);
+    }
+    fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    unsigned char buf[2048];
+    if (len + 4 > sizeof buf) { close(fd); return -1; }
+    /* NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS */
+    put_le32(buf, 0x00000007);
+    memcpy(buf + 4, data, len);
+    ssize_t w = write(fd, buf, len + 4);
+    close(fd);
+    return w == (ssize_t)(len + 4) ? 0 : -1;
+}
+static int efivar_read(const char *name, unsigned char *out, size_t cap) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s-%s", EFIVARS, name, EFI_GLOBAL_GUID);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, out, cap);
+    close(fd);
+    return n < 4 ? -1 : (int)(n - 4);        /* skip the attribute word */
+}
+
+/* Create a Boot#### entry for \EFI\verkos\<efi_name> on <esp_part> and put it
+ * first in BootOrder. Returns 0 on success. */
+static int efi_add_boot_entry(const char *esp_part, const char *efi_name, const char *label) {
+    char partuuid[128];
+    if (capture(partuuid, sizeof partuuid, "blkid -o value -s PARTUUID %s 2>/dev/null", esp_part) != 0
+        || !partuuid[0]) return -1;
+    unsigned char guid[16];
+    if (guid_to_bytes(partuuid, guid)) return -1;
+
+    unsigned long long start = sysfs_num(esp_part, "start");
+    unsigned long long size  = sysfs_num(esp_part, "size");
+    char pnum[32];
+    if (capture(pnum, sizeof pnum, "cat /sys/class/block/%s/partition 2>/dev/null",
+                strrchr(esp_part, '/') ? strrchr(esp_part, '/') + 1 : esp_part) != 0 || !pnum[0])
+        return -1;
+    if (!size) return -1;
+
+    /* --- device path: HD() node, then the file, then the end marker --- */
+    unsigned char dp[256];
+    size_t n = 0;
+    dp[n++] = 0x04; dp[n++] = 0x01;                  /* MEDIA_DEVICE_PATH, HARDDRIVE_DP */
+    put_le16(dp + n, 42); n += 2;                    /* node length */
+    put_le32(dp + n, (unsigned long)atoi(pnum)); n += 4;
+    put_le64(dp + n, start); n += 8;
+    put_le64(dp + n, size);  n += 8;
+    memcpy(dp + n, guid, 16); n += 16;
+    dp[n++] = 0x02;                                  /* MBRType: GPT */
+    dp[n++] = 0x02;                                  /* SignatureType: GUID */
+
+    char file[128];
+    snprintf(file, sizeof file, "\\EFI\\verkos\\%s", efi_name);
+    size_t flen = (strlen(file) + 1) * 2;
+    dp[n++] = 0x04; dp[n++] = 0x04;                  /* MEDIA_DEVICE_PATH, FILEPATH_DP */
+    put_le16(dp + n, (unsigned)(4 + flen)); n += 2;
+    n += put_utf16(dp + n, file);
+
+    dp[n++] = 0x7f; dp[n++] = 0xff;                  /* END_DEVICE_PATH */
+    put_le16(dp + n, 4); n += 2;
+
+    /* --- the load option itself --- */
+    unsigned char opt[1024];
+    size_t o = 0;
+    put_le32(opt + o, 1); o += 4;                    /* LOAD_OPTION_ACTIVE */
+    put_le16(opt + o, (unsigned)n); o += 2;          /* device path length */
+    o += put_utf16(opt + o, label);
+    memcpy(opt + o, dp, n); o += n;
+
+    /* Find a free Boot#### slot rather than assuming one is spare. */
+    char name[16] = "";
+    for (int i = 0; i < 0x100; i++) {
+        char cand[16], path[512];
+        snprintf(cand, sizeof cand, "Boot%04X", i);
+        snprintf(path, sizeof path, "%s/%s-%s", EFIVARS, cand, EFI_GLOBAL_GUID);
+        if (access(path, F_OK) != 0) { snprintf(name, sizeof name, "%s", cand); break; }
+    }
+    if (!name[0]) return -1;
+    if (efivar_write(name, opt, o)) return -1;
+
+    /* Put it first in BootOrder, keeping whatever was there. */
+    unsigned char order[512];
+    int have = efivar_read("BootOrder", order, sizeof order);
+    if (have < 0) have = 0;
+    unsigned char neworder[512];
+    unsigned slot = (unsigned)strtoul(name + 4, NULL, 16);
+    put_le16(neworder, slot);
+    size_t on = 2;
+    for (int i = 0; i + 1 < have && on + 2 <= sizeof neworder; i += 2) {
+        unsigned existing = order[4 + i] | (order[5 + i] << 8);
+        if (existing == slot) continue;              /* no duplicates */
+        put_le16(neworder + on, existing); on += 2;
+    }
+    return efivar_write("BootOrder", neworder, on);
+}
+
 /* ---- passwords -----------------------------------------------------------
  * The source system's /etc/shadow is copied with everything else, so without
  * this the installed machine silently inherits whatever root password the image
@@ -291,6 +456,26 @@ static void check_source(const char *arch) {
     if (access(p, R_OK) != 0) die("no initramfs at %s", p);
 }
 
+/* A device we were handed must be a partition, not a whole disk, not mounted,
+ * and not the one this system is running from. Naming the wrong thing here
+ * destroys somebody's data, so check rather than assume. */
+static void check_existing_part(const char *dev, const char *role) {
+    struct stat st;
+    if (stat(dev, &st)) die("%s (%s): %s", dev, role, strerror(errno));
+    if (!S_ISBLK(st.st_mode)) die("%s (%s) is not a block device", dev, role);
+    const char *base = strrchr(dev, '/');
+    base = base ? base + 1 : dev;
+    char out[64];
+    if (capture(out, sizeof out, "cat /sys/class/block/%s/partition 2>/dev/null", base) != 0 || !out[0])
+        die("%s (%s) is a whole disk, not a partition", dev, role);
+    if (capture(out, sizeof out, "grep -c '^%s ' /proc/mounts 2>/dev/null", dev) == 0 && atoi(out) > 0)
+        die("%s (%s) is mounted — unmount it first", dev, role);
+    char running[256];
+    if (capture(running, sizeof running, "findmnt -no SOURCE / 2>/dev/null") == 0 &&
+        !strcmp(running, dev))
+        die("%s (%s) is the filesystem this system is running from", dev, role);
+}
+
 /* ---- confirmation --------------------------------------------------------- */
 static void confirm(const char *disk, unsigned esp_mb, unsigned swap_mb,
                     unsigned home_mb, const char *hostname) {
@@ -317,6 +502,31 @@ static void confirm(const char *disk, unsigned esp_mb, unsigned swap_mb,
     if (!fgets(answer, sizeof answer, stdin)) die("aborted");
     answer[strcspn(answer, "\n")] = 0;
     if (strcmp(answer, disk)) die("aborted — nothing has been changed");
+    putchar('\n');
+}
+
+/* The same warning as confirm(), for the case where we were handed partitions
+ * rather than a disk: what gets erased is different, so say so precisely. */
+static void confirm_parts(const char *root_part, const char *esp_part,
+                          const char *home_part, const char *swap_part,
+                          const char *hostname) {
+    printf("\n\033[1mAbout to install VerkOS onto existing partitions\033[0m\n\n");
+    printf("  %-22s %s\n", "hostname", hostname);
+    printf("\n\033[1;31mThese will be erased:\033[0m\n");
+    printf("    %s   (root filesystem)\n", root_part);
+    if (home_part) printf("    %s   (/home)\n", home_part);
+    if (swap_part) printf("    %s   (swap)\n", swap_part);
+    printf("\n\033[1mThese will be kept, and only added to:\033[0m\n");
+    printf("    %s   (EFI system partition — its filesystem and any other\n", esp_part);
+    printf("        %*s bootloader on it are left as they are)\n", (int)strlen(esp_part), "");
+    printf("\nNothing else on the disk is touched: the partition table is not rewritten.\n");
+    if (assume_yes) { printf("Proceeding (-y given).\n\n"); return; }
+    printf("\nType the root partition to confirm (%s), or anything else to abort: ", root_part);
+    fflush(stdout);
+    char answer[256] = "";
+    if (!fgets(answer, sizeof answer, stdin)) die("aborted");
+    answer[strcspn(answer, "\n")] = 0;
+    if (strcmp(answer, root_part)) die("aborted — nothing has been changed");
     putchar('\n');
 }
 
@@ -374,10 +584,11 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
     fclose(f);
 }
 
-static void install_bootloader(const char *root, const char *arch, const char *root_uuid) {
+static void install_bootloader(const char *root, const char *arch, const char *root_uuid,
+                               int own_disk) {
     char esp[512];
     snprintf(esp, sizeof esp, "%s/boot", root);
-    run("mkdir -p %s/EFI/BOOT", esp);
+    run("mkdir -p %s/EFI/BOOT %s/EFI/verkos", esp, esp);
 
     /* vboot itself, under the name the firmware looks for with no NVRAM entry. */
     const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
@@ -386,7 +597,19 @@ static void install_bootloader(const char *root, const char *arch, const char *r
     snprintf(src, sizeof src, "%s/boot/EFI/BOOT/%s", sroot, efi_name);
     if (access(src, R_OK) != 0 && !dry_run)
         die("cannot find %s — the EFI partition must be mounted at %s/boot", src, sroot);
-    run("cp %s %s/EFI/BOOT/%s", src, esp, efi_name);
+
+    /* Our own copy always goes here; the firmware entry points at it. */
+    run("cp %s %s/EFI/verkos/%s", src, esp, efi_name);
+    /* \EFI\BOOT\ is the removable-media fallback path. On a disk we
+     * partitioned it is ours. On a disk we were only handed a partition of, it
+     * probably belongs to whatever else boots from here — overwriting it would
+     * make that system unbootable, which is not ours to do. */
+    char fallback[1024];
+    snprintf(fallback, sizeof fallback, "%s/EFI/BOOT/%s", esp, efi_name);
+    if (own_disk || access(fallback, F_OK) != 0)
+        run("cp %s %s/EFI/BOOT/%s", src, esp, efi_name);
+    else
+        printf("    leaving EFI/BOOT/%s alone — another system installed it\n", efi_name);
 
     /* Kernel and initramfs. Both live on the source ESP; without them the
      * installed system has nothing for vboot to load. */
@@ -457,12 +680,20 @@ static void usage(void) {
            "  --home MB    put /home on its own partition\n"
            "  --passwd-file F  set passwords from USER:PASSWORD lines (for -y)\n"
            "  --lock-root  install with the root account locked (needs -u)\n"
+           "\n"
+           "  Installing alongside another system, without repartitioning:\n"
+           "  --root-part DEV  format this partition and install onto it\n"
+           "  --esp-part DEV   use this existing EFI partition (never formatted)\n"
+           "  --home-part DEV  --swap-part DEV   optional, formatted\n"
+           "  --no-efi-entry   do not add a boot entry to the firmware\n"
            "  -n           dry run: print what would happen, change nothing\n"
            "  -v           show every command\n", ESP_MB_DEFAULT);
 }
 
 int main(int argc, char **argv) {
     const char *disk = NULL, *hostname = "verkos", *user = NULL;
+    const char *given_root = NULL, *given_esp = NULL, *given_home = NULL, *given_swap = NULL;
+    int no_efi_entry = 0;
     unsigned esp_mb = ESP_MB_DEFAULT, swap_mb = 0, home_mb = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -478,6 +709,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--home") && i + 1 < argc) home_mb = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--passwd-file") && i + 1 < argc) passwd_file = argv[++i];
         else if (!strcmp(argv[i], "--lock-root")) lock_root = 1;
+        else if (!strcmp(argv[i], "--root-part") && i + 1 < argc) given_root = argv[++i];
+        else if (!strcmp(argv[i], "--esp-part") && i + 1 < argc) given_esp = argv[++i];
+        else if (!strcmp(argv[i], "--home-part") && i + 1 < argc) given_home = argv[++i];
+        else if (!strcmp(argv[i], "--swap-part") && i + 1 < argc) given_swap = argv[++i];
+        else if (!strcmp(argv[i], "--no-efi-entry")) no_efi_entry = 1;
         else { usage(); return strcmp(argv[i], "-h") && strcmp(argv[i], "--help"); }
     }
     if (getuid() != 0) die("must be run as root");
@@ -503,7 +739,16 @@ int main(int argc, char **argv) {
     if (lock_root && !user)
         die("--lock-root leaves no way in: create an account with -u NAME as well");
 
-    if (!disk) {
+    /* Two ways in: take a whole disk, or be handed partitions to use. */
+    int own_disk = (given_root == NULL);
+    if (!own_disk) {
+        if (!given_esp) die("--root-part needs --esp-part as well (the firmware has to find us)");
+        if (swap_mb || home_mb)
+            die("--swap/--home make partitions; with --root-part pass --swap-part/--home-part instead");
+        disk = given_root;                 /* only used for messages from here on */
+    }
+
+    if (own_disk && !disk) {
         list_disks();
         printf("Install onto which disk? ");
         fflush(stdout);
@@ -515,26 +760,48 @@ int main(int argc, char **argv) {
     }
 
     struct stat st;
-    if (stat(disk, &st)) die("%s: %s", disk, strerror(errno));
-    if (!S_ISBLK(st.st_mode)) die("%s is not a block device", disk);
-
-    char running[256];
-    running_root_disk(running, sizeof running);
-    if (running[0] && !strcmp(running, disk))
-        die("%s is the disk this system is running from", disk);
-    if (device_is_mounted(disk))
-        die("%s has mounted partitions — unmount them first", disk);
+    if (own_disk) {
+        if (stat(disk, &st)) die("%s: %s", disk, strerror(errno));
+        if (!S_ISBLK(st.st_mode)) die("%s is not a block device", disk);
+        char running[256];
+        running_root_disk(running, sizeof running);
+        if (running[0] && !strcmp(running, disk))
+            die("%s is the disk this system is running from", disk);
+        if (device_is_mounted(disk))
+            die("%s has mounted partitions — unmount them first", disk);
+    } else {
+        check_existing_part(given_root, "root");
+        check_existing_part(given_esp, "EFI system partition");
+        if (given_home) check_existing_part(given_home, "home");
+        if (given_swap) check_existing_part(given_swap, "swap");
+        /* Using a partition that is not FAT as an ESP produces a system the
+         * firmware cannot boot, discovered only at the next reboot. */
+        char t[64];
+        if (capture(t, sizeof t, "blkid -o value -s TYPE %s 2>/dev/null", given_esp) != 0 ||
+            strcmp(t, "vfat"))
+            die("%s is %s, not a FAT filesystem — that cannot be an EFI system partition",
+                given_esp, t[0] ? t : "unformatted");
+    }
 
     if (!dry_run) check_source(arch);
-    confirm(disk, esp_mb, swap_mb, home_mb, hostname);
+    if (own_disk) confirm(disk, esp_mb, swap_mb, home_mb, hostname);
+    else confirm_parts(given_root, given_esp, given_home, given_swap, hostname);
 
     char esp_part[256], root_part[256], home_part[256] = "", swap_part[256] = "";
-    part_name(disk, 1, esp_part, sizeof esp_part);
-    part_name(disk, 2, root_part, sizeof root_part);
-    /* /home and swap are numbered in the order they are written above. */
-    if (home_mb) part_name(disk, 3, home_part, sizeof home_part);
-    if (swap_mb) part_name(disk, home_mb ? 4 : 3, swap_part, sizeof swap_part);
+    if (own_disk) {
+        part_name(disk, 1, esp_part, sizeof esp_part);
+        part_name(disk, 2, root_part, sizeof root_part);
+        /* /home and swap are numbered in the order they are written above. */
+        if (home_mb) part_name(disk, 3, home_part, sizeof home_part);
+        if (swap_mb) part_name(disk, home_mb ? 4 : 3, swap_part, sizeof swap_part);
+    } else {
+        snprintf(esp_part, sizeof esp_part, "%s", given_esp);
+        snprintf(root_part, sizeof root_part, "%s", given_root);
+        if (given_home) snprintf(home_part, sizeof home_part, "%s", given_home);
+        if (given_swap) snprintf(swap_part, sizeof swap_part, "%s", given_swap);
+    }
 
+    if (own_disk) {
     step("partitioning %s", disk);
     run("wipefs -a %s >/dev/null 2>&1 || true", disk);
     /* One ESP and one root, both carrying the standard GPT type GUIDs so other
@@ -568,34 +835,46 @@ int main(int argc, char **argv) {
     run("sfdisk --quiet --wipe always %s < /run/vinstall.sfdisk", disk);
     run("partx -u %s >/dev/null 2>&1 || partprobe %s >/dev/null 2>&1 || true", disk, disk);
     unlink("/run/vinstall.sfdisk");
-
-    step("creating filesystems");
     wait_for_partition(esp_part);
     wait_for_partition(root_part);
-    run("%s -n VERKESP %s", mkvfat, esp_part);
+    }
+
+    step("creating filesystems");
+    /* An ESP we were given may hold another system's bootloader; formatting it
+     * would delete it. Only the one we just created is ours to format. */
+    if (own_disk) run("%s -n VERKESP %s", mkvfat, esp_part);
+    else printf("    keeping the filesystem on %s\n", esp_part);
     run("mkfs.ext4 -q -F -L VERKOS %s", root_part);
-    if (home_mb) { wait_for_partition(home_part); run("mkfs.ext4 -q -F -L VERKHOME %s", home_part); }
-    if (swap_mb) { wait_for_partition(swap_part); run("mkswap -L VERKSWAP %s >/dev/null", swap_part); }
+    if (home_part[0]) { wait_for_partition(home_part); run("mkfs.ext4 -q -F -L VERKHOME %s", home_part); }
+    if (swap_part[0]) { wait_for_partition(swap_part); run("mkswap -L VERKSWAP %s >/dev/null", swap_part); }
 
     char root_uuid[128], esp_uuid[128];
     get_uuid(root_part, root_uuid, sizeof root_uuid);
     get_uuid(esp_part, esp_uuid, sizeof esp_uuid);
     char home_uuid[128] = "", swap_uuid[128] = "";
-    if (home_mb) get_uuid(home_part, home_uuid, sizeof home_uuid);
-    if (swap_mb) get_uuid(swap_part, swap_uuid, sizeof swap_uuid);
+    if (home_part[0]) get_uuid(home_part, home_uuid, sizeof home_uuid);
+    if (swap_part[0]) get_uuid(swap_part, swap_uuid, sizeof swap_uuid);
 
     step("mounting the new system on %s", MNT);
     run("mkdir -p %s", MNT);
     run("mount %s %s", root_part, MNT);
     run("mkdir -p %s/boot", MNT);
     run("mount %s %s/boot", esp_part, MNT);
-    if (home_mb) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
+    if (home_part[0]) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
 
     step("copying the system");
     copy_system(MNT);
 
     step("installing vboot and writing the boot configuration");
-    install_bootloader(MNT, arch, root_uuid);
+    install_bootloader(MNT, arch, root_uuid, own_disk);
+    if (!no_efi_entry && efi_available() && !dry_run) {
+        const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
+        if (efi_add_boot_entry(esp_part, efi_name, "VerkOS") == 0)
+            printf("    added a VerkOS entry to the firmware boot menu\n");
+        else
+            printf("    could not add a firmware boot entry — this disk boots only "
+                   "if the firmware tries \\EFI\\BOOT\n");
+    }
 
     step("configuring the installed system");
     write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid);
@@ -607,7 +886,7 @@ int main(int argc, char **argv) {
     step("unmounting");
     run("sync");
     run("umount %s/boot", MNT);
-    if (home_mb) run("umount %s/home", MNT);
+    if (home_part[0]) run("umount %s/home", MNT);
     run("umount %s", MNT);
 
     printf("\n\033[1;32mVerkOS is installed on %s.\033[0m\n", disk);

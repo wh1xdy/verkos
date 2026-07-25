@@ -480,3 +480,39 @@ partition and swap never came on, with nothing reported.
 **Not done yet:** installing onto existing partitions (dual boot) and
 encryption. Encryption in particular is an ext4-shaped decision — LUKS is not
 something to hand-roll.
+
+## D-019 — Installing beside another system, without taking it over
+
+**Decision:** `vinstall --root-part DEV --esp-part DEV` installs into partitions
+that already exist, and VerkOS announces itself to the firmware with its own
+`Boot####` variable rather than by claiming the fallback loader path.
+
+**Why the NVRAM entry is the point.** `\EFI\BOOT\BOOTAA64.EFI` is the
+removable-media fallback. On a disk we partitioned it is ours to write; on a
+machine that already boots something else it belongs to that something else, and
+overwriting it makes that system unbootable. So on a disk we were only handed a
+partition of, the fallback path is left exactly as it is (unless nothing is
+there), our loader goes to `\EFI\verkos\`, and a boot entry is written straight
+into efivarfs — the same thing efibootmgr does, which VerkOS does not have.
+
+The variable holds a load option: attributes, the device path length, a UTF-16
+label, then a device path naming the partition by its **GPT GUID** — so it keeps
+working when disks are renumbered — followed by the file on it. `BootOrder` is
+rewritten with the new entry first and everything that was already there kept
+after it. efivarfs marks variables immutable, so the flag comes off first and
+the write includes the attribute word in one call.
+
+**Proved by the firmware's own log**, not by inspecting what we wrote:
+
+    BdsDxe: loading Boot0003 "VerkOS" from
+      HD(1,GPT,48FD33FD-…,0x800,0x40000)/\EFI\verkos\BOOTAA64.EFI
+
+**What it refuses:** a whole disk where a partition is required, a partition
+that is mounted or is the running root, and an "ESP" that is not FAT — that
+last one otherwise produces a system the firmware cannot boot, discovered only
+at the next reboot. The ESP is never formatted in this mode, and the
+confirmation says in as many words which partitions are erased and which are
+only added to.
+
+**Still not done:** encryption. LUKS is an ext4-shaped decision — not something
+to hand-roll — so it means taking cryptsetup as a dependency.
