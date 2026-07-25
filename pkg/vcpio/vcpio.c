@@ -51,6 +51,17 @@ static int do_create(FILE *o) {
             unsigned char *d = malloc(st.st_size + 1); size_t r = fread(d, 1, st.st_size, f); fclose(f);
             st.st_size = r;
             write_entry(o, line, &st, d, &pos); free(d);
+        } else if (S_ISLNK(st.st_mode)) {
+            /* A symlink's target IS its data in newc format: the size is the
+             * length of the target and the bytes follow the header. Writing it
+             * with size 0 (as this did) produces a link that points nowhere —
+             * which silently breaks /bin/sh in an initramfs. */
+            char target[4096];
+            ssize_t n = readlink(line, target, sizeof target - 1);
+            if (n < 0) { fprintf(stderr, "cpio: %s: cannot read link\n", line); continue; }
+            target[n] = 0;
+            st.st_size = n;
+            write_entry(o, line, &st, (unsigned char *)target, &pos);
         } else { st.st_size = 0; write_entry(o, line, &st, NULL, &pos); }   /* dirs/etc: no data */
         if (verbose) fprintf(stderr, "%s\n", line);
     }
@@ -75,8 +86,27 @@ static int do_extract(FILE *in, int listonly) {
         FILE *of = NULL;
         if (!listonly && S_ISREG(mode)) { for (char *s = strchr(name, '/'); s; s = strchr(s + 1, '/')) { *s = 0; mkdir(name, 0755); *s = '/'; } of = fopen(name, "wb"); if (verbose) fprintf(stderr, "%s\n", name); }
         else if (!listonly && S_ISDIR(mode)) mkdir(name, mode & 07777);
+        /* A symlink carries its target as the entry's data, so read it and
+         * create the link rather than dropping the bytes on the floor. */
+        int is_link = !listonly && S_ISLNK(mode) && filesize > 0 && filesize < 4096;
+        char link_target[4096];
         unsigned rem = filesize; char buf[8192];
-        while (rem > 0) { size_t w = rem < sizeof buf ? rem : sizeof buf; size_t r = fread(buf, 1, w, in); if (!r) break; if (of) fwrite(buf, 1, r, of); rem -= r; pos += r; }
+        unsigned got = 0;
+        while (rem > 0) {
+            size_t w = rem < sizeof buf ? rem : sizeof buf;
+            size_t r = fread(buf, 1, w, in);
+            if (!r) break;
+            if (of) fwrite(buf, 1, r, of);
+            if (is_link && got + r < sizeof link_target) { memcpy(link_target + got, buf, r); got += r; }
+            rem -= r; pos += r;
+        }
+        if (is_link) {
+            link_target[got] = 0;
+            for (char *s = strchr(name, '/'); s; s = strchr(s + 1, '/')) { *s = 0; mkdir(name, 0755); *s = '/'; }
+            unlink(name);
+            if (symlink(link_target, name) && verbose) fprintf(stderr, "cpio: %s: cannot create link\n", name);
+            else if (verbose) fprintf(stderr, "%s -> %s\n", name, link_target);
+        }
         if (of) { fclose(of); chmod(name, mode & 07777); }
         while (pos % 4) { fgetc(in); pos++; }
     }

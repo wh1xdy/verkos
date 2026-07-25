@@ -44,10 +44,48 @@ build_initramfs() {
     $SUDO cp "$ROOTFS/sbin/urverk" "$work/init"
     $SUDO chmod 0755 "$work/init"
 
+    # A shell, so urverk's emergency prompt is real in early boot — which is
+    # exactly when it is needed: no root device, or a root that will not mount.
+    # Costs a few MB in an image whose ESP is measured in hundreds.
+    add_rescue_shell "$work"
+
     ( cd "$work" && find . | "$tools/vcpio" -o ) > "$BUILD_DIR/initramfs.cpio" \
         || die "vcpio failed"
     "$tools/vgzip" -c "$BUILD_DIR/initramfs.cpio" > "$out" || die "vgzip failed"
     ok "initramfs → $out ($(du -h "$out" | cut -f1))"
+}
+
+# Copy bash and whatever it links into the initramfs, plus verkbox for the
+# everyday tools, so a rescue prompt can actually do something.
+add_rescue_shell() {
+    local work="$1"
+    local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
+    [ -x "$ROOTFS/usr/bin/bash" ] || { warn "no bash in the rootfs — the initramfs gets no rescue shell"; return 0; }
+
+    # Mirror the real root's merged-/usr layout. The dynamic loader searches
+    # /usr/lib, and bash's interpreter path points there too, so putting the
+    # libraries anywhere else means "error while loading shared libraries".
+    mkdir -p "$work/usr/bin" "$work/usr/lib"
+    $SUDO ln -sfn usr/bin "$work/bin"
+    $SUDO ln -sfn usr/lib "$work/lib"
+    $SUDO ln -sfn usr/lib "$work/lib64"
+
+    $SUDO cp "$ROOTFS/usr/bin/bash" "$work/usr/bin/bash"
+    $SUDO ln -sf bash "$work/usr/bin/sh"
+    [ -x "$ROOTFS/usr/bin/verkbox" ] && $SUDO cp "$ROOTFS/usr/bin/verkbox" "$work/usr/bin/verkbox"
+
+    # the interpreter plus every library bash names
+    local libs lib d
+    libs=$(readelf -d "$ROOTFS/usr/bin/bash" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p')
+    libs="$libs ld-linux-aarch64.so.1 ld-linux-x86-64.so.2"
+    for lib in $libs; do
+        for d in "$ROOTFS/usr/lib" "$ROOTFS/lib" "$ROOTFS/usr/lib64"; do
+            [ -e "$d/$lib" ] && { $SUDO cp -L "$d/$lib" "$work/usr/lib/$lib"; break; }
+        done
+    done
+    # the loop's last test fails on whichever arch's loader is not present, and
+    # that must not look like a failed function under set -e
+    return 0
 }
 
 build_vboot() {
