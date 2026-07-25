@@ -45,17 +45,14 @@ fetch_one "libxcrypt-${LIBXCRYPT_VERSION}.tar.xz"     "$LIBXCRYPT_SHA256"
 fetch_one "Linux-PAM-${LINUXPAM_VERSION}.tar.xz"      "$LINUXPAM_SHA256"
 fetch_one "perl-${PERL_VERSION}.tar.xz"               "$PERL_SHA256"
 fetch_one "shadow-${SHADOW_VERSION}.tar.xz"           "$SHADOW_SHA256"
-fetch_one "dhcpcd-${DHCPCD_VERSION}.tar.xz"           "$DHCPCD_SHA256"
 fetch_one "openssl-${OPENSSL_VERSION}.tar.gz"         "$OPENSSL_SHA256"
 fetch_one "openssh-${OPENSSH_VERSION}.tar.gz"         "$OPENSSH_SHA256"
-fetch_one "iproute2-${IPROUTE2_VERSION}.tar.xz"       "$IPROUTE2_SHA256"
 fetch_one "iputils-${IPUTILS_VERSION}.tar.gz"         "$IPUTILS_SHA256"
 fetch_one "curl-${CURL_VERSION}.tar.xz"               "$CURL_SHA256"
 fetch_one "nano-${NANO_VERSION}.tar.xz"               "$NANO_SHA256"
 # Mozilla CA bundle (curl.se) — for HTTPS verification (vpk/curl). Mutable file,
 # so no pinned hash; it's a cert store, not built source.
 fetch_one "cacert.pem"                                ""
-fetch_one "kmod-${KMOD_VERSION}.tar.xz"               "$KMOD_SHA256"
 fetch_one "util-linux-${UTIL_LINUX_VERSION}.tar.xz"   "$UTIL_LINUX_SHA256"
 fetch_one "dbus-${DBUS_VERSION}.tar.xz"               "$DBUS_SHA256"
 

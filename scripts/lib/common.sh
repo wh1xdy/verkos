@@ -117,7 +117,6 @@ source_url() {
         systemd-*)    echo "$URL_SYSTEMD/v${SYSTEMD_VERSION}.tar.gz" ;;
         bzip2-*)      echo "$URL_SOURCEWARE/bzip2/$pkg" ;;
         dbus-*)       echo "$URL_DBUS/$pkg" ;;
-        kmod-*)       echo "$URL_KMOD/$pkg" ;;
         util-linux-*) echo "$URL_UTILLINUX/v${UTIL_LINUX_VERSION%.*}/$pkg" ;;
         libcap-*)     echo "$URL_LIBCAP/$pkg" ;;
         expat-*)      echo "$URL_EXPAT/R_${EXPAT_VERSION//./_}/$pkg" ;;

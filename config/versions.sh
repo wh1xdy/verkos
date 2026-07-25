@@ -51,11 +51,13 @@ PERL_VERSION="5.38.2";       PERL_SHA256="d91115e90b896520e83d4de6b52f8254ef2b70
 SHADOW_VERSION="4.16.0";     SHADOW_SHA256="b78e3921a95d53282a38e90628880624736bf6235e36eea50c50835f59a3530b"
 
 # --- Networking + SSH ------------------------------------------------------
+# kept for the vpk port only (not built into the base system)
 DHCPCD_VERSION="10.1.0";     DHCPCD_SHA256="abc307c63853da3199baa5c1e15fd5ede9d68d068b2a59ca14c5a6768e9cc3b7"
 OPENSSL_VERSION="3.4.0";     OPENSSL_SHA256="e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
 OPENSSH_VERSION="9.9p1";     OPENSSH_SHA256="b343fbcdbff87f15b1986e6e15d6d4fc9a7d36066be6b7fb507087ba8f966c02"
 
 # --- Extra userland tools --------------------------------------------------
+# kept for the vpk port only (not built into the base system)
 IPROUTE2_VERSION="6.12.0";   IPROUTE2_SHA256="bbd141ef7b5d0127cc2152843ba61f274dc32814fa3e0f13e7d07a080bef53d9"
 IPUTILS_VERSION="20240905";  IPUTILS_SHA256="599cda8e3f5f7ce4c612456ab1101369da8f79aa0f83c8e877290a1c7bb56010"
 CURL_VERSION="8.11.0";       CURL_SHA256="db59cf0d671ca6e7f5c2c5ec177084a33a79e04c97e71cf183a5cdea235054eb"
@@ -67,7 +69,7 @@ NANO_VERSION="8.2";          NANO_SHA256="d5ad07dd862facae03051c54c6535e54c7ed74
 SYSTEMD_VERSION="256.7";     SYSTEMD_SHA256="896d76ff65c88f5fd9e42f90d152b0579049158a163431dd77cdc57748b1d7b0"
 DBUS_VERSION="1.16.0";       DBUS_SHA256="9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
 UTIL_LINUX_MIN="2.40.2"      # systemd needs a recent util-linux
-KMOD_VERSION="33";           KMOD_SHA256="dc768b3155172091f56dc69430b5481f2d76ecd9ccb54ead8c2540dbcf5ea9bc"
+# kmod removed — nothing in VerkOS loads kernel modules (no udev, no modprobe)
 EXPAT_VERSION="2.6.4";       EXPAT_SHA256="a695629dae047055b37d50a0ff4776d1d45d0a4c842cf4ccee158441f55ff7ee"
 ZLIB_VERSION="1.3.2";        ZLIB_SHA256="bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
 LIBCAP_VERSION="2.70";       LIBCAP_SHA256="23a6ef8aadaf1e3e875f633bb2d116cfef8952dba7bc7c569b13458e1952b30f"
@@ -102,7 +104,6 @@ URL_NCURSES="https://invisible-mirror.net/archives/ncurses"
 URL_XZ="https://github.com/tukaani-project/xz/releases/download"
 URL_SOURCEWARE="https://sourceware.org/pub"
 URL_DBUS="https://dbus.freedesktop.org/releases/dbus"
-URL_KMOD="https://mirrors.edge.kernel.org/pub/linux/utils/kernel/kmod"
 URL_UTILLINUX="https://mirrors.edge.kernel.org/pub/linux/utils/util-linux"
 URL_LIBCAP="https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2"
 URL_EXPAT="https://github.com/libexpat/libexpat/releases/download"

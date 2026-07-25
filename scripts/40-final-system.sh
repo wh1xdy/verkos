@@ -56,7 +56,6 @@ systemd-timesync:x:78:78:systemd Time Synchronization:/:/usr/bin/false
 systemd-coredump:x:79:79:systemd Core Dumper:/:/usr/bin/false
 uuidd:x:80:80:UUID Generation Daemon User:/dev/null:/usr/bin/false
 sshd:x:50:50:sshd PrivSep:/var/lib/sshd:/usr/bin/false
-dhcpcd:x:52:52:dhcpcd PrivSep:/var/lib/dhcpcd:/usr/bin/false
 nobody:x:65534:65534:Unprivileged User:/dev/null:/usr/bin/false
 EOF
     sudo tee "$ROOTFS/etc/group" >/dev/null <<'EOF'
@@ -89,7 +88,6 @@ systemd-timesync:x:78:
 systemd-coredump:x:79:
 uuidd:x:80:
 sshd:x:50:
-dhcpcd:x:52:
 wheel:x:97:
 users:x:999:
 nogroup:x:65534:
@@ -362,7 +360,7 @@ cd /sources
 mark util-linux
 fi
 
-# 6-7b. zlib, xz, expat, libcap, kmod, gperf, libffi — systemd link/build deps.
+# 6-7b. zlib, xz, expat, libcap, gperf, libffi — link/build deps of the rest.
 # Stamped as a group: one-time builds that must NOT rebuild on a `make system`
 # re-run (kmod's libtool chokes re-linking over a dirty tree, and the re-run's
 # verkbox tar can't re-extract .xz), so guard the whole block behind one stamp.
@@ -377,11 +375,9 @@ d=$(unpack expat-${EXPAT_VERSION}.tar.xz); cd "$d"
 say "libcap ${LIBCAP_VERSION}"
 d=$(unpack libcap-${LIBCAP_VERSION}.tar.xz); cd "$d"
 make prefix=/usr lib=lib; make prefix=/usr lib=lib install; cd /sources
-say "kmod ${KMOD_VERSION}"
-d=$(unpack kmod-${KMOD_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --sysconfdir=/etc --with-openssl=no --with-xz \
-    --with-zstd=no --disable-manpages
-make; make install; cd /sources
+# kmod — REMOVED. It was built as a systemd dependency; with systemd gone
+# nothing in VerkOS loads a kernel module: no udev, no modprobe call in any
+# script, service or recipe. See the note about /lib/modules below.
 # gperf — systemd build dep
 say "gperf ${GPERF_VERSION}"
 d=$(unpack gperf-${GPERF_VERSION}.tar.gz); cd "$d"
@@ -541,16 +537,9 @@ fi
 
 # dhcpcd — the ACTIVE DHCP/DNS client (chosen over systemd-networkd; first step
 # toward replacing systemd's networking).
-if need dhcpcd; then
-say "dhcpcd ${DHCPCD_VERSION}"
-d=$(unpack dhcpcd-${DHCPCD_VERSION}.tar.xz); cd "$d"
-./configure --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/lib/dhcpcd \
-    --dbdir=/var/lib/dhcpcd --rundir=/run --privsepuser=dhcpcd
-make
-make install
-cd /sources
-mark dhcpcd
-fi
+# dhcpcd — REMOVED from the base system. vdhcp is the DHCP client and runs as
+# an urverk service; dhcpcd was installed and then never started by anything.
+# Still available as a vpk port: `vpk install dhcpcd`.
 
 # 11. Extra userland tools ---------------------------------------------------
 # bison + flex — parser/lexer generators (needed by iproute2 and others). Also
@@ -578,15 +567,11 @@ mark flex
 fi
 
 # iproute2 — ip, ss
-if need iproute2; then
-say "iproute2 ${IPROUTE2_VERSION}"
-d=$(unpack iproute2-${IPROUTE2_VERSION}.tar.xz); cd "$d"
-./configure
-make
-make install
-cd /sources
-mark iproute2
-fi
+# iproute2 — REMOVED from the base system. Its two headline commands were
+# already shadowed: `ip` -> vip and `ss`/`netstat` -> vss (see the netln block
+# below), so the package only shipped binaries the system renamed out of the
+# way. Still available as a vpk port for anyone who wants tc/bridge/netns,
+# which vip does not cover: `vpk install iproute2`.
 
 # iputils — ping (meson build; trim deps/docs to just the tools)
 if need iputils; then
@@ -1013,14 +998,14 @@ reg gzip "$GZIP_VERSION";          reg make "$MAKE_VERSION"
 reg patch "$PATCH_VERSION";        reg util-linux "$UTIL_LINUX_VERSION"
 reg zlib "$ZLIB_VERSION";          reg xz "$XZ_VERSION"
 reg expat "$EXPAT_VERSION";        reg libcap "$LIBCAP_VERSION"
-reg kmod "$KMOD_VERSION";          reg gperf "$GPERF_VERSION"
+reg gperf "$GPERF_VERSION"
 reg pkgconf "$PKGCONF_VERSION";    reg libffi "$LIBFFI_VERSION"
 reg python "$PYTHON_VERSION";      reg ninja "$NINJA_VERSION"
 reg perl "$PERL_VERSION";          reg libxcrypt "$LIBXCRYPT_VERSION"
 reg shadow "$SHADOW_VERSION";      reg linux-pam "$LINUXPAM_VERSION"
 reg dbus "$DBUS_VERSION";          reg urverk 0.1
 reg openssl "$OPENSSL_VERSION";    reg openssh "$OPENSSH_VERSION"
-reg dhcpcd "$DHCPCD_VERSION";      reg iproute2 "$IPROUTE2_VERSION"
+
 reg iputils "$IPUTILS_VERSION";    reg curl "$CURL_VERSION"
 reg nano "$NANO_VERSION"
 
@@ -1123,12 +1108,12 @@ NATIVE
 }
 
 # The authoritative full package order for the final system (checklist).
-# The native script above implements the critical path through systemd; the
-# rest of userland is layered on using the identical in-chroot pattern.
+# The native script above implements the critical path; the rest of userland is
+# layered on using the identical in-chroot pattern.
 FINAL_SYSTEM_SEQUENCE=(
     glibc zlib bzip2 xz ncurses bash coreutils
     sed grep gawk diffutils findutils tar gzip make patch m4 bison flex
-    binutils gcc file gperf expat libcap kmod util-linux dbus urverk
+    binutils gcc file gperf expat libcap util-linux dbus urverk
 )
 
 require_ready
