@@ -2,15 +2,17 @@
 # The real logic lives in scripts/; this is a thin, discoverable wrapper.
 #
 #   make check   ARCH=x86_64     verify host prerequisites
+#   make test                    run the host-side test suite (also run by CI)
 #   make pin                     download every source, pin real SHA-256s
 #   make fetch                   download + verify all sources
 #   make toolchain ARCH=aarch64  build the cross-toolchain
 #   make temp    ARCH=x86_64     temporary tools
-#   make system  ARCH=x86_64     final native system (incl. systemd)
+#   make system  ARCH=x86_64     final native system (urverk as init)
 #   make kernel  ARCH=x86_64     build the Linux kernel
-#   make image   ARCH=x86_64     assemble the bootable initramfs
+#   make image   ARCH=x86_64     trim the rootfs, build the ext4 image
+#   make boot    ARCH=x86_64     vboot + initramfs + a bootable GPT/ESP disk
 #   make         ARCH=x86_64     full pipeline
-#   make run     ARCH=x86_64     boot the result in QEMU
+#   make run     ARCH=x86_64     boot the result in QEMU (via UEFI + vboot)
 #   make clean   ARCH=x86_64     remove build scratch (keep sources+toolchain)
 #   make distclean               remove everything under work/
 
@@ -44,4 +46,4 @@ distclean:
 	@echo "removed work/ entirely"
 
 help:
-	@sed -n '2,20p' Makefile
+	@sed -n '2,22p' Makefile
