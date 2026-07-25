@@ -1476,6 +1476,11 @@ static int rm_is_dot(const char *p) {
 }
 
 /* Remove one path. recursive/force control -r/-f. Returns 0 ok, 1 on error. */
+/* GNU rm's -v, which LFS-style recipes use freely ("rm -fv ..."). Kept as a
+ * file-static rather than threaded through the recursion, which only ever
+ * passes it down unchanged. */
+static int rm_verbose;
+
 static int rm_do(const char *path, int recursive, int force) {
     struct stat st;
     if (lstat(path, &st) != 0) {
@@ -1515,6 +1520,7 @@ static int rm_do(const char *path, int recursive, int force) {
             fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
             return 1;
         }
+        if (rm_verbose) printf("removed directory '%s'\n", path);
         return 0;
     }
     if (unlink(path) != 0) {
@@ -1522,11 +1528,13 @@ static int rm_do(const char *path, int recursive, int force) {
         fprintf(stderr, "rm: cannot remove '%s': %s\n", path, strerror(errno));
         return 1;
     }
+    if (rm_verbose) printf("removed '%s'\n", path);
     return 0;
 }
 
 static int a_rm(int argc, char **argv) {
     int recursive = 0, force = 0, endopt = 0, status = 0, nfiles = 0;
+    rm_verbose = 0;
     char **files = malloc((size_t)argc * sizeof *files);
     if (!files) { fprintf(stderr, "rm: memory exhausted\n"); return 1; }
     for (int i = 1; i < argc; i++) {
@@ -1536,6 +1544,7 @@ static int a_rm(int argc, char **argv) {
             if (a[1] == '-') {                                          /* long */
                 if (!strcmp(a, "--recursive")) { recursive = 1; continue; }
                 if (!strcmp(a, "--force"))     { force = 1; continue; }
+                if (!strcmp(a, "--verbose"))   { rm_verbose = 1; continue; }
                 fprintf(stderr, "rm: unrecognized option '%s'\n", a);
                 fprintf(stderr, "Try 'rm --help' for more information.\n");
                 free(files); return 1;
@@ -1543,6 +1552,7 @@ static int a_rm(int argc, char **argv) {
             for (char *p = a + 1; *p; p++) {                            /* short */
                 if (*p == 'r' || *p == 'R') recursive = 1;
                 else if (*p == 'f') force = 1;
+                else if (*p == 'v') rm_verbose = 1;
                 else {
                     fprintf(stderr, "rm: invalid option -- '%c'\n", *p);
                     fprintf(stderr, "Try 'rm --help' for more information.\n");

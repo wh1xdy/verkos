@@ -280,6 +280,10 @@ make -f Makefile-libbz2_so
 make clean
 make
 make PREFIX=/usr install
+# Clear the targets first: cp refuses to overwrite an existing symlink, which
+# a rerun of this block always hits. (--remove-destination is GNU-only, and cp
+# here is verkbox's, which rightly rejects flags it does not implement.)
+rm -f /usr/lib/libbz2.so.*
 cp -av libbz2.so.* /usr/lib
 ln -sfv libbz2.so.${BZIP2_VERSION} /usr/lib/libbz2.so
 cp -v bzip2-shared /usr/bin/bzip2
@@ -306,7 +310,9 @@ mkdir -p build && cd build
     --enable-plugins --enable-shared --disable-werror --enable-64-bit-bfd \
     --enable-new-dtags --with-system-zlib --enable-default-hash-style=gnu \
     --enable-gprofng=no
-make tooldir=/usr; make tooldir=/usr install
+# MAKEINFO=true: binutils and gcc build info manuals, which need texinfo.
+# VerkOS does not ship it, and the manuals are not worth another package.
+make MAKEINFO=true tooldir=/usr; make MAKEINFO=true tooldir=/usr install
 rm -fv /usr/lib/lib{bfd,ctf,ctf-nobfd,opcodes,sframe}.a
 cd /sources
 
@@ -324,7 +330,7 @@ mkdir -p build && cd build
     --enable-default-pie --enable-default-ssp \
     --disable-multilib --disable-bootstrap --disable-fixincludes \
     --with-system-zlib
-make; make install
+make MAKEINFO=true; make MAKEINFO=true install
 ln -sfv gcc /usr/bin/cc
 cd /sources
 
