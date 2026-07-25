@@ -148,6 +148,27 @@ if $CC -O2 -w -o "$T/vget" pkg/vget/vget.c -lssl -lcrypto 2>/dev/null; then
     fi
 else bad "vget does not compile"; fi
 
+say "vawk splits fields the way awk is specified to"
+# POSIX: an FS longer than one character is an extended regular expression.
+# vawk used only its first character, so -F'[(, ]+' split on '[' and every
+# field after the first came out empty — with a zero exit status. GCC builds
+# its aarch64 tune table with exactly that expression and refused to continue
+# because the table came out empty.
+if [ -x "$T/vawk" ] && command -v awk >/dev/null 2>&1; then
+    printf 'AARCH64_CORE("cortex-a34", cortexa34, x, y)\nAARCH64_CORE("cortex-a53", cortexa53, x, y)\n' > "$T/cores.def"
+    printf '/^AARCH64_CORE/ { c = c $3 "," }\nEND { print c }\n' > "$T/cores.awk"
+    ours=$("$T/vawk" -F'[(, ]+' -f "$T/cores.awk" "$T/cores.def" 2>&1)
+    theirs=$(awk -F'[(, ]+' -f "$T/cores.awk" "$T/cores.def" 2>&1)
+    if [ "$ours" = "$theirs" ]; then ok "vawk matches awk on a regex field separator"
+    else bad "vawk -F regex: got '$ours', awk gives '$theirs'"; fi
+    for fs in ':' '[0-9]+' '::' ' '; do
+        o=$(printf 'a1b22c:d::e f\n' | "$T/vawk" -F"$fs" '{print NF ":" $2}' 2>&1)
+        g=$(printf 'a1b22c:d::e f\n' | awk -F"$fs" '{print NF ":" $2}' 2>&1)
+        if [ "$o" = "$g" ]; then ok "vawk matches awk with FS='$fs'"
+        else bad "vawk FS='$fs': got '$o', awk gives '$g'"; fi
+    done
+fi
+
 say "vsed handles the sed scripts real software writes"
 # cmake's bootstrap substitutes its namespace with a multi-line block script.
 # vsed entered the block and did nothing: the command written immediately after

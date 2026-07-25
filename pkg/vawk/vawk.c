@@ -239,7 +239,37 @@ static void split_fields(void) {
     NF = 0; char *s = g_line;
     if (!strcmp(FS_, " ")) {
         while (*s) { while (*s == ' ' || *s == '\t' || *s == '\n') s++; if (!*s) break; char *st = s; while (*s && *s != ' ' && *s != '\t' && *s != '\n') s++; int l = s - st; fields[++NF] = malloc(l + 1); memcpy(fields[NF], st, l); fields[NF][l] = 0; }
-    } else { char fc = FS_[0]; char *st = s; for (;; s++) { if (*s == fc || *s == 0) { int l = s - st; fields[++NF] = malloc(l + 1); memcpy(fields[NF], st, l); fields[NF][l] = 0; if (!*s) break; st = s + 1; } } }
+    } else if (FS_[1] == 0) {
+        char fc = FS_[0]; char *st = s;
+        for (;; s++) { if (*s == fc || *s == 0) { int l = s - st; fields[++NF] = malloc(l + 1); memcpy(fields[NF], st, l); fields[NF][l] = 0; if (!*s) break; st = s + 1; } }
+    } else {
+        /* POSIX: an FS of more than one character is an extended regular
+         * expression, not a literal. Using only FS_[0] meant -F'[(, ]+' split
+         * on '[', so every field after the first came out empty — a wrong
+         * answer with a zero exit status. GCC's own build generates its
+         * aarch64 tune table this way and stopped because the table came out
+         * empty; that is how this was found. */
+        regex_t fre;
+        if (regcomp(&fre, FS_, REG_EXTENDED)) {
+            char fc = FS_[0]; char *st = s;
+            for (;; s++) { if (*s == fc || *s == 0) { int l = s - st; fields[++NF] = malloc(l + 1); memcpy(fields[NF], st, l); fields[NF][l] = 0; if (!*s) break; st = s + 1; } }
+            return;
+        }
+        char *p = s;
+        regmatch_t m;
+        while (*p && regexec(&fre, p, 1, &m, p == s ? 0 : REG_NOTBOL) == 0) {
+            if (m.rm_eo == m.rm_so) break;          /* empty match: no progress */
+            int l = (int)m.rm_so;
+            fields[++NF] = malloc((size_t)l + 1);
+            memcpy(fields[NF], p, (size_t)l); fields[NF][l] = 0;
+            p += m.rm_eo;
+            if (NF >= 250) break;
+        }
+        int l = (int)strlen(p);
+        fields[++NF] = malloc((size_t)l + 1);
+        memcpy(fields[NF], p, (size_t)l); fields[NF][l] = 0;
+        regfree(&fre);
+    }
 }
 static void set_line(const char *l) { free(g_line); g_line = strdup(l); split_fields(); }
 static void rebuild_line(void) { char buf[8192]; int n = 0; for (int i = 1; i <= NF; i++) { if (i > 1) { strcpy(buf + n, OFS); n += strlen(OFS); } const char *f = fields[i] ? fields[i] : ""; strcpy(buf + n, f); n += strlen(f); } buf[n] = 0; free(g_line); g_line = strdup(buf); }
