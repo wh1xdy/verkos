@@ -1,7 +1,7 @@
 # Building VerkOS
 
 This walks through building VerkOS **on your own machine** (Linux host
-recommended). A full glibc+systemd build takes **hours** and needs **15–25 GB**
+recommended). A full build takes **hours** and needs **15–25 GB**
 of free disk per architecture, so don't run it in a throwaway container.
 
 > When Claude is helping and hits a step that needs your laptop (heavy compile,
@@ -25,7 +25,7 @@ need `qemu-user-static` and `binfmt_misc` support (most distros ship this as the
 `qemu-user-static` package).
 
 You also need a host **`pip`** (`pip3`): `make fetch` uses it to download the
-sdists for systemd's build tools (meson, jinja2, markupsafe) into
+sdists for the python build tools (meson, jinja2, markupsafe) into
 `sources/pip/`, so the chroot can install them offline. See decision D-008.
 
 ### Building on macOS (Colima / Docker) — read this
@@ -88,7 +88,7 @@ make run ARCH=x86_64        # boots work/x86_64/out in QEMU
 ```
 
 Under the hood this calls `boot/qemu-$ARCH.sh`, which does a **direct kernel
-boot** — QEMU loads the kernel and initramfs with no bootloader. You should land
+boot** — UEFI firmware starts vboot, which loads the kernel and initramfs. You should land
 at a VerkOS login/shell. To quit QEMU: `Ctrl-A` then `X`.
 
 ## 5. Clean up

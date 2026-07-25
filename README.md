@@ -7,10 +7,10 @@
 
 VerkOS ("verk" is Swedish for *work / creation*) is a Linux From Scratch–style
 distro assembled the hard way on purpose: a cross-toolchain bootstraps temporary
-tools, which build a full **glibc + systemd** system inside a chroot. The result
-is a real, self-hosting OS that boots to a login prompt, goes online, and builds
-software from source on itself — one we understand top to bottom because we built
-every layer.
+tools, which build the final system inside a chroot. The result is a real,
+self-hosting OS that boots to a login prompt, goes online, and builds software
+from source on itself — one we understand top to bottom because we built every
+layer, **including the bootloader and init**.
 
 ---
 
@@ -30,10 +30,25 @@ every layer.
   shadow GNU only after it is flag-complete *and* verified byte-exact against GNU
   coreutils by differential tests.
 
-- **One coherent system, laptop to server.** A single glibc + systemd base with a
-  real PID 1, working login sessions, DHCP networking (dhcpcd) and SSH (OpenSSH).
-  The same userland scales from an interactive desktop-bound machine to a
-  headless box you SSH into.
+- **Its own bootloader — `vboot`.** A UEFI bootloader in plain C, no GRUB and no
+  gnu-efi: hand-written EFI headers, built with the same gcc and binutils as
+  everything else, for **aarch64 and x86_64**. It reads its own config, draws a
+  menu (graphically, when the firmware offers GOP), lets you edit the kernel
+  command line before booting, remembers the entry that last worked, notices a
+  boot that never reached userspace — and verifies the kernel and initramfs with
+  **Ed25519** before starting them.
+
+- **Its own init — `urverk`.** systemd is gone. One static binary is both the
+  initramfs `/init` (mount, find the root, `switch_root`) and PID 1: it mounts
+  the filesystems, brings up loopback, starts services in dependency order and
+  supervises them — respawn policies, oneshot services with readiness, per-service
+  logs, privilege dropping, cgroup limits, timers instead of cron, and socket
+  activation. `urverk-ctl` is the control tool.
+
+- **One coherent system, laptop to server.** A glibc base with a real PID 1,
+  working login sessions, DHCP networking (our own `vdhcp`) and SSH (OpenSSH).
+  The same userland scales from an interactive machine to a headless box you SSH
+  into.
 
 - **Genuinely multi-arch.** The build is a proper cross-toolchain bootstrap for
   **x86_64** (primary), **aarch64** (first boot achieved) and **i686**. x86_64 is
@@ -44,7 +59,7 @@ every layer.
 
 ## Quick start
 
-> A full glibc + systemd build compiles for **hours** and needs **tens of GB** of
+> A full build compiles for **hours** and needs **tens of GB** of
 > free disk. Run it on a real Linux machine with a **case-sensitive** filesystem,
 > not a throwaway container. The full walkthrough is in [`docs/BUILD.md`](docs/BUILD.md).
 
@@ -75,7 +90,7 @@ by [`scripts/build.sh`](scripts/build.sh) and wrapped by a discoverable `Makefil
 | 10 | `10-fetch-sources.sh`  | `fetch`     | Download every upstream tarball and verify its pinned SHA-256. |
 | 20 | `20-cross-toolchain.sh`| `toolchain` | Build the cross-toolchain: binutils, GCC, glibc, libstdc++ (`<arch>-verk-linux-gnu`). |
 | 30 | `30-temp-tools.sh`     | `temp`      | Cross-build the LFS-style temporary tools into the target rootfs. |
-| 40 | `40-final-system.sh`   | `system`    | Enter the chroot and build the final system: glibc → util-linux → D-Bus → **systemd**, the full GNU userland, plus vpk, verkbox, networking, SSH and `/etc` config. |
+| 40 | `40-final-system.sh`   | `system`    | Enter the chroot and build the final system: glibc → util-linux → D-Bus, the full GNU userland, plus vpk, verkbox, **urverk**, networking, SSH and `/etc` config. |
 | 50 | `50-kernel.sh`         | `kernel`    | Build the Linux kernel (6.12 LTS) for the target arch. |
 | 60 | `60-image.sh`          | `image`     | Assemble a bootable image (ext4 root disk / initramfs). |
 |  — | `boot/qemu-<arch>.sh`  | `run`       | Boot the built system in QEMU (direct kernel boot, no bootloader). |
@@ -83,8 +98,8 @@ by [`scripts/build.sh`](scripts/build.sh) and wrapped by a discoverable `Makefil
 Version numbers and hashes are pinned in one place —
 [`config/versions.sh`](config/versions.sh) — and per-arch settings live in
 [`config/targets/`](config/targets/). Notable components: GCC 14.2.0, glibc 2.40,
-binutils 2.43.1, Linux 6.12.9, systemd 256.7, bash 5.2.37, OpenSSL 3.4.0,
-OpenSSH 9.9p1, dhcpcd 10.1.0.
+binutils 2.43.1, Linux 6.12.9, bash 5.2.37, OpenSSL 3.4.0, OpenSSH 9.9p1.
+Init, bootloader, DHCP client and package manager are VerkOS' own.
 
 ---
 
@@ -153,12 +168,12 @@ own userland — same spirit as vpk: plain C, no dependencies, readable end to e
 VerkOS is a **self-hosting distro** today: it builds software from source and
 manages its own packages, on itself, with working login sessions.
 
-- **First boot achieved (aarch64).** `make run ARCH=aarch64` boots Linux 6.12.9,
-  mounts an ext4 root, runs **systemd 256.7 as PID 1**, reaches the Multi-User
-  target and drops to a `root@verkos:~#` shell.
+- **Boots on its own (aarch64).** `make run ARCH=aarch64` starts UEFI firmware →
+  **vboot** → Linux 6.12.9 → **urverk** as PID 1 → services → a
+  `root@verkos:~#` shell. No GRUB, no systemd, no `-kernel`.
 - **Full userland.** GCC, binutils and the complete GNU userland built natively
   into the rootfs; shadow provides real `login`/`passwd`.
-- **Online & reachable.** dhcpcd brings up networking with DNS; OpenSSH `sshd`
+- **Online & reachable.** Our own `vdhcp` brings up networking with DNS; OpenSSH `sshd`
   serves password and ed25519-key logins — verified end to end over QEMU port
   forwarding.
 - **vpk + verkbox live.** Both were built and verified *on VerkOS itself*
@@ -192,7 +207,7 @@ verkos/
 ```
 
 Deeper reading: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/DECISIONS.md`](docs/DECISIONS.md) (why glibc, why systemd, why distro-first),
+[`docs/DECISIONS.md`](docs/DECISIONS.md) (why glibc, why our own init, why distro-first),
 and [`docs/BUILD.md`](docs/BUILD.md).
 
 ---

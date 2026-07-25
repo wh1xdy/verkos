@@ -40,7 +40,7 @@ or `make`) runs them in sequence for a chosen target.
  ┌────────────────────────────────────────────────────────────┐
  │  Stage 4  final-system      build the real system natively:  │
  │                             glibc, gcc, coreutils, bash,     │
- │                             util-linux, systemd, D-Bus, …    │
+ │                             util-linux, D-Bus, urverk, …     │
  └────────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -69,7 +69,7 @@ $WORK/$ARCH/
 ├── tools/        # the cross-toolchain for this arch
 ├── rootfs/       # the target system being assembled
 ├── build/        # scratch build directories (deleted as we go)
-└── out/          # final artifacts: kernel image, initramfs, disk image
+└── out/          # final artifacts: kernel, initramfs, rootfs + boot disk
 ```
 
 `$WORK` defaults to `./work` (git-ignored). Override with `WORK=/path make ...`.
