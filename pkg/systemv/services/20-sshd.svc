@@ -1,0 +1,5 @@
+# OpenSSH. ssh-keygen -A is a no-op once the host keys exist.
+description OpenSSH server (VerkOS)
+pre /usr/bin/ssh-keygen -A
+exec /usr/sbin/sshd -D -e
+respawn on-failure

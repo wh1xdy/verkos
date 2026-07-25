@@ -1,0 +1,4 @@
+# VerkOS' own DHCP client. Brings up networking; keep it alive.
+description vdhcp DHCP client (VerkOS)
+exec /usr/sbin/vdhcp
+respawn always

@@ -1,0 +1,6 @@
+# Console login. vgetty sets up the tty and execs /bin/login; when the session
+# ends we want a fresh prompt, so this always comes back. %console% expands to
+# whatever tty the kernel is using (ttyAMA0 on arm, ttyS0 on x86, ...).
+description console login (vgetty)
+exec /usr/bin/vgetty --autologin root --keep-baud %console% 115200,38400,9600 linux
+respawn always
