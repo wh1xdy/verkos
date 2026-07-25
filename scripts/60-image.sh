@@ -15,6 +15,33 @@ mkdirs
 # This is worth a lot: unstripped binaries alone are most of the image (gcc's
 # internals in /usr/libexec were 983 MB, 109 MB stripped). Measured effect on
 # aarch64: 4.0 GB -> 603 MB of content, and a 5.1 GB -> 1.1 GB image file.
+# Refuse to package a rootfs whose top level has entries nobody meant to put
+# there. This is not hypothetical: vtar, given a compressed file it could not
+# read, treated the compressed bytes as tar headers and created 36 files and
+# directories named after that binary garbage — in whatever directory it was
+# run from, which during a build is /. The extraction "succeeded" and the
+# corruption reached a booted VM before anything enumerated / and noticed.
+check_rootfs_sane() {
+    local bad
+    bad=$(ls -1 "$ROOTFS" | LC_ALL=C grep -cv '^[A-Za-z0-9._+-]*$' || true)
+    [ "${bad:-0}" -eq 0 ] && return 0
+    ls -1b "$ROOTFS" | LC_ALL=C grep -v '^[A-Za-z0-9._+-]*$' | head -5 | sed 's/^/    /' >&2
+    die "$bad entries in $ROOTFS have names that are not plain text — the rootfs is corrupt, not shipping it"
+}
+
+# Nothing may be mounted inside the rootfs while it is trimmed. The trim does
+# `rm -rf $ROOTFS/sources/*`, and $ROOTFS/sources is a bind mount of the shared,
+# SHA-verified tarball cache during a build — so a leaked mount turns a cleanup
+# into deleting every source the project has downloaded. It also silently
+# packages whatever is mounted: that is how a 600 MB image became 4.0 GB.
+check_rootfs_unmounted() {
+    local mounted
+    mounted=$(cut -d' ' -f2 /proc/mounts 2>/dev/null | grep "^${ROOTFS}/" || true)
+    [ -z "$mounted" ] && return 0
+    printf '%s\n' "$mounted" | sed 's/^/    /' >&2
+    die "something is still mounted inside $ROOTFS — unmount it before building an image"
+}
+
 trim_rootfs() {
     [ "${VERK_NO_TRIM:-0}" = "1" ] && { log "trim skipped (VERK_NO_TRIM=1)"; return 0; }
     local SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
@@ -59,6 +86,8 @@ trim_rootfs() {
 build_ext4_image() {
     [ -d "$ROOTFS" ] || die "no rootfs at $ROOTFS — build stages 30-40 first"
     command -v mkfs.ext4 >/dev/null || die "mkfs.ext4 (e2fsprogs) is required"
+    check_rootfs_unmounted
+    check_rootfs_sane
     trim_rootfs
 
     local img="$OUT_DIR/verkos-${ARCH}.ext4"

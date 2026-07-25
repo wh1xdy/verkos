@@ -18,6 +18,11 @@ KERNEL="$OUT/vmlinuz"
 # virtio-gpu gives the guest a KMS device (/dev/fb0, which vfb draws to) and
 # vboot a GOP to render its menu on; the input devices feed evdev.
 GPU_ARGS=(-device virtio-gpu-pci -device virtio-keyboard-pci -device virtio-tablet-pci)
+# Extra QEMU arguments for testing — an install target disk, say. Appended
+# rather than replacing QEMU_EXTRA, which the target config owns and which
+# carries the serial console the test harness reads.
+EXTRA_ARGS=()
+[ -n "${VERK_QEMU_ARGS:-}" ] && read -r -a EXTRA_ARGS <<< "$VERK_QEMU_ARGS"
 QMP_ARGS=()
 [ -n "${VERK_QMP:-}" ] && QMP_ARGS=(-qmp "unix:${VERK_QMP},server,nowait")
 # romfile= : this QEMU has no efi-virtio.rom, and the guest does not need one
@@ -48,7 +53,7 @@ if [ "${VERK_DIRECT:-0}" != "1" ] && [ -f "$BOOTIMG" ]; then
         -device virtio-blk-pci,drive=rootdisk \
         -drive if=none,id=espdisk,file="$BOOTIMG",format=raw \
         -device virtio-blk-pci,drive=espdisk,bootindex=0 \
-        "${NET_ARGS[@]}" "${GPU_ARGS[@]}" "${QMP_ARGS[@]}" \
+        "${NET_ARGS[@]}" "${GPU_ARGS[@]}" "${QMP_ARGS[@]}" "${EXTRA_ARGS[@]}" \
         $QEMU_EXTRA
 fi
 

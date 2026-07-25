@@ -175,6 +175,32 @@ static void get_uuid(const char *dev, char *out, size_t cap) {
         die("cannot read the UUID of %s", dev);
 }
 
+/* Everything the installed system needs to boot must be readable before the
+ * target disk is touched. Discovering a missing bootloader after partitioning,
+ * formatting and copying leaves the operator with a wiped disk and half an
+ * install — which is exactly what the first end-to-end run did. */
+static void check_source(const char *arch) {
+    const char *sroot = strcmp(source, "/") ? source : "";
+    const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
+    char p[768];
+
+    snprintf(p, sizeof p, "%s/sbin/urverk", sroot);
+    if (access(p, R_OK) != 0) die("%s is not a VerkOS system (no %s)", sroot[0] ? sroot : "/", p);
+
+    snprintf(p, sizeof p, "%s/boot/EFI/BOOT/%s", sroot, efi_name);
+    if (access(p, R_OK) != 0)
+        die("no bootloader at %s\n"
+            "       The EFI system partition has to be mounted at %s/boot.\n"
+            "       On the live medium: mount /dev/vdb1 %s/boot",
+            p, sroot[0] ? sroot : "", sroot[0] ? sroot : "");
+
+    snprintf(p, sizeof p, "%s/boot/vmlinuz", sroot);
+    if (access(p, R_OK) != 0) die("no kernel at %s", p);
+
+    snprintf(p, sizeof p, "%s/boot/initramfs.img", sroot);
+    if (access(p, R_OK) != 0) die("no initramfs at %s", p);
+}
+
 /* ---- confirmation --------------------------------------------------------- */
 static void confirm(const char *disk, unsigned esp_mb, const char *hostname) {
     printf("\n\033[1mAbout to install VerkOS onto %s\033[0m\n\n", disk);
@@ -206,7 +232,14 @@ static void copy_system(const char *root) {
     /* Copy the source system, minus everything that is generated at boot or
      * belongs to the installer. The target itself is under /run, which is
      * excluded, but be explicit rather than rely on that. */
-    static const char *skip[] = { "proc", "sys", "dev", "run", "tmp", "mnt", "media", "lost+found", NULL };
+    /* "boot" is deliberate: the target's EFI partition is mounted there, and
+     * install_bootloader fills it on purpose. Copying the source's /boot over
+     * it drops the live medium's vboot.conf onto the new ESP, and vboot reads
+     * that in preference to the one written for this install — the installed
+     * system then boots with the live system's root= and lands in the
+     * emergency shell. */
+    static const char *skip[] = { "proc", "sys", "dev", "run", "tmp", "mnt", "media",
+                                  "boot", "lost+found", NULL };
     DIR *d = opendir(source);
     if (!d) die("cannot read %s: %s", source, strerror(errno));
     struct dirent *e;
@@ -246,7 +279,7 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
 static void install_bootloader(const char *root, const char *arch, const char *root_uuid) {
     char esp[512];
     snprintf(esp, sizeof esp, "%s/boot", root);
-    run("mkdir -p %s/EFI/BOOT %s/EFI/verkos", esp, esp);
+    run("mkdir -p %s/EFI/BOOT", esp);
 
     /* vboot itself, under the name the firmware looks for with no NVRAM entry. */
     const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
@@ -269,32 +302,38 @@ static void install_bootloader(const char *root, const char *arch, const char *r
     run("cp %s/boot/initramfs* %s/ 2>/dev/null || true", sroot, esp);
 
     if (dry_run) return;
+    /* vboot reads \vboot.conf from the root of the ESP it was loaded from
+     * (pkg/vboot/vboot.c, CONFIG_PATH). Anywhere else is ignored. */
     char conf[1024];
-    snprintf(conf, sizeof conf, "%s/EFI/verkos/vboot.conf", esp);
+    snprintf(conf, sizeof conf, "%s/vboot.conf", esp);
     FILE *f = fopen(conf, "w");
     if (!f) die("cannot write %s: %s", conf, strerror(errno));
-    /* Root by UUID, not by /dev/sda2: the name a disk gets depends on what else
-     * is plugged in, and an installed system has to survive that. */
+    /* vboot's own syntax, not systemd-boot's: the keys are kernel/initrd/cmdline
+     * and the paths are EFI paths with backslashes. Getting this wrong is quiet
+     * — vboot falls back to a kernel it finds on the ESP, so the machine still
+     * boots, with no initrd and an empty command line, and panics mounting root.
+     * Keep it matching pkg/vboot/vboot.c and config/esp/vboot.conf. */
+    const char *console = !strcmp(arch, "aarch64") ? "ttyAMA0" : "ttyS0";
     fprintf(f,
         "# Written by vinstall.\n"
         "timeout 5\n"
         "default 0\n"
         "\n"
         "entry VerkOS\n"
-        "    linux   /vmlinuz\n"
-        "    initrd  /initramfs.img\n"
-        "    options root=UUID=%s rw console=tty0\n"
+        "  kernel  \\vmlinuz\n"
+        "  initrd  \\initramfs.img\n"
+        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk\n"
         "\n"
         "entry VerkOS (verbose boot)\n"
-        "    linux   /vmlinuz\n"
-        "    initrd  /initramfs.img\n"
-        "    options root=UUID=%s rw console=tty0 urverk.debug\n"
+        "  kernel  \\vmlinuz\n"
+        "  initrd  \\initramfs.img\n"
+        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk urverk.debug\n"
         "\n"
         "entry VerkOS (rescue shell)\n"
-        "    linux   /vmlinuz\n"
-        "    initrd  /initramfs.img\n"
-        "    options root=UUID=%s rw console=tty0 urverk.rescue\n",
-        root_uuid, root_uuid, root_uuid);
+        "  kernel  \\vmlinuz\n"
+        "  initrd  \\initramfs.img\n"
+        "  cmdline root=UUID=%s rw console=%s init=/sbin/urverk urverk.rescue\n",
+        root_uuid, console, root_uuid, console, root_uuid, console);
     fclose(f);
 }
 
@@ -370,6 +409,7 @@ int main(int argc, char **argv) {
     if (device_is_mounted(disk))
         die("%s has mounted partitions — unmount them first", disk);
 
+    if (!dry_run) check_source(arch);
     confirm(disk, esp_mb, hostname);
 
     char esp_part[256], root_part[256];

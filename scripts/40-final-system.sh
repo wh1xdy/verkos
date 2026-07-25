@@ -434,12 +434,25 @@ cd /sources
 mark python
 fi
 
+# ninja and meson used to run unguarded, which made stage 40 impossible to
+# resume: stage 60 slims the rootfs and deletes python3/meson/ninja from it, so
+# every later run reached this point and died on "python3: command not found".
+# Guarded like every other package, they are simply skipped once built — and a
+# resume that genuinely needs them now fails with a message that says so.
+if need ninja; then
 say "ninja ${NINJA_VERSION}"
 d=$(unpack ninja-${NINJA_VERSION}.tar.gz); cd "$d"
+command -v python3 >/dev/null || {
+    echo "!! python3 is gone from this rootfs (stage 60 slims it away)." >&2
+    echo "!! Rebuild from a clean rootfs to change anything that needs meson." >&2
+    exit 1; }
 python3 configure.py --bootstrap
 install -vm755 ninja /usr/bin/
 cd /sources
+mark ninja
+fi
 
+if need meson; then
 say "meson + jinja2 (offline pip from /sources/pip)"
 if [ -d /sources/pip ]; then
     # setuptools+wheel (universal wheels) first, so markupsafe's sdist builds
@@ -454,6 +467,8 @@ fi
 command -v meson >/dev/null && command -v ninja >/dev/null \
     || { echo "!! meson/ninja not available after install" >&2; exit 1; }
 cd /sources
+mark meson
+fi
 
 # 8. D-Bus (systemd's IPC bus) — dbus 1.16 uses meson, not autotools.
 if need dbus; then

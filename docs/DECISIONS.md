@@ -365,3 +365,52 @@ that.
 
 **`-s DIR` installs from a tree instead of the running system**, which is what
 an ISO will do, and what makes the installer testable without a live medium.
+
+**Verified end to end** on aarch64: a bare 4 GB disk, installed onto from a
+running VerkOS, then booted on its own with nothing else attached — UEFI →
+vboot → kernel → initramfs → urverk → sshd, root and /boot both resolved by
+UUID, 25/25 tools and 75 packages present, and the installer on the installed
+system correctly refusing to install over the disk it is running from.
+
+Booting what it produced is what found the defects; none of them changed an
+exit code, and the install "succeeded" every time:
+
+- **The config was written in the wrong language.** vboot's keys are
+  `kernel`/`initrd`/`cmdline` with EFI (backslash) paths; the installer wrote
+  systemd-boot's `linux`/`initrd`/`options` with Unix paths. vboot fell back to
+  a kernel it found on the ESP, so the machine still booted — with no initrd
+  and an empty command line — and panicked mounting root.
+- **Copying the source's `/boot` overwrote the new ESP.** The target's EFI
+  partition is mounted there, so the live medium's vboot.conf landed on the
+  installed system and won, pointing root at the *live* disk.
+- **The source was only checked after the target was destroyed.** A missing
+  bootloader was discovered after partitioning, formatting and copying. Every
+  requirement is now verified before the disk is touched.
+- **urverk could not resolve the fstab entry the installer wrote.** It passed
+  `UUID=1730-7CA7` straight to `mount(2)`, which wants a device node, and only
+  knew how to read an ext superblock anyway. It now reads FAT boot sectors too,
+  so `/boot` mounts. Without this the ESP was silently absent — and an
+  installed system cannot install onward, or update its own kernel, without it.
+
+## D-016 — The image build refuses a rootfs it does not recognise
+
+Two guards now run before `make image` packages anything, both because
+something got through:
+
+**Nothing may be mounted inside the rootfs.** The trim does
+`rm -rf $ROOTFS/sources/*`, and `$ROOTFS/sources` is a bind mount of the
+shared, SHA-verified tarball cache during a build. A leaked mount turns a
+cleanup into deleting every source the project has downloaded. It also silently
+packages whatever is mounted — which is how a 589 MB image became 4.0 GB
+without anything reporting a problem.
+
+**The top level must have plain-text names.** vtar, handed a compressed file it
+could not read, treated the compressed bytes as tar headers and created 36
+files and directories named after that binary garbage, in whatever directory it
+was running from — during a build, `/`. The extraction reported success, the
+corruption was copied into the image, and it reached a booted VM. It was only
+noticed because the installer enumerated `/` and tried to `cp` a name full of
+control characters, which the shell rejected as a syntax error.
+
+The lesson is the same one vbzip2 taught: a tool that fails without saying so
+does not merely fail to work, it leaves damage somewhere nobody is looking.

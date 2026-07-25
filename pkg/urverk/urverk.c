@@ -176,14 +176,45 @@ static int ext_super(const char *dev, char *label, char *uuid) {
     close(fd);
     return ok;
 }
-/* Turn "LABEL=x" / "UUID=y" into a device path; anything else is passed through. */
-static void resolve_root(char *spec, size_t cap) {
+/* A FAT volume has no ext superblock. Its serial is four bytes in the boot
+ * sector — which blkid prints as XXXX-XXXX — and its label sits beside it. The
+ * EFI system partition is FAT, so without this an fstab line saying
+ * "UUID=1730-7CA7 /boot vfat" can never be resolved and /boot stays unmounted. */
+static int fat_super(const char *dev, char *label, char *uuid) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char bs[512];
+    int ok = -1;
+    if (pread(fd, bs, sizeof bs, 0) == (ssize_t)sizeof bs &&
+        bs[510] == 0x55 && bs[511] == 0xAA) {
+        int fat32 = !memcmp(bs + 82, "FAT32", 5);
+        int off = fat32 ? 67 : 39;                  /* volume id; label follows it */
+        if (fat32 || !memcmp(bs + 54, "FAT", 3)) {
+            unsigned id = (unsigned)bs[off] | ((unsigned)bs[off+1] << 8) |
+                          ((unsigned)bs[off+2] << 16) | ((unsigned)bs[off+3] << 24);
+            snprintf(uuid, 40, "%04X-%04X", (id >> 16) & 0xffff, id & 0xffff);
+            memcpy(label, bs + off + 4, 11); label[11] = 0;
+            for (int i = 10; i >= 0 && label[i] == ' '; i--) label[i] = 0;
+            ok = 0;
+        }
+    }
+    close(fd);
+    return ok;
+}
+static int probe_dev(const char *dev, char *label, char *uuid) {
+    if (ext_super(dev, label, uuid) == 0) return 0;
+    return fat_super(dev, label, uuid);
+}
+
+/* Turn "LABEL=x" / "UUID=y" into a device path; anything else is passed through.
+ * <attempts> is how long to keep looking: the root device may not have appeared
+ * yet at this point in the boot, an fstab entry's device almost certainly has. */
+static int resolve_spec(char *spec, size_t cap, int attempts) {
     int by_label = !strncmp(spec, "LABEL=", 6);
     int by_uuid  = !strncmp(spec, "UUID=", 5);
-    if (!by_label && !by_uuid) return;
+    if (!by_label && !by_uuid) return 0;
     const char *want = spec + (by_label ? 6 : 5);
-    say2("looking for root by ", spec);
-    for (int attempt = 0; attempt < 100; attempt++) {     /* devices may still appear */
+    for (int attempt = 0; attempt < attempts; attempt++) {
         DIR *d = opendir("/dev");
         struct dirent *e;
         while (d && (e = readdir(d))) {
@@ -192,18 +223,24 @@ static void resolve_root(char *spec, size_t cap) {
                 strncmp(e->d_name, "nvme", 4) && strncmp(e->d_name, "mmcblk", 6)) continue;
             char dev[128], label[24], uuid[40];
             snprintf(dev, sizeof dev, "/dev/%.100s", e->d_name);
-            if (ext_super(dev, label, uuid)) continue;
+            if (probe_dev(dev, label, uuid)) continue;
             if ((by_label && !strcmp(label, want)) || (by_uuid && !strcasecmp(uuid, want))) {
                 closedir(d);
-                say2("root is ", dev);
                 snprintf(spec, cap, "%s", dev);
-                return;
+                return 0;
             }
         }
         if (d) closedir(d);
         usleep(100000);
     }
-    say("no device matched — leaving the root spec as it is");
+    return -1;
+}
+
+static void resolve_root(char *spec, size_t cap) {
+    if (strncmp(spec, "LABEL=", 6) && strncmp(spec, "UUID=", 5)) return;
+    say2("looking for root by ", spec);
+    if (resolve_spec(spec, cap, 100) == 0) say2("root is ", spec);
+    else say("no device matched — leaving the root spec as it is");
 }
 
 /* ---- checking the filesystem -------------------------------------------
@@ -441,6 +478,12 @@ static void mount_fstab(void) {
         }
         if (!strcmp(mnt, "/")) continue;            /* already our root */
         if (already_mounted(mnt)) { if (debug) say2("already mounted: ", mnt); continue; }
+        /* mount(2) wants a device node; UUID=/LABEL= is fstab's spelling, and
+         * passing it through unresolved silently leaves the entry unmounted. */
+        if (resolve_spec(dev, sizeof dev, 5)) {
+            say2("no device for ", dev);
+            continue;
+        }
         char data[256];
         unsigned long flags = parse_opts(opts, data, sizeof data);
         mkdir(mnt, 0755);
