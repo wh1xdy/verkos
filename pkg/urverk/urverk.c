@@ -533,6 +533,15 @@ static void set_hostname_from_file(void) {
 }
 
 /* ---- service definitions ------------------------------------------------- */
+/* A service is disabled by the presence of a marker file, rather than by
+ * editing or moving its .svc — so the definition stays put and the state is
+ * obvious from one directory. */
+#define DISABLED_DIR "/etc/urverk/disabled"
+static int svc_disabled(const char *name) {
+    char p[320]; struct stat st;
+    snprintf(p, sizeof p, DISABLED_DIR "/%.64s", name);
+    return stat(p, &st) == 0;
+}
 static void svc_set(svc_t *s, const char *key, const char *val) {
     if      (!strcmp(key, "description")) snprintf(s->desc, sizeof s->desc, "%s", val);
     else if (!strcmp(key, "exec"))        snprintf(s->exec, sizeof s->exec, "%s", val);
@@ -612,6 +621,11 @@ static int load_service(const char *dir, const char *file) {
     }
     fclose(f);
     if (!s->exec[0]) return -1;                    /* nothing to run */
+    if (svc_disabled(s->name)) {
+        s->respawn = RESPAWN_NO;
+        s->started = 1;                            /* known, but not started */
+        s->ready = 1;                              /* do not block dependents */
+    }
     n_svcs++;
     return 0;
 }
@@ -931,7 +945,8 @@ static void ctl_handle(int fd) {
         for (int i = 0; i < n_svcs; i++) {
             char line[256];
             svc_t *s = &svcs[i];
-            const char *state = s->pid > 0 ? "running"
+            const char *state = svc_disabled(s->name) ? "disabled"
+                             : s->pid > 0 ? "running"
                              : s->type == TYPE_ONESHOT ? (s->ready ? "done" : "failed")
                              : s->respawn == RESPAWN_NO ? "stopped" : "dead";
             snprintf(line, sizeof line, "%-12.63s %-9.9s %.100s\n", s->name, state, s->desc);
@@ -950,6 +965,26 @@ static void ctl_handle(int fd) {
             s->restarts = 0;
             start_service(s);
             snprintf(out, sizeof out, "%s %s (pid %d)\n", buf, arg, (int)s->pid);
+        }
+    } else if ((!strcmp(buf, "enable") || !strcmp(buf, "disable")) && arg) {
+        /* Persist the decision: stopping a service only lasts until the next
+         * boot, which is rarely what someone means by "turn this off". */
+        svc_t *s = svc_by_name(arg);
+        if (!s) { snprintf(out, sizeof out, "no such service: %s\n", arg); }
+        else {
+            char path[320];
+            mkdir(DISABLED_DIR, 0755);
+            snprintf(path, sizeof path, DISABLED_DIR "/%.64s", arg);
+            if (!strcmp(buf, "disable")) {
+                int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) close(fd);
+                stop_service(s);
+                s->respawn = RESPAWN_NO;
+                snprintf(out, sizeof out, "disabled %s (stopped; stays off after a reboot)\n", arg);
+            } else {
+                unlink(path);
+                snprintf(out, sizeof out, "enabled %s (start it now with: urverk-ctl start %s)\n", arg, arg);
+            }
         }
     } else if (!strcmp(buf, "logs") && arg) {
         char path[256];
@@ -972,7 +1007,7 @@ static void ctl_handle(int fd) {
         want_shutdown = 1; snprintf(out, sizeof out, "powering off\n");
     } else {
         snprintf(out, sizeof out,
-                 "urverk: status | start NAME | stop NAME | restart NAME | logs NAME | reboot | poweroff\n");
+                 "urverk: status | start | stop | restart | enable | disable | logs NAME | reboot | poweroff\n");
     }
     ssize_t w = write(fd, out, strlen(out)); (void)w;
 }
