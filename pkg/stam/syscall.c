@@ -12,6 +12,9 @@
 #include "sched.h"
 #include "vm.h"
 #include "mmu.h"
+#include "cpio.h"
+#include "elf.h"
+#include "bootinfo.h"
 #include <stdint.h>
 
 typedef struct {
@@ -19,10 +22,12 @@ typedef struct {
     uint64_t lr;
     uint64_t elr;
     uint64_t spsr;
+    uint64_t sp_el0;      /* saved with the rest: see vectors.S */
 } regs_t;
 
 extern void exception_report(unsigned long kind, regs_t *r);
 
+#define SYS_EXECVE 221
 #define SYS_CLONE  220        /* aarch64 Linux has no fork; clone does both */
 #define SYS_WRITE   64
 #define SYS_EXIT    93
@@ -51,9 +56,75 @@ static uint64_t do_fork(void *frame) {
     return (uint64_t)child->id;
 }
 
+/* Where the initrd is, so exec has somewhere to look. Set once at boot. */
+static uint64_t archive_addr, archive_size;
+void syscall_set_archive(uint64_t addr, uint64_t size) {
+    archive_addr = addr; archive_size = size;
+}
+
+typedef struct { uint64_t x[30]; uint64_t lr, elr, spsr, sp_el0; } frame_t;
+
+/* exec: keep the process, replace everything in it.
+ *
+ * The trick is that this does not jump anywhere. It edits the exception frame
+ * the system call will return through — the address to resume at, and the
+ * stack — so the ordinary return to EL0 lands in the new program instead of
+ * after the svc in the old one. The process id, the kernel stack and the place
+ * in the scheduler all stay exactly as they were, which is what makes it the
+ * same process running something else.
+ *
+ * The old address space is not reclaimed. Nothing here frees pages yet; that
+ * is a real leak and it is written down rather than hidden.
+ */
+static uint64_t do_execve(const char *path, void *frameptr) {
+    if (!archive_size) return (uint64_t)-2;                 /* -ENOENT */
+
+    /* Copy the name out of the caller's memory before touching the address
+     * space. The moment the new one is installed the old string is gone, and
+     * the message that follows would print whatever now lives at that address
+     * — which it did, on the first attempt. */
+    char name[64];
+    unsigned i = 0;
+    for (; i < sizeof name - 1 && path && path[i]; i++) name[i] = path[i];
+    name[i] = 0;
+
+    uint64_t file = 0, len = 0;
+    if (cpio_find(archive_addr, archive_size, name, &file, &len) != 0) {
+        kprintf("  [kernel] exec: no '%s' in the initrd\n", name);
+        return (uint64_t)-2;
+    }
+    uint64_t space = vm_new_space();
+    if (!space) return (uint64_t)-12;
+    uint64_t saved = mmu_current_user_table_kva();
+    mmu_switch_user(space);
+
+    uint64_t entry = 0;
+    if (elf_load(file, len, &entry) != 0) {
+        mmu_switch_user(saved);
+        return (uint64_t)-8;                                /* -ENOEXEC */
+    }
+    void *stack = alloc_page();
+    uint64_t stack_va = 0x7f00100000ul;
+    if (!stack || map_user_page(stack_va, (uint64_t)(uintptr_t)stack, 0)) {
+        mmu_switch_user(saved);
+        return (uint64_t)-12;
+    }
+    thread_current()->space = space;
+
+    frame_t *f = frameptr;
+    f->elr    = entry;               /* return to the new program, not the old */
+    f->spsr   = 0;                   /* EL0t, interrupts on                    */
+    f->sp_el0 = stack_va + PAGE_SIZE;
+    for (int i = 0; i < 30; i++) f->x[i] = 0;
+    kprintf("  [kernel] process %llu is now running %s\n",
+            (unsigned long long)thread_current()->id, name);
+    return 0;
+}
+
 static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void *frame) {
     switch (nr) {
-    case SYS_CLONE: return do_fork(frame);
+    case SYS_CLONE:  return do_fork(frame);
+    case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a, frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
     case SYS_EXIT:

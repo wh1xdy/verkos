@@ -15,6 +15,9 @@
 #include "sched.h"
 #include "vm.h"
 #include "elf.h"
+#include "cpio.h"
+
+extern void syscall_set_archive(uint64_t addr, uint64_t size);
 
 extern void enter_user(uint64_t entry, uint64_t stack_top);
 
@@ -76,8 +79,18 @@ static void initrd_program(void *a) {
     (void)a;
     uint64_t entry = 0;
     if (give_own_space()) return;
-    if (elf_load(boot.initrd_start, boot.initrd_end - boot.initrd_start, &entry) != 0) {
-        kprintf("  [kernel] the initrd is not a program I can run\n");
+
+    /* The initrd may be a bare ELF or an archive of them. Try to find /init in
+     * it; failing that, treat the whole thing as one program, which is what it
+     * was before there was an archive. */
+    uint64_t img = boot.initrd_start, len = boot.initrd_end - boot.initrd_start;
+    uint64_t f = 0, flen = 0;
+    if (cpio_find(img, len, "init", &f, &flen) == 0) {
+        img = f; len = flen;
+    }
+    if (elf_load(img, len, &entry) != 0) {
+        kprintf("  [kernel] the initrd holds nothing I can run; it contains:\n");
+        cpio_list(boot.initrd_start, boot.initrd_end - boot.initrd_start);
         return;
     }
     unsigned char *stack = alloc_page();
@@ -174,6 +187,7 @@ void kmain_high(void) {
      * at all. exceptions_install computes the address PC-relative, so calling
      * it again from up here installs the high one. */
     exceptions_install();
+    syscall_set_archive(0, 0);
     mmu_drop_low_half();
     kprintf("  kernel    now running from 0x%llx upwards; the low half is a\n"
             "            program's to use\n",
@@ -226,6 +240,7 @@ void kmain_high(void) {
          * the compiler rather than carried inside the kernel. */
         kprintf("\n  --- 3. can it run a program the compiler built? ---\n");
         if (boot.initrd_end > boot.initrd_start) {
+            syscall_set_archive(boot.initrd_start, boot.initrd_end - boot.initrd_start);
             thread_create("initrd", initrd_program, 0);
             while (threads_alive() > 1) thread_yield();
             kprintf("  it ran and exited. yes.\n");

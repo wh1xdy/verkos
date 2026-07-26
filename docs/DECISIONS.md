@@ -1523,3 +1523,50 @@ at: with no filesystem there is exactly one program, the initrd, so `fork` then
 make the initrd a cpio archive — vcpio already writes them — so it can hold
 several programs with names. Writing `exec` before there is something to exec
 would be writing a demonstration rather than a feature.
+
+## D-047 — exec, once there was something to exec
+
+The initrd is now a newc cpio archive — what every Linux initramfs is, and what
+VerkOS' own `vcpio` already writes. Same principle as ELF and the device tree:
+adopt the format everyone speaks, own the implementation behind it. It is not a
+filesystem; there is no directory structure, nothing can be written, and finding
+a file is a walk from the beginning. That is all an initramfs has ever been.
+
+`execve` keeps the process and replaces everything in it. The interesting part
+is that it does not jump anywhere: it edits the exception frame the system call
+is about to return through — the address to resume at, and the stack — so the
+ordinary return to EL0 lands in the new program instead of after the `svc` in
+the old one. The process id, the kernel stack and the place in the scheduler all
+stay as they were, which is exactly what makes it the same process running
+something else.
+
+`progs/init.c` does what every Unix has done since: fork, and let the child
+become something else. Process 5 forks 6, 6 execs `/hello`, `/hello` runs and
+exits, and 5 is still 5 afterwards.
+
+### The bug that only two user processes could reveal
+
+**SP_EL0 was not being saved.** It is a single register shared by every process,
+and the exception frame saved x0–x30, ELR and SPSR but not the user stack
+pointer. With one user process at a time that is invisible. The moment `exec`
+set a stack for the child, the parent's was gone — and when the parent resumed
+it faulted just above its own stack, which reads like memory corruption and is
+nothing of the kind.
+
+It is saved and restored with everything else now. There was already room in the
+frame; the omission was not a size problem but a failure to notice that a
+register outside the general-purpose set is still per-process state.
+
+A second, smaller one from the same batch: the exec message printed the path
+*after* installing the new address space, where the string no longer exists, and
+duly printed whatever now lived at that address. The name is copied into the
+kernel before anything changes.
+
+Both are the same shape: state that belongs to a process, read or held at a
+moment when the process it belongs to is no longer the one installed.
+
+### Not done, and named rather than hidden
+
+There is no `wait()`, so `init` spins instead of blocking — the next system call
+to write. `exec` does not reclaim the old address space; nothing frees pages
+yet, which is a real leak. And `argv` is ignored.

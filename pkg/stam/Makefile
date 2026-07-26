@@ -22,7 +22,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o syscall.o userprog.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -63,7 +63,7 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
@@ -100,7 +100,23 @@ progs/forky.elf: progs/forky.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
-progs: progs/hello.elf progs/twice.elf progs/forky.elf
+progs/init.elf: progs/init.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+# The initrd as every Linux initramfs is: a newc cpio archive, written by
+# VerkOS' own vcpio. Names have no leading slash, which is the convention;
+# stam accepts either when a program asks.
+progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf
+	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
+	    { echo "vcpio did not build"; exit 1; }
+	@rm -rf progs/root && mkdir -p progs/root
+	@cp progs/init.elf progs/root/init
+	@cp progs/hello.elf progs/root/hello
+	@cp progs/forky.elf progs/root/forky
+	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
+
+progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/initrd.cpio
 
 run-prog: stam.img progs/hello.elf
 	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \

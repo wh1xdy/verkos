@@ -54,11 +54,17 @@
     mrs     x2, elr_el1
     mrs     x3, spsr_el1
     stp     x30, x2,  [sp, #16 * 15]
-    str     x3,       [sp, #16 * 16]
+    /* SP_EL0 belongs in here too. It is one register shared by every process,
+     * so leaving it out means whichever user process ran last decides where
+     * the next one thinks its stack is. That only shows up once two user
+     * processes exist, and then it looks like memory corruption. */
+    mrs     x2, sp_el0
+    stp     x3, x2,   [sp, #16 * 16]
 .endm
 
 .macro RESTORE_ALL
-    ldr     x1,       [sp, #16 * 16]
+    ldp     x1, x2,   [sp, #16 * 16]
+    msr     sp_el0, x2
     ldp     x30, x0,  [sp, #16 * 15]
     msr     elr_el1, x0
     msr     spsr_el1, x1
