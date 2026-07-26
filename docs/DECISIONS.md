@@ -1310,3 +1310,24 @@ location into `/chosen`. On the UEFI path vboot publishes the initrd through
 LoadFile2 for an EFI stub to collect, and stam's stub does not collect it yet,
 so there is nothing to run. The kernel says so rather than appearing to have
 nothing to do.
+
+## D-041 — The initrd arrives two different ways
+
+A device-tree loader writes the initrd's address into `/chosen`. UEFI has no
+such convention, so Linux invented one and everyone now uses it: the loader
+installs a LoadFile2 protocol on a device path carrying a known vendor GUID,
+and whoever wants the file goes and asks for it.
+
+vboot had been publishing it that way all along. stam's EFI shim was not
+collecting it, so a kernel started by our own bootloader had a program available
+and did not run it. It now asks, and the whole chain runs: firmware → vboot →
+stam → a program the compiler built.
+
+This is the third thing that arrives differently depending on who started us,
+after the command line and the memory map, and all three are handled the same
+way — the shim learns it, `bootinfo.h` carries it, the kernel does not know
+which happened.
+
+The boot output was also reorganised into four numbered questions, each with its
+answer, because three demonstrations running in sequence with no separation read
+as noise. A log nobody can follow is a log nobody reads.

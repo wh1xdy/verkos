@@ -67,6 +67,49 @@ static const char *efi_cmdline(EFI_HANDLE image, EFI_BOOT_SERVICES *BS) {
     return o ? cmdline_buf : 0;
 }
 
+/* The initrd does not arrive the same way either. A device-tree loader writes
+ * its address into /chosen; UEFI has no such convention, so Linux invented one
+ * and everybody uses it: the loader installs a LoadFile2 protocol on a device
+ * path carrying a known vendor GUID, and whoever wants the file goes and asks.
+ * vboot already publishes it that way. Not collecting it was why a kernel
+ * started by our own bootloader had a program to run and did not run it. */
+static int efi_initrd(EFI_BOOT_SERVICES *BS, uint64_t *start, uint64_t *end) {
+    static struct { VENDOR_DEVICE_PATH v; EFI_DEVICE_PATH_PROTOCOL e; }
+        __attribute__((packed)) path;
+    EFI_GUID lf2_guid = EFI_LOAD_FILE2_PROTOCOL_GUID;
+    EFI_GUID vendor   = LINUX_EFI_INITRD_MEDIA_GUID;
+
+    path.v.Header.Type    = MEDIA_DEVICE_PATH;
+    path.v.Header.SubType = MEDIA_VENDOR_DP;
+    path.v.Header.Length[0] = (UINT8)sizeof(VENDOR_DEVICE_PATH);
+    path.v.Header.Length[1] = 0;
+    path.v.Guid = vendor;
+    path.e.Type    = END_DEVICE_PATH_TYPE;
+    path.e.SubType = END_ENTIRE_DEVICE_PATH;
+    path.e.Length[0] = (UINT8)sizeof(EFI_DEVICE_PATH_PROTOCOL);
+    path.e.Length[1] = 0;
+
+    EFI_DEVICE_PATH_PROTOCOL *dp = (EFI_DEVICE_PATH_PROTOCOL *)&path;
+    EFI_HANDLE h = 0;
+    if (EFI_ERROR(BS->LocateDevicePath(&lf2_guid, (void **)&dp, &h))) return 0;
+
+    EFI_LOAD_FILE2_PROTOCOL *lf2 = 0;
+    if (EFI_ERROR(BS->HandleProtocol(h, &lf2_guid, (void **)&lf2)) || !lf2) return 0;
+
+    /* Asked with no buffer, it reports the size it needs. */
+    UINTN size = 0;
+    lf2->LoadFile(lf2, dp, 0, &size, 0);
+    if (!size) return 0;
+
+    void *buf = 0;
+    if (EFI_ERROR(BS->AllocatePool(EfiLoaderData, size, &buf)) || !buf) return 0;
+    if (EFI_ERROR(lf2->LoadFile(lf2, dp, 0, &size, buf))) return 0;
+
+    *start = (uint64_t)(uintptr_t)buf;
+    *end   = *start + (uint64_t)size;
+    return 1;
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     ST = systab;
     say(L"\r\n  stam: started as an EFI application\r\n");
@@ -89,8 +132,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     }
     say(L"  stam: device tree found, leaving boot services\r\n");
 
-    /* 2. the command line, while boot services still exist to ask for it */
+    /* 2. the command line and the initrd, while boot services still exist */
     handover_set_cmdline(efi_cmdline(image, systab->BootServices));
+    {
+        uint64_t is = 0, ie = 0;
+        if (efi_initrd(systab->BootServices, &is, &ie)) {
+            handover_set_initrd(is, ie);
+            say(L"  stam: initrd collected from the loader\r\n");
+        }
+    }
 
     /* 3. take the memory map and leave. After this call no EFI service may be
      * used — including the console we have been printing on. */

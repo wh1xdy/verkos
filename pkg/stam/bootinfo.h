@@ -35,5 +35,6 @@ typedef struct {
 int  handover_dtb(const void *dtb, boot_info_t *bi);
 void handover_set_cmdline(const char *s);
 void handover_set_free_region(uint64_t base, uint64_t size);
+void handover_set_initrd(uint64_t start, uint64_t end);
 
 #endif

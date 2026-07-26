@@ -52,7 +52,7 @@ static void run_program(uint64_t start, uint64_t n) {
         kprintf("  [kernel] could not map the program\n");
         return;
     }
-    kprintf("  [kernel] %llu bytes of program mapped at 0x%llx, entering EL0\n\n",
+    kprintf("  %llu bytes mapped at 0x%llx, dropping to EL0\n",
             (unsigned long long)n, (unsigned long long)USER_CODE_VA);
     enter_user(USER_CODE_VA, USER_STACK_VA + PAGE_SIZE);
 }
@@ -73,7 +73,7 @@ static void initrd_program(void *a) {
     if (!stack || map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
         kprintf("  [kernel] no stack for the program\n"); return;
     }
-    kprintf("  [kernel] entering it at 0x%llx\n\n", (unsigned long long)entry);
+    kprintf("  entering it at 0x%llx\n", (unsigned long long)entry);
     enter_user(entry, USER_STACK_VA + PAGE_SIZE);
 }
 static void bad_program(void *a)    { (void)a; run_program(user_bad_addr(),  user_bad_size());  }
@@ -155,7 +155,8 @@ void kmain(void *dtb) {
         thread_create("worker-a", worker, (void *)(uintptr_t)0);
         thread_create("worker-b", worker, (void *)(uintptr_t)1);
         thread_create("worker-c", worker, (void *)(uintptr_t)2);
-        kprintf("  threads   %llu, none of which ever yields\n",
+        kprintf("\n  --- 1. can the kernel take the CPU back? ---\n");
+        kprintf("  %llu threads, none of which ever yields.\n",
                 (unsigned long long)thread_count());
 
         uint64_t until = timer_ticks() + timer_hz() * 2;
@@ -163,7 +164,7 @@ void kmain(void *dtb) {
         stop_work = 1;
         while (threads_alive() > 1) thread_yield();
 
-        kprintf("\n  after two seconds of everyone refusing to give way:\n");
+        kprintf("  after two seconds of everyone refusing to give way:\n");
         for (int i = 0; i < thread_count(); i++) {
             thread_t *t = thread_at(i);
             kprintf("    %s%s  scheduled %llu times", t->name,
@@ -172,27 +173,28 @@ void kmain(void *dtb) {
                 kprintf(", counted to %llu", (unsigned long long)work[t->id - 1]);
             kprintf("\n");
         }
-        kprintf("\n  every thread ran: the kernel takes the CPU back.\n\n");
+        kprintf("  every thread ran, evenly. yes.\n");
 
-        /* And now something that is not the kernel. */
+        kprintf("\n  --- 2. can something run outside the kernel? ---\n");
         thread_create("program", first_program, 0);
         while (threads_alive() > 1) thread_yield();
-        kprintf("\n  [kernel] the program is gone; the kernel is still here.\n\n");
+        kprintf("  the program is gone; the kernel is still here. yes.\n");
 
         /* If a program was handed to us, run that too — a real ELF, built by
          * the compiler rather than carried inside the kernel. */
+        kprintf("\n  --- 3. can it run a program the compiler built? ---\n");
         if (boot.initrd_end > boot.initrd_start) {
-            kprintf("\n  [kernel] there is a %llu-byte initrd; treating it as a program\n",
-                    (unsigned long long)(boot.initrd_end - boot.initrd_start));
             thread_create("initrd", initrd_program, 0);
             while (threads_alive() > 1) thread_yield();
-            kprintf("\n  [kernel] that program is gone too.\n");
+            kprintf("  it ran and exited. yes.\n");
+        } else {
+            kprintf("  no initrd was handed to us, so there is nothing to run.\n");
         }
 
-        /* And one that oversteps. */
+        kprintf("\n  --- 4. is a program kept out of the kernel's memory? ---\n");
         thread_create("trespasser", bad_program, 0);
         while (threads_alive() > 1) thread_yield();
-        kprintf("\n  [kernel] still running after a program faulted.\n");
+        kprintf("  the program was killed, the kernel was not. yes.\n");
     }
 
     /* Prove the fault path works, on request. A handler that has never run is
