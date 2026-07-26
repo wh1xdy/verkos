@@ -24,19 +24,17 @@ reading code.
 | **Accounts** | vlogin replaces shadow entirely: interactive login, wrong password, unknown user, locked account, autologin, `su`, `passwd`, `useradd`/`usermod`/`userdel`. `su`/`passwd` are setuid and drop privilege completely |
 | **Modules** | verkmod replaces kmod: `modprobe btrfs` pulls in five dependencies, the kernel reports the refcounts, `rmmod` refuses one in use |
 | **Full userland** | Native GCC built and installed; `libstdc++` has working threads (self-checked during the build) |
+| **Live ISO** | `make iso` → a medium that boots: firmware → El Torito → vboot → kernel → initramfs → urverk mounts the ISO by label, loop-mounts the system image, overlays a tmpfs. Installer present, root writable and ephemeral |
 
 ## What exists but has never been booted
 
-- **The live ISO.** `pkg/viso` writes an ISO that xorriso accepts, the kernel
-  mounts, and whose files read back byte-identical. The kernel has
-  `ISO9660_FS=y` and `OVERLAY_FS=y`. urverk has the three options the design
-  needs. **But `scripts/71-iso.sh` does not exist**, no ISO has been assembled
-  from real artefacts, and nothing has booted from one.
-- The riskiest unknown is what the firmware hands vboot when it boots from an
-  El Torito image: the plan assumes it presents the embedded FAT volume, and
-  that is inferred from standard EDK2 behaviour, not observed. vboot was
-  hardened against the two ways that assumption could bite (see D-023), so a
-  failure now should be attributable to the ISO itself.
+Nothing of substance. The ISO now boots (D-024), which settled the one
+outstanding question: the firmware does present the embedded FAT image as an
+ordinary volume, so vboot works unchanged.
+
+Still untried: booting the ISO from real hardware or a USB stick. There is no
+isohybrid MBR/GPT yet, so the ISO is not `dd`-able to a stick as a hybrid
+image — it has only been booted as a virtio-blk device under QEMU/AAVMF.
 
 ## Known-wrong or fragile
 
@@ -83,10 +81,11 @@ isolation.
 
 ## Suggested next steps, in order
 
-1. **Finish the ISO** — write `scripts/71-iso.sh`, assemble, boot it. Everything
-   it needs is in place.
-2. **Trim the live system** — a live image does not need a compiler; this makes
-   the ISO and every test cycle smaller.
+1. **Trim the live system** — the ISO is 1.3 GB because the system carries gcc,
+   binutils and cmake. A live medium needs none of them; this makes the ISO and
+   every test cycle smaller.
+2. **isohybrid** — a protective MBR and GPT so the ISO can be written to a USB
+   stick and booted on real hardware.
 3. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
 4. **Give `full-userland` inner marks**, so a failure does not restart the
