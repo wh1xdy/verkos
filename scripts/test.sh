@@ -565,16 +565,24 @@ fi
 say "the bootloader builds for both architectures"
 # only where a toolchain for the target exists; a missing cross-compiler is not
 # a test failure, it is a host without that toolchain
+# Finding a cross compiler is not enough: build.sh defaults to the host's own
+# gcc and objcopy, and the host's objcopy does not know the efi-app target of a
+# foreign architecture. It fails with "invalid bfd target", which reads like a
+# broken build script rather than the wrong tool being used. Pass the whole
+# triple, not just the compiler.
 for arch in aarch64 x86_64; do
-    cc_for_arch=""
+    cc_for_arch=""; prefix=""
     case "$arch-$(uname -m)" in
         aarch64-aarch64|x86_64-x86_64) cc_for_arch=$CC ;;
-        *) command -v "$arch-linux-gnu-gcc" >/dev/null && cc_for_arch="$arch-linux-gnu-gcc" ;;
+        *) if command -v "$arch-linux-gnu-gcc" >/dev/null; then
+               cc_for_arch="$arch-linux-gnu-gcc"; prefix="$arch-linux-gnu-"
+           fi ;;
     esac
     if [ -z "$cc_for_arch" ]; then
         printf '  \033[33mskip\033[0m  vboot %s (no toolchain here)\n' "$arch"; continue
     fi
-    if bash pkg/vboot/build.sh "$T/vboot-$arch" "$arch" >"$T/vb-$arch.log" 2>&1
+    if CC="$cc_for_arch" OBJCOPY="${prefix}objcopy" LD="${prefix}ld" \
+       bash pkg/vboot/build.sh "$T/vboot-$arch" "$arch" >"$T/vb-$arch.log" 2>&1
     then ok "vboot $arch"; else bad "vboot $arch — $(tail -1 "$T/vb-$arch.log")"; fi
 done
 
@@ -599,8 +607,20 @@ for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot.sh pkg/vinstal
 done
 
 say "stam (our own kernel) builds, and is a valid arm64 Image"
-if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || [ "$(uname -m)" = aarch64 ]; then
-    if ( cd pkg/stam && make clean >/dev/null 2>&1 && make >/dev/null 2>&1 ); then
+# Same trap as vboot: the Makefile builds with $(CROSS)gcc, and finding
+# aarch64-linux-gnu-gcc on an x86_64 host means nothing unless CROSS is set to
+# match. Without it the host compiler is handed aarch64 assembly.
+STAM_CROSS=""
+if [ "$(uname -m)" != aarch64 ]; then
+    if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        STAM_CROSS="aarch64-linux-gnu-"
+    else
+        STAM_CROSS="none"
+    fi
+fi
+if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
+    if ( cd pkg/stam && make CROSS="$STAM_CROSS" clean >/dev/null 2>&1 && \
+         make CROSS="$STAM_CROSS" >/dev/null 2>&1 ); then
         ok "stam compiles"
         IMG=pkg/stam/stam.img
         # The arm64 boot protocol puts "ARM\x64" at offset 56 — which reads as
@@ -628,7 +648,7 @@ if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&
         fi
         # The same kernel must also build as a UEFI application, because that
         # is how our own bootloader starts it.
-        if ( cd pkg/stam && make stam.efi >/dev/null 2>&1 ) && [ -f pkg/stam/stam.efi ]; then
+        if ( cd pkg/stam && make CROSS="$STAM_CROSS" stam.efi >/dev/null 2>&1 ) && [ -f pkg/stam/stam.efi ]; then
             if [ "$(dd if=pkg/stam/stam.efi bs=1 count=2 2>/dev/null)" = "MZ" ]; then
                 ok "stam builds as a UEFI application"
             else
@@ -650,12 +670,12 @@ if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&
         else
             bad "stam does not build as a UEFI application"
         fi
-        ( cd pkg/stam && make clean clean-efi >/dev/null 2>&1 )
+        ( cd pkg/stam && make CROSS="$STAM_CROSS" clean clean-efi >/dev/null 2>&1 )
     else
         bad "stam does not compile"
     fi
 else
-    say "  (no aarch64 compiler here; skipping stam)"
+    printf '  \033[33mskip\033[0m  stam (no aarch64 toolchain here)\n'
 fi
 
 # --- the device tree we write must be the device tree we read ---------------
