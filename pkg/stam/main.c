@@ -14,6 +14,7 @@
 #include "timer.h"
 #include "sched.h"
 #include "vm.h"
+#include "elf.h"
 
 extern void enter_user(uint64_t entry, uint64_t stack_top);
 
@@ -57,6 +58,24 @@ static void run_program(uint64_t start, uint64_t n) {
 }
 
 static void first_program(void *a)  { (void)a; run_program(user_prog_addr(), user_prog_size()); }
+
+/* A program the compiler built, loaded out of the initrd. This is how a kernel
+ * starts its first program before it has a filesystem — the loader put the file
+ * in memory and told us where, which is all we need. */
+static void initrd_program(void *a) {
+    (void)a;
+    uint64_t entry = 0;
+    if (elf_load(boot.initrd_start, boot.initrd_end - boot.initrd_start, &entry) != 0) {
+        kprintf("  [kernel] the initrd is not a program I can run\n");
+        return;
+    }
+    unsigned char *stack = alloc_page();
+    if (!stack || map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
+        kprintf("  [kernel] no stack for the program\n"); return;
+    }
+    kprintf("  [kernel] entering it at 0x%llx\n\n", (unsigned long long)entry);
+    enter_user(entry, USER_STACK_VA + PAGE_SIZE);
+}
 static void bad_program(void *a)    { (void)a; run_program(user_bad_addr(),  user_bad_size());  }
 
 static void worker(void *arg) {
@@ -159,6 +178,16 @@ void kmain(void *dtb) {
         thread_create("program", first_program, 0);
         while (threads_alive() > 1) thread_yield();
         kprintf("\n  [kernel] the program is gone; the kernel is still here.\n\n");
+
+        /* If a program was handed to us, run that too — a real ELF, built by
+         * the compiler rather than carried inside the kernel. */
+        if (boot.initrd_end > boot.initrd_start) {
+            kprintf("\n  [kernel] there is a %llu-byte initrd; treating it as a program\n",
+                    (unsigned long long)(boot.initrd_end - boot.initrd_start));
+            thread_create("initrd", initrd_program, 0);
+            while (threads_alive() > 1) thread_yield();
+            kprintf("\n  [kernel] that program is gone too.\n");
+        }
 
         /* And one that oversteps. */
         thread_create("trespasser", bad_program, 0);

@@ -1271,3 +1271,42 @@ that compute the address with `adrp`/`add`.
 The second instance was caught by the test the first one prompted — `stam.efi`
 must need zero relocations — which is the argument for writing the check at the
 time rather than only fixing the bug.
+
+## D-040 — ELF, and why not a format of our own
+
+The question came up directly: now that stam runs programs, should VerkOS define
+its own executable format?
+
+**No — for the same reason Multiboot2 was rejected in D-030.** ELF is not a
+component we can replace, it is an *interface*. GCC and binutils produce ELF, so
+anything else we invent is a *conversion from* ELF, which means something still
+has to read ELF — on the build host instead of in the kernel. And we would lose
+`readelf`, `objdump`, `nm`, `gdb` and every profiler, all of which understand our
+binaries today. The loader for the subset that matters is about eighty lines:
+check the machine, walk the program headers, place each PT_LOAD. Sections,
+symbols and relocations are for the linker, not the loader.
+
+The consistent principle, now stated twice: **adopt the interface everyone
+speaks; own the implementation behind it.** We write our own tar, cpio, ISO and
+package tools, but they all speak formats other software understands.
+
+There is one thing a format of our own could add that ELF does not have, and it
+is not ownership: **a signature**. vboot already refuses to boot a kernel that
+does not verify against our Ed25519 key. A thin container around an ELF —
+signature, length, key id — would let the kernel refuse to *run* a program on
+the same grounds. That is the coherent form of the "antivirus" idea: not
+searching for known-bad code, but declining to execute anything that is not
+ours. Recorded here as the open question it is; not built.
+
+The loader is fed from the **initrd**, whose address comes from the device tree,
+because that is how a kernel starts its first program before it has a
+filesystem. `progs/hello.c` is compiled by the ordinary compiler, static and
+freestanding, and runs at EL0 with four system calls and no libc. An unknown
+call number returns `-ENOSYS` rather than killing anything, which is the
+behaviour a program can actually cope with.
+
+Known gap: this works on the raw-Image path, where QEMU writes the initrd's
+location into `/chosen`. On the UEFI path vboot publishes the initrd through
+LoadFile2 for an EFI stub to collect, and stam's stub does not collect it yet,
+so there is nothing to run. The kernel says so rather than appearing to have
+nothing to do.

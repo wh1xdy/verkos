@@ -10,7 +10,7 @@ CFLAGS   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
            -fno-pic -fno-pie -O2 -Wall -Wextra -std=c11 -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o syscall.o userprog.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -53,7 +53,7 @@ clean:
 EFI_CFLAGS = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
              -fshort-wchar -fpic -fno-jump-tables -fvisibility=hidden \
              -O2 -Wall -std=c11 -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
@@ -70,3 +70,22 @@ clean-efi:
 	rm -f efi-*.o stam-efi.so stam.efi
 
 .PHONY: clean-efi
+
+# ---- a program, compiled the ordinary way ---------------------------------
+# Static, freestanding, linked at a fixed address. The kernel loads it out of
+# the initrd, so it is a real ELF produced by the real compiler rather than
+# bytes carried inside the kernel.
+PROG_CFLAGS = -ffreestanding -nostdlib -static -fno-stack-protector -O2 -Wall
+# --build-id=none: the note section is placed before .text and then overlaps
+# it once -Ttext moves .text to a fixed address, which the linker refuses.
+progs/hello.elf: progs/hello.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+progs: progs/hello.elf
+
+run-prog: stam.img progs/hello.elf
+	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \
+	    -kernel stam.img -initrd progs/hello.elf
+
+.PHONY: progs
