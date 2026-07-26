@@ -1388,3 +1388,25 @@ anything affecting how addresses are formed belongs in it. Two builds of one
 kernel differing in code generation is a bug generator: it means a defect can
 be present on one path and invisible on the other, which is exactly how this one
 survived until the address space changed underneath it.
+
+## D-043 — Two programs at once, each with its own memory
+
+Every thread now carries its own low half. A process switch swaps TTBR0 and
+nothing else — the kernel's half stays where it is, mapped once, for everyone.
+That is what moving to the high half (D-042) bought.
+
+The demonstration is one binary run twice. Both copies have their code at
+`0x3f0000`, their data at `0x41ffe8` and their entry point at `0x4000d0` —
+identical addresses — and each holds a different value in the same variable at
+the same address. They interleave, because the timer takes the CPU from one and
+gives it to the other mid-run.
+
+The proof is inside the program rather than in the log. It records its own
+process id in a global, spins long enough to be preempted several times, and
+then checks the global still matches. If the two shared an address space the
+second would have overwritten the first's copy and the check would fail. Both
+exit zero.
+
+An assertion in a log is something the reader has to believe. A program that
+checks its own memory and exits non-zero if it was disturbed is something the
+machine believes.

@@ -39,7 +39,17 @@ static volatile int stop_work;
 extern uint64_t user_prog_addr(void), user_prog_size(void);
 extern uint64_t user_bad_addr(void),  user_bad_size(void);
 
+/* Each program gets its own low half before anything is mapped into it. */
+static int give_own_space(void) {
+    uint64_t space = vm_new_space();
+    if (!space) { kprintf("  [kernel] no memory for an address space\n"); return -1; }
+    thread_current()->space = space;
+    mmu_switch_user(space);
+    return 0;
+}
+
 static void run_program(uint64_t start, uint64_t n) {
+    if (give_own_space()) return;
     unsigned char *code  = alloc_page();
     unsigned char *stack = alloc_page();
     if (!code || !stack) { kprintf("  [kernel] no memory for the program\n"); return; }
@@ -65,6 +75,7 @@ static void first_program(void *a)  { (void)a; run_program(user_prog_addr(), use
 static void initrd_program(void *a) {
     (void)a;
     uint64_t entry = 0;
+    if (give_own_space()) return;
     if (elf_load(boot.initrd_start, boot.initrd_end - boot.initrd_start, &entry) != 0) {
         kprintf("  [kernel] the initrd is not a program I can run\n");
         return;
@@ -73,7 +84,8 @@ static void initrd_program(void *a) {
     if (!stack || map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
         kprintf("  [kernel] no stack for the program\n"); return;
     }
-    kprintf("  entering it at 0x%llx\n", (unsigned long long)entry);
+    kprintf("  [kernel] %s enters at 0x%llx in its own address space\n",
+            thread_current()->name, (unsigned long long)entry);
     enter_user(entry, USER_STACK_VA + PAGE_SIZE);
 }
 static void bad_program(void *a)    { (void)a; run_program(user_bad_addr(),  user_bad_size());  }
@@ -219,6 +231,15 @@ void kmain_high(void) {
             kprintf("  it ran and exited. yes.\n");
         } else {
             kprintf("  no initrd was handed to us, so there is nothing to run.\n");
+        }
+
+        if (boot.initrd_end > boot.initrd_start) {
+            kprintf("\n  --- 5. can two programs run at once, each with its own memory? ---\n");
+            kprintf("  the same binary twice, code and data at the same addresses in both\n");
+            thread_create("copy-a", initrd_program, 0);
+            thread_create("copy-b", initrd_program, 0);
+            while (threads_alive() > 1) thread_yield();
+            kprintf("  both finished without disturbing each other. yes.\n");
         }
 
         kprintf("\n  --- 4. is a program kept out of the kernel's memory? ---\n");

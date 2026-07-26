@@ -264,6 +264,14 @@ void mmu_drop_low_half(void) {
 uint64_t mmu_user_table(void)  { return kva_to_phys(l1_user); }
 uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }
 
+static uint64_t cur_user_kva;
+uint64_t mmu_current_user_table_kva(void) { return cur_user_kva ? cur_user_kva : (uint64_t)(uintptr_t)l1_user; }
+
+void mmu_switch_user(uint64_t l1_kva) {
+    cur_user_kva = l1_kva;
+    mmu_set_user_table(kva_to_phys((const void *)(uintptr_t)l1_kva));
+}
+
 void mmu_set_user_table(uint64_t phys) {
     __asm__ volatile(
         "msr  ttbr0_el1, %0\n"

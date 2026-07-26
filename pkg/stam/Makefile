@@ -92,7 +92,11 @@ progs/hello.elf: progs/hello.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
-progs: progs/hello.elf
+progs/twice.elf: progs/twice.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+progs: progs/hello.elf progs/twice.elf
 
 run-prog: stam.img progs/hello.elf
 	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \

@@ -14,6 +14,7 @@
 #include "sched.h"
 #include "mmu.h"
 #include "console.h"
+#include "mmu.h"
 
 extern void cpu_switch(uint64_t *save_sp_here, uint64_t resume_sp);
 extern uint64_t thread_entry_point(void);
@@ -43,6 +44,7 @@ thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
     t->name = name;
     t->state = THREAD_RUNNABLE;
     t->slices = 0;
+    t->space = 0;
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -66,6 +68,7 @@ void sched_init(const char *name) {
     t->name = name;
     t->state = THREAD_RUNNABLE;
     t->slices = 0;
+    t->space = 0;
     t->sp = 0;
     t->stack_low = 0;
     current = t;
@@ -89,6 +92,9 @@ void schedule(void) {
     if (!next || next == prev) return;
     current = next;
     next->slices++;
+    /* The low half belongs to whoever is about to run. Kernel-only threads
+     * keep whatever was there; they never look at it. */
+    if (next->space && next->space != prev->space) mmu_switch_user(next->space);
     cpu_switch(&prev->sp, next->sp);
     /* Execution resumes here when something schedules `prev` again — possibly
      * a long time later, and on a different thread's behalf. */

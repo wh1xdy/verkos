@@ -12,6 +12,7 @@ typedef struct {
     int         state;
     const char *name;
     uint64_t    slices;      /* how many times it has been given the CPU   */
+    uint64_t    space;       /* its low half, or 0 for a kernel-only thread */
 } thread_t;
 
 void      sched_init(const char *name_of_current);

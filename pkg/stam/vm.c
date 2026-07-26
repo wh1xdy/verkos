@@ -81,7 +81,7 @@ int map_user_page(uint64_t va, uint64_t page, int executable) {
      * to the high half these are the same table; afterwards they are not, and
      * mapping a user page into the kernel's would put it somewhere no program
      * can reach. */
-    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_user_table_kva();
+    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_current_user_table_kva();
     if (!l1) return -1;
 
     uint64_t *l2 = descend(l1, (unsigned)((va >> 30) & 511), 1ul << 21);
@@ -104,4 +104,14 @@ int map_user_page(uint64_t va, uint64_t page, int executable) {
                      "isb\n"
                      :: "r"(va >> 12) : "memory");
     return 0;
+}
+
+/* A fresh, empty low half. Nothing is shared with any other process — not even
+ * an intermediate table — so two programs may put different memory at the same
+ * address and never see each other's. */
+uint64_t vm_new_space(void) {
+    uint64_t *l1 = alloc_page();
+    if (!l1) return 0;
+    for (unsigned i = 0; i < 512; i++) l1[i] = 0;
+    return (uint64_t)(uintptr_t)l1;
 }

@@ -7,10 +7,11 @@
  * table exists for the linker, not the loader.
  *
  * Writing the segment contents is done straight through the user virtual
- * address, after mapping. That works because there is one address space and
- * user pages are mapped AP=01, which permits EL1 as well as EL0. When the
- * kernel moves to its own half of the map that will have to change, and the
- * change will be obvious: this is the only place that relies on it.
+ * address, after mapping. That works because the kernel loads a program into
+ * the address space it is itself running with — TTBR0 has already been
+ * switched to the new process — and user pages are mapped AP=01, which permits
+ * EL1 as well as EL0. Loading into some *other* process's space would need a
+ * temporary mapping instead; nothing does that yet.
  */
 #include "elf.h"
 #include "vm.h"
@@ -79,9 +80,8 @@ int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out) {
         /* The rest of memsz is already zero: alloc_page clears each page, and
          * that is exactly what .bss requires. */
 
-        kprintf("  [elf] segment %llu: %llu bytes at 0x%llx%s%s\n",
-                (unsigned long long)i, (unsigned long long)memsz,
-                (unsigned long long)vaddr,
+        kprintf("  [elf] %llu bytes at 0x%llx%s%s\n",
+                (unsigned long long)memsz, (unsigned long long)vaddr,
                 (flags & PF_X) ? ", executable" : "",
                 (memsz > filesz) ? ", partly zero-filled" : "");
         loaded++;
