@@ -27,6 +27,7 @@ typedef struct {
 } boot_info_t;
 
 /* The shims. Each returns 0 on success. */
-int handover_dtb(const void *dtb, boot_info_t *bi);
+int  handover_dtb(const void *dtb, boot_info_t *bi);
+void handover_set_cmdline(const char *s);
 
 #endif

@@ -12,6 +12,12 @@ extern int strcmp(const char *, const char *);
 
 static fdt_t tree;
 
+/* Set by a shim that learned the command line some other way than from the
+ * tree — UEFI's LoadOptions, for instance. It wins, because a loader that
+ * went to the trouble of passing one meant it. */
+static const char *cmdline_override;
+void handover_set_cmdline(const char *s) { if (s && *s) cmdline_override = s; }
+
 const fdt_t *machine_tree(void) { return &tree; }
 
 int handover_dtb(const void *dtb, boot_info_t *bi) {
@@ -30,6 +36,7 @@ int handover_dtb(const void *dtb, boot_info_t *bi) {
     if (chosen != FDT_NONE) {
         const char *args = fdt_getprop(&tree, chosen, "bootargs", &len);
         if (args && len) bi->cmdline = args;
+        if (cmdline_override) bi->cmdline = cmdline_override;
         /* These are written as either 32- or 64-bit values depending on who
          * built the tree, so trust the property length rather than assuming. */
         const void *p = fdt_getprop(&tree, chosen, "linux,initrd-start", &len);

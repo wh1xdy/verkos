@@ -1013,3 +1013,44 @@ deliberately, and by running on a machine we do not support.
 
 It suggests the question is worth asking routinely rather than occasionally:
 *what does this print when the thing it describes did not happen?*
+
+## D-034 — The same kernel, two ways in
+
+stam now boots both ways: as a raw arm64 Image that QEMU's `-kernel` or any ARM
+bootloader can start, and as a UEFI application that firmware — or vboot —
+loads. One set of sources, two link outputs, two handover shims, and nothing
+above `bootinfo.h` knows which happened. That was the promise of D-030, and it
+held: adding UEFI support was a new file, not a change to the kernel.
+
+The PE recipe is vboot's, unchanged, because it was already proved against
+AAVMF: plain gcc with `-fshort-wchar -fpic`, `ld -shared -Bsymbolic`, objcopy to
+`efi-app-aarch64`, and `pe-fixup.py` to clear IMAGE_FILE_RELOCS_STRIPPED. Both
+of the flags that are easy to omit produce failures that do not look like their
+cause — without `-fshort-wchar` every firmware message is garbage, and without
+`-Bsymbolic` the link fails on our own assembly symbol.
+
+Three things were learned by running it.
+
+**The firmware had no device tree.** AAVMF describes the machine with ACPI, and
+`EFI_DTB_GUID` is simply absent from the configuration table. stam refused, with
+a message naming exactly what was missing — which is the same state x86_64 will
+be in permanently, and precisely the gap vboot exists to fill by synthesising a
+tree and installing it under that GUID. The design was validated by failing in
+the way it predicted. (`-machine virt,acpi=off` makes the firmware publish a
+tree, and then it boots.)
+
+**Switching TTBR0 while the MMU is on is not allowed**, and firmware hands over
+a machine with the MMU already enabled. So the MMU has to go off, be
+reconfigured, and come back on — and the entire sequence must be one assembly
+block with no memory access in it. Between switching the data cache off and
+back on, any load or store, *including a function call's use of the stack*,
+bypasses a cache that still holds the newest copy and reads something stale.
+The page table also has to be cleaned out to memory first, because the walker
+reads memory and not our cache. This presented as a kernel that stopped after
+"vectors installed" with no fault at all.
+
+**vboot passed a command line and stam reported none.** A device-tree loader
+writes it into `/chosen/bootargs`; UEFI passes it as LoadOptions on the loaded
+image, in UTF-16. The string was there the whole time, in a place nothing was
+reading. The shim now converts it and it overrides the tree, because a loader
+that took the trouble to pass one meant it.

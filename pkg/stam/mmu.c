@@ -58,6 +58,19 @@ uint64_t pmm_free_bytes(void) { return free_top - free_next; }
 
 static uint64_t *l1;
 
+/* Push a range out of the data cache into memory. The line size is read from
+ * CTR_EL0 rather than assumed: 64 bytes is right on most cores and wrong on
+ * enough of them to matter, and a too-large stride skips lines silently. */
+static void dcache_clean_to_memory(void *addr, uint64_t size) {
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    uint64_t line = 4ul << ((ctr >> 16) & 0xf);          /* DminLine, in words */
+    uint64_t p = (uint64_t)(uintptr_t)addr & ~(line - 1);
+    uint64_t end = (uint64_t)(uintptr_t)addr + size;
+    for (; p < end; p += line) __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
 static uint64_t block(uint64_t pa, unsigned attr, int executable) {
     uint64_t d = (pa & ~(GIB - 1)) | DESC_AF | (attr << 2) | DESC_BLOCK;
     if (attr == ATTR_NORMAL) d |= DESC_SH_INNER;
@@ -98,25 +111,45 @@ int mmu_init(uint64_t ram_base, uint64_t ram_size) {
                  | (2ul << 30)     /* TG1: 4 KiB                           */
                  | (ips << 32);
 
+    /* The table was written with the caches on, so it may still be sitting in
+     * one. The page-table walker reads memory, not our cache — push it out
+     * before anything can look for it. */
+    dcache_clean_to_memory(l1, PAGE_SIZE);
+
+    /* Switching TTBR0 and TCR while the MMU is enabled is not architecturally
+     * permitted, and firmware hands us a machine with the MMU already on and
+     * its own tables installed. So the MMU has to go off, be reconfigured, and
+     * come back on.
+     *
+     * The whole sequence is one assembly block with no memory access in it,
+     * and that is not tidiness. Between switching the data cache off and back
+     * on, any load or store — including a function call's use of the stack —
+     * would bypass a cache that still holds the newest copy of that memory,
+     * and read something stale. A stack frame written before the switch and
+     * read after it is exactly this bug, and it presents as a machine that
+     * stops with no fault at all. */
     __asm__ volatile(
-        "dsb  ishst\n"
-        "msr  mair_el1, %0\n"
-        "msr  tcr_el1,  %1\n"
-        "msr  ttbr0_el1,%2\n"
+        "dsb  sy\n"
+        "mrs  x0, sctlr_el1\n"
+        "bic  x0, x0, #(1 << 0)\n"      /* MMU off        */
+        "bic  x0, x0, #(1 << 2)\n"      /* data cache off */
+        "msr  sctlr_el1, x0\n"
+        "isb\n"
+        "msr  mair_el1,  %0\n"
+        "msr  tcr_el1,   %1\n"
+        "msr  ttbr0_el1, %2\n"
         "isb\n"
         "tlbi vmalle1\n"
-        "dsb  ish\n"
+        "ic   iallu\n"
+        "dsb  nsh\n"
         "isb\n"
-        :: "r"(mair), "r"(tcr), "r"((uint64_t)(uintptr_t)l1) : "memory");
-
-    /* Turn it on, with the caches. Until this instruction retires every load
-     * has gone to memory; after it the machine is perhaps thirty times faster. */
-    uint64_t sctlr;
-    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
-    sctlr |= (1ul << 0)    /* M: MMU on              */
-          |  (1ul << 2)    /* C: data cache on       */
-          |  (1ul << 12);  /* I: instruction cache on */
-    __asm__ volatile("msr sctlr_el1, %0\n isb\n" :: "r"(sctlr) : "memory");
+        "mrs  x0, sctlr_el1\n"
+        "orr  x0, x0, #(1 << 0)\n"      /* MMU on                */
+        "orr  x0, x0, #(1 << 2)\n"      /* data cache on         */
+        "orr  x0, x0, #(1 << 12)\n"     /* instruction cache on  */
+        "msr  sctlr_el1, x0\n"
+        "isb\n"
+        :: "r"(mair), "r"(tcr), "r"((uint64_t)(uintptr_t)l1) : "x0", "memory");
     return 0;
 }
 

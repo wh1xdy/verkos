@@ -617,7 +617,18 @@ if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&
         else
             ok "stam hardcodes no UART address"
         fi
-        ( cd pkg/stam && make clean >/dev/null 2>&1 )
+        # The same kernel must also build as a UEFI application, because that
+        # is how our own bootloader starts it.
+        if ( cd pkg/stam && make stam.efi >/dev/null 2>&1 ) && [ -f pkg/stam/stam.efi ]; then
+            if [ "$(dd if=pkg/stam/stam.efi bs=1 count=2 2>/dev/null)" = "MZ" ]; then
+                ok "stam builds as a UEFI application"
+            else
+                bad "stam.efi is not a PE image (no MZ)"
+            fi
+        else
+            bad "stam does not build as a UEFI application"
+        fi
+        ( cd pkg/stam && make clean clean-efi >/dev/null 2>&1 )
     else
         bad "stam does not compile"
     fi
