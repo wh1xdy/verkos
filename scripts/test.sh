@@ -597,8 +597,12 @@ done
 # silently. Every rd.*/urverk.* token a boot configuration hands to urverk must
 # be a token urverk actually reads.
 say "boot options a menu offers must be options urverk reads"
-for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot.sh pkg/vinstall/vinstall.c; do
-    [ -f "$cfg" ] || continue
+# A path that no longer exists must fail, not be skipped. This list named
+# scripts/70-boot.sh, which has been 70-boot-image.sh for as long as it has
+# existed, so one of the four files was silently not checked — a check that
+# quietly covers less than it claims is the defect this whole file is about.
+for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot-image.sh pkg/vinstall/vinstall.c; do
+    [ -f "$cfg" ] || { bad "boot-option check names $cfg, which does not exist"; continue; }
     # [a-z_.]+, not [a-z_]+: a token may be dotted twice (rd.luks.uuid), and
     # stopping at the second dot compares a prefix that nothing ever reads.
     for tok in $(grep -oE '\b(rd|urverk)\.[a-z_.]+' "$cfg" 2>/dev/null | sed 's/\.$//' | sort -u); do
