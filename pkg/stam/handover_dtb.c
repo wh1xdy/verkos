@@ -18,6 +18,11 @@ static fdt_t tree;
 static const char *cmdline_override;
 void handover_set_cmdline(const char *s) { if (s && *s) cmdline_override = s; }
 
+static uint64_t free_base_override, free_size_override;
+void handover_set_free_region(uint64_t base, uint64_t size) {
+    free_base_override = base; free_size_override = size;
+}
+
 const fdt_t *machine_tree(void) { return &tree; }
 
 int handover_dtb(const void *dtb, boot_info_t *bi) {
@@ -64,5 +69,7 @@ int handover_dtb(const void *dtb, boot_info_t *bi) {
         if (dt && !strcmp(dt, "cpu")) bi->cpus++;
     }
 
+    bi->free_base = free_base_override;
+    bi->free_size = free_size_override;
     return 0;
 }

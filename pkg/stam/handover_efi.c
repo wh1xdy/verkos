@@ -111,6 +111,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
         if (EFI_ERROR(st)) return st;
     }
 
+    /* The firmware's map is the only account of what memory is actually free.
+     * Without it the kernel can do no better than "everything after my own
+     * image", and UEFI loads that image high — which found 58 MiB free on a
+     * machine with a gigabyte. Take the largest conventional region. */
+    {
+        uint64_t best_base = 0, best_size = 0;
+        for (UINTN o = 0; dsize && o + dsize <= size; o += dsize) {
+            unsigned char *d = mmap_buf + o;
+            UINT32 type = (UINT32)d[0] | ((UINT32)d[1] << 8) |
+                          ((UINT32)d[2] << 16) | ((UINT32)d[3] << 24);
+            if (type != 7) continue;              /* EfiConventionalMemory */
+            uint64_t start = 0, pages = 0;
+            for (int i = 0; i < 8; i++) start |= (uint64_t)d[8 + i] << (8 * i);
+            for (int i = 0; i < 8; i++) pages |= (uint64_t)d[24 + i] << (8 * i);
+            if (pages * 4096 > best_size) { best_base = start; best_size = pages * 4096; }
+        }
+        if (best_size) handover_set_free_region(best_base, best_size);
+    }
+
     /* 4. the machine is ours. From here the only console is the one we find
      * in the device tree for ourselves. */
     kmain(dtb);

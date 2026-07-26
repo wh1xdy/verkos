@@ -57,7 +57,10 @@ void kmain(void *dtb) {
     exceptions_install();
     kprintf("  vectors   installed\n");
 
-    pmm_init(boot.ram_base, boot.ram_size, (uint64_t)(uintptr_t)boot.dtb, 1u << 20);
+    if (boot.free_size)
+        pmm_init(boot.free_base, boot.free_size, (uint64_t)(uintptr_t)boot.dtb, 1u << 20);
+    else
+        pmm_init(boot.ram_base, boot.ram_size, (uint64_t)(uintptr_t)boot.dtb, 1u << 20);
     if (mmu_init(boot.ram_base, boot.ram_size) != 0) {
         kprintf("  mmu       FAILED to allocate a page table\n");
     } else {

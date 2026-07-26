@@ -1099,3 +1099,42 @@ than papered over:
   end of the kernel image, which firmware places high, so it reported 58 MiB
   free on a 1 GiB machine. Correct, and nearly useless; the fix is to allocate
   from the UEFI map's free regions rather than from one bump pointer.
+
+## D-036 — The synthetic tree, finished
+
+vboot now reads three ACPI tables and turns each into the device-tree node the
+kernel expects:
+
+- **SPCR** → the console: a `serial@…` node with `arm,pl011` or `ns16550a`.
+- **MADT** → the interrupt controller and the processors: an `intc@…` node with
+  the distributor and CPU-interface ranges, and one `cpu@N` per enabled entry.
+  ACPI has no separate processor list on ARM; counting GIC CPU interfaces *is*
+  how you count CPUs.
+- **GTDT** → the timer: `arm,armv8-timer` with its interrupts.
+
+That last one carried the trap. ACPI gives the timer as a *global* interrupt
+id; a device tree wants it relative to the start of the per-processor range,
+which begins at 16. Subtract wrongly and the kernel boots normally and never
+ticks, with nothing to say why. It is the same number, expressed in two
+conventions, and only one of them is written down in either specification.
+
+A GICv3 is deliberately **not** described even though MADT reports it. stam
+supports v2 only, and a v3 node it would then misconfigure is worse than no
+node at all: the machine would look like it was working while taking no
+interrupts. Refusing produces the message we already print.
+
+**The allocator now uses the firmware's account of free memory.** It used to
+start after the kernel image, which is right when the kernel is handed all of
+RAM and badly wrong under UEFI, which loads the image high — it found 58 MiB
+free on a machine with a gigabyte. Taking the largest EfiConventionalMemory
+region gives 836 MiB. `pmm_init` distinguishes the two cases by asking whether
+the kernel image actually lies inside the region it was given, rather than by
+being told which situation it is in.
+
+**A round-trip test now holds the two halves together.** vboot's tree writer
+(`fdtgen.h`) and stam's tree reader (`pkg/stam/fdt.c`) were written
+independently and never met except during a boot, where a disagreement about
+byte order or a block offset would show up only as a kernel that works on some
+machines. `make test` now builds a tree with one and reads it back with the
+other, checking cells, strings, paths, `compatible` lookup and two `reg`
+ranges. 140 → 141 checks.

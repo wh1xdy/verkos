@@ -487,11 +487,9 @@ static void *vb_find_cfg(EFI_GUID *want) {
     return 0;
 }
 
-/* ACPI's SPCR table says where the console serial port is and what kind it is.
- * That is the only reason we look at ACPI at all here: on a machine described
- * purely by ACPI there is no other way to find the console, and a kernel with
- * no console is a kernel that cannot tell you why it stopped. */
-static int vb_spcr(UINT64 *base, const char **compat) {
+/* Walk the XSDT for a table by signature. Every ACPI reader below needs this,
+ * and doing it once means one place to be wrong about pointer widths. */
+static unsigned char *vb_acpi_table(const char *sig) {
     unsigned char *rsdp = vb_find_cfg(&acpi20_guid);
     if (!rsdp) return 0;
     UINT64 xsdt = 0;
@@ -505,20 +503,77 @@ static int vb_spcr(UINT64 *base, const char **compat) {
         for (int i = 0; i < 8; i++) t |= (UINT64)x[o + i] << (8 * i);
         unsigned char *tab = (unsigned char *)(UINTN)t;
         if (!tab) continue;
-        if (tab[0] != 'S' || tab[1] != 'P' || tab[2] != 'C' || tab[3] != 'R') continue;
-        unsigned iface = tab[36];
-        unsigned space = tab[40];          /* 0 = memory-mapped, 1 = port I/O */
-        UINT64 addr = 0;
-        for (int i = 0; i < 8; i++) addr |= (UINT64)tab[44 + i] << (8 * i);
-        /* Port I/O cannot be expressed as a device-tree "reg", and pretending
-         * otherwise would give the kernel an address it would happily write
-         * to. x86 will need its console described another way. */
-        if (space != 0 || !addr) return 0;
-        *base = addr;
-        *compat = (iface == 3) ? "arm,pl011" : "ns16550a";
-        return 1;
+        if (tab[0] == sig[0] && tab[1] == sig[1] && tab[2] == sig[2] && tab[3] == sig[3])
+            return tab;
     }
     return 0;
+}
+
+static UINT32 vb_le32(const unsigned char *p) {
+    return (UINT32)p[0] | ((UINT32)p[1] << 8) | ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24);
+}
+static UINT64 vb_le64(const unsigned char *p) {
+    UINT64 v = 0; for (int i = 0; i < 8; i++) v |= (UINT64)p[i] << (8 * i); return v;
+}
+
+/* MADT ("APIC") lists the interrupt controllers and the processors. On ARM the
+ * entries we want are the GIC distributor (type 0x0C) and one GIC CPU
+ * interface (type 0x0B) per processor — which is also how the CPUs are
+ * counted, since ACPI has no separate list of them. */
+static int vb_madt(UINT64 *dist, UINT64 *cpuif, unsigned *ncpu, unsigned *gicver) {
+    unsigned char *t = vb_acpi_table("APIC");
+    if (!t) return 0;
+    UINT32 len = vb_le32(t + 4);
+    *dist = 0; *cpuif = 0; *ncpu = 0; *gicver = 0;
+    for (UINT32 o = 44; o + 2 <= len; ) {
+        unsigned type = t[o], elen = t[o + 1];
+        if (elen < 2 || o + elen > len) break;
+        if (type == 0x0b && elen >= 40) {            /* GIC CPU interface */
+            if (vb_le32(t + o + 12) & 1) {           /* enabled           */
+                (*ncpu)++;
+                if (!*cpuif) *cpuif = vb_le64(t + o + 32);
+            }
+        } else if (type == 0x0c && elen >= 24) {     /* GIC distributor   */
+            *dist = vb_le64(t + o + 8);
+            *gicver = t[o + 20];
+        } else if (type == 0x00 && elen >= 8) {      /* x86 local APIC    */
+            if (vb_le32(t + o + 4) & 1) (*ncpu)++;
+        }
+        o += elen;
+    }
+    return (*ncpu > 0);
+}
+
+/* GTDT says which interrupt the generic timer uses. The number it gives is a
+ * global interrupt id; a device tree wants it relative to the start of the
+ * per-processor range, which is 16. Getting that subtraction wrong produces a
+ * kernel that boots and never ticks. */
+static int vb_gtdt_timer_ppi(unsigned *ppi) {
+    unsigned char *t = vb_acpi_table("GTDT");
+    if (!t || vb_le32(t + 4) < 64) return 0;
+    UINT32 gsiv = vb_le32(t + 56);               /* non-secure EL1 timer */
+    if (gsiv < 16 || gsiv > 31) return 0;
+    *ppi = gsiv - 16;
+    return 1;
+}
+
+/* ACPI's SPCR table says where the console serial port is and what kind it is.
+ * That is the only reason we look at ACPI at all here: on a machine described
+ * purely by ACPI there is no other way to find the console, and a kernel with
+ * no console is a kernel that cannot tell you why it stopped. */
+static int vb_spcr(UINT64 *base, const char **compat) {
+    unsigned char *tab = vb_acpi_table("SPCR");
+    if (!tab) return 0;
+    unsigned iface = tab[36];
+    unsigned space = tab[40];              /* 0 = memory-mapped, 1 = port I/O */
+    UINT64 addr = vb_le64(tab + 44);
+    /* Port I/O cannot be expressed as a device-tree "reg", and pretending
+     * otherwise would give the kernel an address it would happily write to.
+     * x86 will need its console described another way. */
+    if (space != 0 || !addr) return 0;
+    *base = addr;
+    *compat = (iface == 3) ? "arm,pl011" : "ns16550a";
+    return 1;
 }
 
 /* The extent of usable RAM, as one range. Deliberately coarse: the UEFI map is
@@ -585,6 +640,70 @@ static int vb_install_dtb(void) {
             fg_prop_str(&g, "device_type", "memory");
             fg_prop_reg(&g, (unsigned long long)lo, (unsigned long long)(hi - lo));
         fg_end_node(&g);
+
+        /* Processors and the interrupt controller, out of ACPI's MADT. */
+        UINT64 gicd = 0, gicc = 0; unsigned ncpu = 0, gicver = 0;
+        int have_madt = vb_madt(&gicd, &gicc, &ncpu, &gicver);
+        if (have_madt && ncpu) {
+            fg_node(&g, "cpus");
+                fg_prop_u32(&g, "#address-cells", 1);
+                fg_prop_u32(&g, "#size-cells", 0);
+                for (unsigned c = 0; c < ncpu && c < 256; c++) {
+                    char nm[16]; int n = 0;
+                    nm[n++] = 'c'; nm[n++] = 'p'; nm[n++] = 'u'; nm[n++] = '@';
+                    if (c >= 16) nm[n++] = (char)("0123456789abcdef"[c >> 4]);
+                    nm[n++] = (char)("0123456789abcdef"[c & 15]);
+                    nm[n] = 0;
+                    fg_node(&g, nm);
+                        fg_prop_str(&g, "device_type", "cpu");
+                        fg_prop_str(&g, "compatible", "arm,armv8");
+                        fg_prop_u32(&g, "reg", c);
+                    fg_end_node(&g);
+                }
+            fg_end_node(&g);
+        }
+        /* Only a v2 controller is described, because only a v2 controller is
+         * supported. Emitting a v3 node the kernel would then misconfigure is
+         * worse than emitting none: it would look like a working machine that
+         * silently takes no interrupts. */
+        if (have_madt && gicd && gicc && (gicver == 0 || gicver == 1 || gicver == 2)) {
+            char nm[32]; int n = 0;
+            for (const char *q = "intc@"; *q; q++) nm[n++] = *q;
+            UINT64 v = gicd; char hex[17]; int hn = 0;
+            if (!v) hex[hn++] = '0';
+            while (v) { unsigned d = (unsigned)(v & 15); hex[hn++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; }
+            while (hn--) nm[n++] = hex[hn];
+            nm[n] = 0;
+            fg_node(&g, nm);
+                fg_prop_str(&g, "compatible", "arm,cortex-a15-gic");
+                fg_prop_u32(&g, "#interrupt-cells", 3);
+                fg_prop(&g, "interrupt-controller", 0, 0);
+                /* two ranges: distributor, then CPU interface */
+                { unsigned char b[32];
+                  fg_be32(b,      (unsigned)(gicd >> 32)); fg_be32(b + 4,  (unsigned)gicd);
+                  fg_be32(b + 8,  0);                      fg_be32(b + 12, 0x1000);
+                  fg_be32(b + 16, (unsigned)(gicc >> 32)); fg_be32(b + 20, (unsigned)gicc);
+                  fg_be32(b + 24, 0);                      fg_be32(b + 28, 0x2000);
+                  fg_prop(&g, "reg", b, 32); }
+            fg_end_node(&g);
+
+            unsigned ppi = 0;
+            if (vb_gtdt_timer_ppi(&ppi)) {
+                fg_node(&g, "timer");
+                    fg_prop_str(&g, "compatible", "arm,armv8-timer");
+                    /* four triples, as the binding specifies: secure,
+                     * non-secure, virtual, hypervisor. Only the second is
+                     * read, but a short property is a malformed one. */
+                    { unsigned char b[48];
+                      for (int t = 0; t < 4; t++) {
+                          fg_be32(b + t*12,     1);          /* PPI          */
+                          fg_be32(b + t*12 + 4, ppi);
+                          fg_be32(b + t*12 + 8, 0x08);       /* level, low   */
+                      }
+                      fg_prop(&g, "interrupts", b, 48); }
+                fg_end_node(&g);
+            }
+        }
 
         if (have_uart) {
             char nodename[64]; int n = 0;

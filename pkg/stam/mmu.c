@@ -22,9 +22,15 @@ extern char _kernel_end[];
 static uint64_t free_next, free_top;
 static unsigned pages_taken;
 
+/* `ram_base`/`ram_size` is either the whole of memory — in which case the
+ * kernel image sits inside it and must be stepped over — or a region the
+ * firmware has already told us is free, in which case it is authoritative and
+ * stepping over the image would skip most of it. Distinguish by asking whether
+ * the image is actually inside the region. */
 void pmm_init(uint64_t ram_base, uint64_t ram_size, uint64_t avoid, uint64_t avoid_size) {
-    uint64_t start = (uint64_t)(uintptr_t)_kernel_end;
-    if (start < ram_base) start = ram_base;
+    uint64_t kend = (uint64_t)(uintptr_t)_kernel_end;
+    uint64_t start = ram_base;
+    if (kend > ram_base && kend < ram_base + ram_size) start = kend;
     /* Do not hand out the device tree we are still reading from. */
     if (avoid_size && avoid + avoid_size > start && avoid < ram_base + ram_size)
         if (avoid + avoid_size > start) start = avoid + avoid_size;

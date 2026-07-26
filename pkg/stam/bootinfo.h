@@ -24,10 +24,16 @@ typedef struct {
     unsigned    cpus;           /* how many the firmware told us about     */
     const void *dtb;            /* kept: drivers still need the full tree  */
     uint64_t    acpi_rsdp;      /* 0 on machines that describe with a DTB  */
+    /* A region the firmware says is free. Set only when we were started by
+     * UEFI, which knows what it has already used; a device-tree loader does
+     * not tell us, and then the kernel falls back to "after my own image". */
+    uint64_t    free_base;
+    uint64_t    free_size;
 } boot_info_t;
 
 /* The shims. Each returns 0 on success. */
 int  handover_dtb(const void *dtb, boot_info_t *bi);
 void handover_set_cmdline(const char *s);
+void handover_set_free_region(uint64_t base, uint64_t size);
 
 #endif

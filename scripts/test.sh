@@ -636,5 +636,74 @@ else
     say "  (no aarch64 compiler here; skipping stam)"
 fi
 
+# --- the device tree we write must be the device tree we read ---------------
+# vboot builds a tree (fdtgen.h) and stam parses one (pkg/stam/fdt.c). They are
+# written independently, they never meet on the build host, and a disagreement
+# about byte order or a block offset shows up only as a kernel that boots on
+# some machines. Build a tree with one and read it back with the other.
+say "the tree vboot writes is the tree stam reads"
+cat > "$T/fdt_roundtrip.c" <<'RT'
+#include <stdio.h>
+#include <string.h>
+typedef unsigned char UINT8; typedef unsigned int UINT32;
+typedef unsigned long long UINT64; typedef unsigned long UINTN;
+#include "../pkg/vboot/fdtgen.h"
+#include "../pkg/stam/fdt.h"
+static unsigned char blob[8192];
+int main(void) {
+    fdtgen_t g; fg_init(&g, blob, sizeof blob);
+    fg_node(&g, "");
+      fg_prop_u32(&g, "#address-cells", 2);
+      fg_prop_u32(&g, "#size-cells", 2);
+      fg_prop_str(&g, "model", "roundtrip");
+      fg_node(&g, "chosen");
+        fg_prop_str(&g, "stdout-path", "/serial@9000000");
+      fg_end_node(&g);
+      fg_node(&g, "memory@0");
+        fg_prop_str(&g, "device_type", "memory");
+        fg_prop_reg(&g, 0x40000000ULL, 0x40000000ULL);
+      fg_end_node(&g);
+      fg_node(&g, "serial@9000000");
+        fg_prop_str(&g, "compatible", "arm,pl011");
+        fg_prop_reg(&g, 0x9000000ULL, 0x1000ULL);
+      fg_end_node(&g);
+    fg_end_node(&g);
+    if (!fg_finish(&g)) { puts("BUILD-FAILED"); return 1; }
+
+    fdt_t f;
+    if (fdt_init(&f, blob)) { puts("PARSE-FAILED"); return 1; }
+    if (f.addr_cells != 2 || f.size_cells != 2) { puts("CELLS-WRONG"); return 1; }
+    unsigned len = 0;
+    const char *m = fdt_getprop(&f, fdt_root(&f), "model", &len);
+    if (!m || strcmp(m, "roundtrip")) { puts("MODEL-WRONG"); return 1; }
+    int ch = fdt_find_path(&f, "/chosen");
+    const char *sp = ch == FDT_NONE ? 0 : fdt_getprop(&f, ch, "stdout-path", &len);
+    if (!sp || strcmp(sp, "/serial@9000000")) { puts("CHOSEN-WRONG"); return 1; }
+    int u = fdt_find_compatible(&f, "arm,pl011");
+    unsigned long long a = 0, sz = 0;
+    if (u == FDT_NONE || fdt_reg(&f, u, &a, &sz) || a != 0x9000000ULL || sz != 0x1000ULL) {
+        puts("UART-WRONG"); return 1; }
+    int depth = 0, mem = FDT_NONE;
+    for (int n = fdt_root(&f); n != FDT_NONE; n = fdt_next_node(&f, n, &depth)) {
+        const char *dt = fdt_getprop(&f, n, "device_type", &len);
+        if (dt && !strcmp(dt, "memory")) { mem = n; break; }
+    }
+    if (mem == FDT_NONE || fdt_reg(&f, mem, &a, &sz) || a != 0x40000000ULL || sz != 0x40000000ULL) {
+        puts("MEMORY-WRONG"); return 1; }
+    puts("OK");
+    return 0;
+}
+RT
+if cc -O1 -I scripts -o "$T/fdt_roundtrip" "$T/fdt_roundtrip.c" pkg/stam/fdt.c pkg/stam/klib.c \
+       -DNDEBUG 2>/dev/null; then
+    out=$("$T/fdt_roundtrip" 2>&1)
+    case "$out" in
+        OK) ok "a tree built by vboot parses correctly in stam" ;;
+        *)  bad "vboot's tree and stam's parser disagree: $out" ;;
+    esac
+else
+    bad "the fdt round-trip test does not compile"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
