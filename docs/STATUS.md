@@ -4,7 +4,7 @@ Written 2026-07-26, as a handover. The point of this file is to let a new
 session start without reading the whole history: what is proved, what is
 merely written, and what is known to be wrong.
 
-`make test` — 118 checks, all passing.
+`make test` — 121 checks, all passing.
 
 ---
 
@@ -24,7 +24,8 @@ reading code.
 | **Accounts** | vlogin replaces shadow entirely: interactive login, wrong password, unknown user, locked account, autologin, `su`, `passwd`, `useradd`/`usermod`/`userdel`. `su`/`passwd` are setuid and drop privilege completely |
 | **Modules** | verkmod replaces kmod: `modprobe btrfs` pulls in five dependencies, the kernel reports the refcounts, `rmmod` refuses one in use |
 | **Full userland** | Native GCC built and installed; `libstdc++` has working threads (self-checked during the build) |
-| **Live ISO** | `make iso` → a medium that boots: firmware → El Torito → vboot → kernel → initramfs → urverk mounts the ISO by label, loop-mounts the system image, overlays a tmpfs. Installer present, root writable and ephemeral |
+| **Live ISO** | `make iso` → a 731 MB medium that boots: firmware → vboot → kernel → initramfs → urverk mounts the ISO by label, loop-mounts the system image, overlays a tmpfs. Installer present, root writable and ephemeral |
+| **Bootable from USB** | The same ISO attached as a `usb-storage` device boots: the firmware logs "USB HARDDRIVE" and the guest sees `sda1` (vfat), so it was read through the hybrid MBR, not El Torito |
 
 ## What exists but has never been booted
 
@@ -32,9 +33,10 @@ Nothing of substance. The ISO now boots (D-024), which settled the one
 outstanding question: the firmware does present the embedded FAT image as an
 ordinary volume, so vboot works unchanged.
 
-Still untried: booting the ISO from real hardware or a USB stick. There is no
-isohybrid MBR/GPT yet, so the ISO is not `dd`-able to a stick as a hybrid
-image — it has only been booted as a virtio-blk device under QEMU/AAVMF.
+Still untried: **real hardware**. The ISO boots as a simulated USB stick under
+QEMU/AAVMF, which exercises the same firmware path, but no physical machine has
+been asked to boot it. There is deliberately no GPT (D-026), so firmware that
+reads nothing but GPT will not find it.
 
 ## Known-wrong or fragile
 
@@ -81,12 +83,12 @@ isolation.
 
 ## Suggested next steps, in order
 
-1. **Trim the live system** — the ISO is 1.3 GB because the system carries gcc,
-   binutils and cmake. A live medium needs none of them; this makes the ISO and
-   every test cycle smaller.
-2. **isohybrid** — a protective MBR and GPT so the ISO can be written to a USB
-   stick and booted on real hardware.
-3. **Sync x86_64** — the second architecture is the real test of whether any of
-   this was portable.
+1. **Boot it on real hardware** — everything else is simulation. Write the ISO
+   to a stick and try it.
+2. **Sync x86_64** — the second architecture is the real test of whether any of
+   this was portable, viso and El Torito included.
+3. **Trim further** — about 250 MB of the 731 MB is the compiler. Removing it
+   would roughly halve the medium again, at the cost of an ISO install no
+   longer providing gcc.
 4. **Give `full-userland` inner marks**, so a failure does not restart the
    compiler.

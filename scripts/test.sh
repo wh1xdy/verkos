@@ -409,8 +409,8 @@ PYEOF
             # then finds an EFI partition on an ordinary block device rather than
             # an El Torito catalogue on a CD. xorriso resolves the partition back
             # to the file it covers, which is the check worth making.
-            check "the hybrid MBR partition covers the EFI image" \
-                  "xorriso -indev '$T/t.iso' -report_system_area plain 2>&1 | grep -q 'MBR partition path.*EFI.IMG'"
+            check "the hybrid MBR partition resolves to a file on the ISO" \
+                  "xorriso -indev '$T/t.iso' -report_system_area plain 2>&1 | grep -qE 'MBR partition path.*:.*/[A-Z0-9_]+\.[A-Z0-9_]+'"
         fi
         if command -v python3 >/dev/null 2>&1; then
             cat > "$T/mbr.py" <<'PYEOF'
@@ -422,6 +422,24 @@ cnt = int.from_bytes(e[12:16], "little")
 ok = (d[510] == 0x55 and d[511] == 0xAA and e[4] == 0xEF and lba > 0 and cnt > 0)
 sys.exit(0 if ok else 1)
 PYEOF
+            # ISO 9660 names carry exactly one dot. A file called
+            # "esp.iso.img" must not become "ESP.ISO.IMG", which no reader has
+            # to accept — and which stopped xorriso naming the file a partition
+            # covers.
+            cat > "$T/dots.py" <<'PYEOF'
+import sys
+d = open(sys.argv[1], "rb").read()
+root = d[22*2048:23*2048]           # viso puts the root directory at LBA 22
+off, bad = 0, 0
+while off < 2048 and root[off]:
+    ln, nlen = root[off], root[off+32]
+    name = root[off+33:off+33+nlen].decode("latin1")
+    if nlen > 1 and name.count(".") > 1:
+        print("multi-dot name:", name); bad = 1
+    off += ln
+sys.exit(bad)
+PYEOF
+            check "viso gives every file a single-dot name" "python3 '$T/dots.py' '$T/t.iso'"
             check "the MBR names one 0xEF partition and is signed 55AA" \
                   "python3 '$T/mbr.py' '$T/t.iso'"
         fi

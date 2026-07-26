@@ -203,8 +203,19 @@ int main(int argc, char **argv) {
         const char *dot = strrchr(base, '.');
         size_t slen = dot ? (size_t)(dot - base) : strlen(base);
         if (slen > 8) slen = 8;
-        for (size_t k = 0; k < slen; k++) stem[k] = (char)toupper((unsigned char)base[k]);
-        if (dot) for (int k = 0; k < 3 && dot[1 + k]; k++) ext[k] = (char)toupper((unsigned char)dot[1 + k]);
+        /* An ISO 9660 name has exactly one dot, and its characters are limited
+         * to A-Z, 0-9 and underscore. A file called "esp.iso.img" would
+         * otherwise become "ESP.ISO.IMG", which is not a name a reader has to
+         * accept — and xorriso could no longer say which file a partition
+         * covers. */
+        for (size_t k = 0; k < slen; k++) {
+            int c = toupper((unsigned char)base[k]);
+            stem[k] = (char)((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '_');
+        }
+        if (dot) for (int k = 0; k < 3 && dot[1 + k]; k++) {
+            int c = toupper((unsigned char)dot[1 + k]);
+            ext[k] = (char)((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '_');
+        }
         snprintf(files[i].name, sizeof files[i].name, "%s.%s;1", stem, ext[0] ? ext : "");
 
         files[i].size = (unsigned long)st.st_size;
