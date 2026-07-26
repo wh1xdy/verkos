@@ -842,3 +842,43 @@ Writing that check also produced a small lesson of its own: the first version
 matched `[a-z_]+` after the dot, so `rd.luks.uuid` was compared as `rd.luks` and
 reported as unimplemented. A test that reports a defect that is not there is
 worse than no test, because the next person deletes it.
+
+## D-029 — Four defects in vpk, one of them able to delete a running system
+
+Surveying vpk to "finish" it found the opposite of what was expected: no stubs,
+no unimplemented commands. Fetching, sha256 verification, building, caching a
+`.vpk`, installing, refcounted removal and dependency ordering all work, and a
+full cycle was run to prove it — `hello` fetched, built, installed, executed,
+removed with all 47 files and no empty directories left, then reinstalled from
+the cache in 0.02 s.
+
+The defects were elsewhere.
+
+**`base=yes` did not survive a reinstall.** `record_and_merge` wrote a fresh
+`meta` with only `name=` and `version=`, and `cmd_reinstall` has no base guard.
+So `vpk reinstall zlib` silently stripped the protection, after which
+`vpk remove zlib` was permitted — and the reinstall had just written a `files`
+manifest for the removal to follow. On a running system that deletes `libz`,
+which nearly everything links. Demonstrated end to end before fixing.
+
+**Refusals exited 0.** `vpk remove <base>` and `vpk remove <not installed>`
+printed to stderr and returned success, so `vpk remove x && echo done` printed
+`done`. vpk now carries an exit status through to `main`.
+
+**An install that could not write a file still reported success.**
+`copy_and_record` did `if(out<0){ close(in); continue; }` and
+`if(write(...)!=rn) break;` — an unwritable or truncated file was skipped, still
+recorded in the database, and the install printed `installed`. Same for a failed
+`readlink`/`symlink`. All of these now fail the install.
+
+**The `.vpk` writer truncated paths over 100 characters.** ustar splits a long
+path across `prefix`(155) and `name`(100); `tp_hdr` wrote only `name`, so a long
+path was cut and the package unpacked to the wrong place. This is *the same
+defect that was fixed in vtar* (D-021) — fixed there, still present here,
+because the two have separate tar writers. The reader already understood
+`prefix`; only the writer did not.
+
+Three of the four are the D-021 shape again: a wrong answer with a zero exit
+status. They were found by reading the code with the question "what returns
+success when it should not", after a boot-menu entry that did nothing (D-028)
+made that the obvious question to ask.

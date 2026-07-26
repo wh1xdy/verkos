@@ -325,7 +325,21 @@ static void rmrf(const char *path) {
 static void tp_pad(gzFile g, long n){ char z[512]={0}; long r=(512-(n%512))%512; if(r) gzwrite(g,z,(unsigned)r); }
 static void tp_hdr(gzFile g,const char *name,long size,long mode,char type,const char *link){
     char h[512]; memset(h,0,512);
-    snprintf(h,100,"%s",name);
+    /* ustar splits a long path across prefix(155) + name(100). Writing only
+     * name silently truncated anything past 100 characters and the package
+     * then unpacked to the wrong path — the same defect that was fixed in vtar
+     * (D-021), still present here in the writer. */
+    if (strlen(name) > 99) {
+        const char *cut = NULL;
+        for (const char *q = name + strlen(name) - 100; q > name; q--)
+            if (*q == '/') { cut = q; break; }
+        if (!cut || (size_t)(cut - name) > 155)
+            die("path too long for a ustar package (%zu chars): %s", strlen(name), name);
+        memcpy(h+345, name, (size_t)(cut - name));
+        snprintf(h, 100, "%s", cut + 1);
+    } else {
+        snprintf(h,100,"%s",name);
+    }
     snprintf(h+100,8,"%07lo",mode&07777);
     snprintf(h+108,8,"%07o",0); snprintf(h+116,8,"%07o",0);
     snprintf(h+124,12,"%011lo",size);
@@ -450,6 +464,10 @@ static void db_meta(const char *name, const char *key, char *out, size_t n) {
             snprintf(out,n,"%s",l+kl+1); out[strcspn(out,"\n")]=0; break; }
     fclose(f);
 }
+/* Set by any command that refused or failed. A refusal that exits 0 tells a
+ * script `vpk remove x && echo done` that the removal happened. */
+static int exit_status = 0;
+
 static int is_base(const char *name){ char v[32]; db_meta(name,"base",v,sizeof v); return !strcmp(v,"yes"); }
 
 /* ------------------------------------------------------- dep resolution --- */
@@ -508,15 +526,24 @@ static void copy_and_record(const char *base, const char *rel, FILE *db) {
             fprintf(db,"d %s\n",cr);
             copy_and_record(base,cr,db);
         } else if (S_ISLNK(st.st_mode)) {
-            char tgt[4096]; ssize_t k=readlink(sp,tgt,sizeof tgt-1); if(k<0)continue; tgt[k]=0;
-            unlink(dp); if(symlink(tgt,dp)){}
+            char tgt[4096]; ssize_t k=readlink(sp,tgt,sizeof tgt-1);
+            if(k<0) die("cannot read the link %s: %s",sp,strerror(errno));
+            tgt[k]=0;
+            unlink(dp);
+            if(symlink(tgt,dp)) die("cannot create the link %s: %s",dp,strerror(errno));
             fprintf(db,"f %s\n",cr);
         } else if (S_ISREG(st.st_mode)) {
-            int in=open(sp,O_RDONLY); if(in<0)continue;
+            /* These three used to `continue` or `break` on failure, leaving the
+             * file missing or truncated while the install went on to report
+             * success. An install that cannot write a file has not installed
+             * the package. */
+            int in=open(sp,O_RDONLY); if(in<0) die("cannot read %s: %s",sp,strerror(errno));
             int out=open(dp,O_WRONLY|O_CREAT|O_TRUNC,st.st_mode&07777);
-            if(out<0){ close(in); continue; }
+            if(out<0){ close(in); die("cannot write %s: %s",dp,strerror(errno)); }
             char b[65536]; ssize_t rn;
-            while ((rn=read(in,b,sizeof b))>0) if(write(out,b,rn)!=rn) break;
+            while ((rn=read(in,b,sizeof b))>0)
+                if(write(out,b,rn)!=rn){ close(in); close(out); die("short write to %s: %s",dp,strerror(errno)); }
+            if(rn<0){ close(in); close(out); die("read error on %s: %s",sp,strerror(errno)); }
             close(in); close(out);
             fprintf(db,"f %s\n",cr);
         }
@@ -536,9 +563,17 @@ static void record_and_merge(const recipe_t *r, const char *dest) {
     FILE *db=fopen(files,"w"); if(!db) die("cannot write db");
     copy_and_record(dest,"",db);
     fclose(db);
+    /* base=yes must survive a reinstall. It did not: record_and_merge wrote a
+     * fresh meta with only name= and version=, so `vpk reinstall zlib` quietly
+     * stripped the protection and `vpk remove zlib` was then permitted — on a
+     * running system, with a files list the reinstall had just written for it
+     * to follow. Read the flag before overwriting. */
+    int was_base = is_base(r->name);
     char meta[600]; snprintf(meta,sizeof meta,"%s/meta",dbdir);
     FILE *m=fopen(meta,"w");
-    if(m){ fprintf(m,"name=%s\nversion=%s\n",r->name,r->version); fclose(m); }
+    if(m){ fprintf(m,"name=%s\nversion=%s\n",r->name,r->version);
+           if(was_base) fprintf(m,"base=yes\n");
+           fclose(m); }
 }
 /* fetch + verify + unpack + build into DESTDIR; also saves a .vpk binary
  * package. Returns the DESTDIR path in `destout`. */
@@ -725,8 +760,8 @@ static char **owned_by_others(const char *self, int *count) {
 }
 static void cmd_remove(int argc, char **argv) {
     for (int i=0;i<argc;i++) {
-        if (!is_installed(argv[i])) { fprintf(stderr,"vpk: %s not installed\n",argv[i]); continue; }
-        if (is_base(argv[i])) { fprintf(stderr,"vpk: %s is a base-system package, refusing to remove\n",argv[i]); continue; }
+        if (!is_installed(argv[i])) { fprintf(stderr,"vpk: %s not installed\n",argv[i]); exit_status=1; continue; }
+        if (is_base(argv[i])) { fprintf(stderr,"vpk: %s is a base-system package, refusing to remove\n",argv[i]); exit_status=1; continue; }
         int oc=0; char **others=owned_by_others(argv[i],&oc);
         char files[512]; snprintf(files,sizeof files,"%s/%s/files",DB_DIR,argv[i]);
         FILE *f=fopen(files,"r");
@@ -839,5 +874,5 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd,"--version")) printf("vpk %s\n",VPK_VERSION);
     else { usage(); curl_global_cleanup(); return 1; }
     curl_global_cleanup();
-    return 0;
+    return exit_status;
 }
