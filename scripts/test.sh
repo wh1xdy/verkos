@@ -678,6 +678,29 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
         else
             ok "stam hardcodes no UART address"
         fi
+        # The kernel runs with the MMU off until it has read the device tree,
+        # and before the MMU everything is Device memory, where an unaligned
+        # access faults instead of being merely slow. GCC 12 merged two adjacent
+        # 32-bit fields of fdt_t into one 8-byte `stur x3, [x0, #28]` and the
+        # machine died inside fdt_init, before there were vectors to report it:
+        # no output at all. -mstrict-align is what stops that.
+        #
+        # Checked in the instructions rather than in the flags, because the flag
+        # is what we asked for and this is what we got. A 64-bit str can only
+        # encode an 8-aligned offset, so any unaligned one has to become a stur
+        # — which makes "a stur with a 64-bit register at an offset that is not
+        # a multiple of 8" exactly the instruction that cost the boot.
+        if command -v "${STAM_CROSS}objdump" >/dev/null 2>&1 && [ -f pkg/stam/stam.elf ]; then
+            nun=$("${STAM_CROSS}objdump" -d pkg/stam/stam.elf 2>/dev/null |
+                  grep -oE '(stur|ldur)[[:space:]]+x[0-9]+, \[x[0-9]+, #-?[0-9]+\]' |
+                  grep -oE '#-?[0-9]+' | tr -d '#' |
+                  awk '$1 % 8 != 0' | wc -l | tr -d ' ')
+            if [ "${nun:-0}" -eq 0 ]; then
+                ok "stam has no unaligned 64-bit access (it runs before the MMU)"
+            else
+                bad "stam has $nun unaligned 64-bit access(es) — fatal before the MMU is on"
+            fi
+        fi
         # The same kernel must also build as a UEFI application, because that
         # is how our own bootloader starts it.
         if ( cd pkg/stam && make CROSS="$STAM_CROSS" stam.efi >/dev/null 2>&1 ) && [ -f pkg/stam/stam.efi ]; then

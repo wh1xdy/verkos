@@ -1773,3 +1773,51 @@ came out. A statement of intent next to a call is not a test of the call.
 — where `mkfs.vfat` exists — that an image built that way actually comes out
 FAT32. The structural grep says what we asked for; the second says what we got,
 and only the second would have caught this. 161 → 165 checks.
+
+## D-053 — The kernel stopped booting, and nothing said so
+
+stam did not boot. Not a fault, not a panic, not a truncated log — **no output
+at all**, which D-045 already names as the most expensive failure this kernel
+can produce, and which was reached here by the shortest possible route.
+
+It was found by accident, while trying to run the kernel to check an unrelated
+change. The change was innocent; the tree at HEAD was already dead. Nothing had
+reported it because **`make test` builds stam and never boots it**: it checks
+the Image magic, the vector ordering, the relocation count and the PE header,
+all of which were fine.
+
+`-d in_asm` gave the whole answer in one line. Execution reached `fdt_init`,
+then branched to `0x200` and hit an undefined instruction — `0x200` being the
+synchronous-exception offset from a `VBAR_EL1` of zero, i.e. a fault taken
+before the vector table exists. The instruction before it:
+
+    40082 3c0:  f801c003   stur  x3, [x0, #28]
+
+`fdt_t` has `addr_cells` at offset 0x1c and `size_cells` at 0x20. `fdt_init`
+sets them to 2 and 1, and GCC 12 merged the two 32-bit stores into one 8-byte
+store at an offset that is 4-aligned and not 8. **The kernel runs with the MMU
+off until it has read the device tree, and before the MMU everything is Device
+memory, where an unaligned access is an alignment fault rather than a slower
+load.**
+
+So the fix is `-mstrict-align`, in `COMMON` where both builds get it, which is
+the same rule D-042 arrived at from the other direction: anything affecting how
+the compiler forms accesses belongs to both paths or to neither.
+
+**What makes this worth an entry is that nothing in the source changed.** The
+code was correct and stayed correct; a different compiler decided to merge two
+stores, and a kernel that had booted for a week stopped. Any build flag that
+only matters before the MMU is on has this property — it is invisible until the
+toolchain changes its mind, and then it is invisible in the worst way.
+
+`make test` now disassembles the kernel and asserts there is no `stur`/`ldur`
+of a 64-bit register at an offset that is not a multiple of 8. That form is
+exactly the fingerprint: a 64-bit `str` can only encode an 8-aligned offset, so
+an unaligned access *has* to become a `stur`. Verified in both directions —
+1 hit with the flag removed, 0 with it. 165 → 166 checks.
+
+The gap it exposes is larger than the fix. **Nothing here boots stam**, so the
+next defect of this shape will also be found by a person trying to use it. A
+check that starts the kernel under QEMU and looks for its own banner is the
+obvious next thing to write.
+

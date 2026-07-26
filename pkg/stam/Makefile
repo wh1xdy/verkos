@@ -16,8 +16,21 @@ LD       = $(CROSS)ld
 # kernel jumped to after moving to the high half, where they point at nothing.
 # It faulted in a loop, and only on one of the two paths. Anything that changes
 # how addresses are formed belongs in COMMON.
+#
+# -mstrict-align belongs to the same family and cost a boot to find. The kernel
+# runs with the MMU off until it has read the device tree, and before the MMU
+# everything is Device memory, where an unaligned access is a fault rather than
+# a slower load. Left to itself the compiler merges adjacent fields: GCC 12
+# turned `addr_cells = 2; size_cells = 1;` — two 32-bit stores at offsets 0x1c
+# and 0x20 of fdt_t — into one 8-byte `stur x3, [x0, #0x1c]`, which is legal
+# with the MMU on and an alignment fault before it. It faulted inside
+# fdt_init, before exception vectors existed, so the machine branched to 0x200
+# and hit an undefined instruction: no output at all, which is the most
+# expensive failure this kernel can produce. Whether it happens depends on the
+# compiler's mood about store merging, so it built and booted with one GCC and
+# died with the next.
 COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
-           -fno-jump-tables -fvisibility=hidden -O2 -Wall -std=c11
+           -fno-jump-tables -fvisibility=hidden -mstrict-align -O2 -Wall -std=c11
 # -fpic here too, not just for the UEFI build. Without it the compiler builds
 # tables of absolute pointers — a switch returning string constants becomes one
 # — and those are link-time low addresses that stop resolving the moment the
