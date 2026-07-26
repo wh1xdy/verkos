@@ -164,7 +164,9 @@ stage_sources() {
     sudo cp "$VERK_ROOT/pkg/vpager/vpager.c" "$ROOTFS/sources/vpager.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vfb/vfb.c" "$ROOTFS/sources/vfb.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/verkmod/verkmod.c" "$ROOTFS/sources/verkmod.c" 2>/dev/null || true
-    sudo cp "$VERK_ROOT/pkg/vlogin/vlogin.c"   "$ROOTFS/sources/vlogin.c"   2>/dev/null || true
+    for f in vlogin_core.c vlogin_core.h vlogin.c su.c passwd.c; do
+        sudo cp "$VERK_ROOT/pkg/vlogin/$f" "$ROOTFS/sources/$f" 2>/dev/null || true
+    done
     sudo cp "$VERK_ROOT/pkg/vmkfs/vmkfs.c"     "$ROOTFS/sources/vmkfs.c"     2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vinstall/vinstall.c" "$ROOTFS/sources/vinstall.c" 2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
@@ -618,7 +620,24 @@ fi
 # chpasswd to already exist. Links libxcrypt (8.5) for the hashing itself.
 if need vlogin; then
 say "vlogin (VerkOS account tools: login/su/passwd/useradd/... replaces shadow)"
-gcc -O2 -o /usr/bin/vlogin /sources/vlogin.c -lcrypt
+# Hardening, and it is not decoration on these three. _FORTIFY_SOURCE turns a
+# class of buffer mistakes into a clean abort instead of a corrupted stack;
+# stack-protector-strong catches the ones it cannot see statically; PIE plus
+# full RELRO and BIND_NOW mean an attacker who does get a write has no fixed
+# addresses to aim at and no writable relocation table to redirect. Two of
+# these binaries run as root on behalf of someone who is not.
+VLOGIN_HARDEN="-O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fPIE -Wall"
+VLOGIN_LINK="-pie -Wl,-z,relro,-z,now,-z,noexecstack"
+
+# Three binaries out of one library. su and passwd have a main() each that can
+# only ever do one thing; the multi-call tool keeps its argv[0] dispatch and
+# does NOT get the setuid bit. See D-051.
+gcc $VLOGIN_HARDEN $VLOGIN_LINK -o /usr/bin/vlogin \
+    /sources/vlogin.c /sources/vlogin_core.c -I/sources -lcrypt
+gcc $VLOGIN_HARDEN $VLOGIN_LINK -o /usr/bin/su \
+    /sources/su.c /sources/vlogin_core.c -I/sources -lcrypt
+gcc $VLOGIN_HARDEN $VLOGIN_LINK -o /usr/bin/passwd \
+    /sources/passwd.c /sources/vlogin_core.c -I/sources -lcrypt
 # Names that only need to reach the binary. The account-management tools also
 # answer from /usr/sbin, where shadow put them and where scripts look for them.
 for t in login chpasswd useradd usermod userdel groupadd groupdel pwconv nologin; do
@@ -627,14 +646,47 @@ done
 for t in chpasswd useradd usermod userdel groupadd groupdel pwconv nologin; do
     ln -sf ../bin/vlogin "/usr/sbin/$t"
 done
-# su and passwd are the exception: an ordinary user runs them but they must
-# read and write /etc/shadow, which is 0640 root-owned. A symlink cannot carry
-# the setuid bit, so these two are copies.
+# su and passwd are the only setuid binaries in VerkOS. An ordinary user runs
+# them and they must read and write /etc/shadow, which is 0640 root-owned.
+#
+# They are separately compiled programs, not copies of the multi-call binary.
+# A copy would still contain every other tool and choose between them from
+# argv[0] — which the caller supplies. See D-051.
 for t in su passwd; do
-    cp /usr/bin/vlogin "/usr/bin/$t"
     chown root:root "/usr/bin/$t"
     chmod 4755 "/usr/bin/$t"
 done
+# Nothing else may carry it, and several packages install one without asking.
+# A first inventory of a built rootfs found four beyond ours:
+#
+#   /usr/bin/mount, /usr/bin/umount     util-linux, so a user can mount
+#   /usr/libexec/ssh-keysign            openssh, only for host-based auth
+#   /usr/libexec/dbus-daemon-launch-helper   dbus system-bus activation
+#
+# None of them are wanted here. VerkOS mounts filesystems from urverk and from
+# vinstall, both of which already run as root; host-based ssh authentication is
+# not configured; and nothing activates services over the system bus. Each is a
+# root-privileged program on the disk of every installation, carried for a
+# feature nobody asked for — which is the definition of attack surface.
+#
+# The bit is removed rather than the programs: mount(8) is still useful to
+# root, and deleting it would be a surprise. Losing setuid only means an
+# ordinary user cannot invoke it, which is the intent.
+say "removing the setuid bit from everything except su and passwd"
+find / -xdev -perm -4000 -type f 2>/dev/null | while read -r f; do
+    case "$f" in
+        /usr/bin/su|/usr/bin/passwd) continue ;;
+    esac
+    echo "  setuid removed: $f"
+    chmod u-s "$f"
+done
+# And then insist on it, because a silent inventory is not an inventory.
+left=$(find / -xdev -perm -4000 -type f 2>/dev/null | grep -v "^/usr/bin/su$" | grep -v "^/usr/bin/passwd$" || true)
+if [ -n "$left" ]; then
+    echo "! setuid binaries that should not exist:" >&2
+    echo "$left" >&2
+    exit 1
+fi
 # /bin and /sbin are symlinks into /usr, so /bin/login (what vgetty execs) and
 # /sbin/nologin (a shell for accounts that must not be used) already resolve.
 cd /sources

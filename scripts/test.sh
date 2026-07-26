@@ -26,14 +26,18 @@ say "compiles"
 for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcpio.c \
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
            pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
-           pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c pkg/vmkfs/vmkfs.c \
+           pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c pkg/vlogin/su.c \
+           pkg/vlogin/passwd.c pkg/vmkfs/vmkfs.c \
            pkg/vinstall/vinstall.c pkg/viso/viso.c pkg/vhex/vhex.c pkg/vtree/vtree.c \
            pkg/vdate/vdate.c pkg/vxargs/vxargs.c pkg/vip/vip.c; do
     name=$(basename "$src" .c)
     extra=""
     [ "$name" = vpk ] && extra="-lcurl -llzma -lz"
     [ "$name" = vawk ] && extra="-lm"      # fmod/pow/sqrt
-    [ "$name" = vlogin ] && extra="-lcrypt"
+    # vlogin, su and passwd are three programs over one library now (D-051).
+    case "$name" in
+        vlogin|su|passwd) extra="pkg/vlogin/vlogin_core.c -Ipkg/vlogin -lcrypt" ;;
+    esac
     # vlogin needs libxcrypt (crypt_gensalt); skip where there is none
     if [ "$name" = vlogin ] && ! echo "#include <crypt.h>" | $CC -E - >/dev/null 2>&1; then
         printf '  \033[33mskip\033[0m  %s (no crypt.h here)\n' "$name"; continue
@@ -786,6 +790,63 @@ if cc -O1 -o "$T/vbootimg" pkg/vbootimg/vbootimg.c 2>/dev/null; then
     fi
 else
     bad "vbootimg does not compile"
+fi
+
+# --- the setuid set is exactly two files ------------------------------------
+# A setuid binary hands its caller privileges they did not have. The list of
+# them is therefore the shortest and most important inventory in the system,
+# and it must be checked rather than remembered.
+say "only su and passwd may be setuid"
+# One place in the build may set the bit, and it must be the loop over su and
+# passwd. Counting `chmod 4xxx` lines is the whole check; earlier attempts
+# matched ordinary modes and reported four places where there is one.
+setters=$(grep -c "chmod 4[0-7][0-7][0-7]" scripts/40-final-system.sh || true)
+if [ "${setters:-0}" -eq 1 ]; then
+    ok "the build sets the setuid bit in exactly one place"
+else
+    bad "the setuid bit is set in ${setters} places in the build; it belongs in one"
+fi
+
+if grep -q 'cp /usr/bin/vlogin "/usr/bin/\$t"' scripts/40-final-system.sh; then
+    bad "su/passwd are copies of the multi-call binary again — see D-051"
+else
+    ok "su and passwd are not copies of the multi-call binary"
+fi
+
+# The rule from D-051, as something a machine can check: a setuid program has
+# one main() and cannot become anything else. A program that compares strings
+# to decide what to do is dispatching, whatever it calls the variable.
+for f in su passwd; do
+    if [ ! -f "pkg/vlogin/$f.c" ]; then
+        bad "$f is not its own program"
+    elif ! grep -q "int main" "pkg/vlogin/$f.c"; then
+        bad "$f has no main of its own"
+    elif grep -q "strcmp" "pkg/vlogin/$f.c"; then
+        bad "$f compares strings to choose behaviour — that is dispatch"
+    else
+        ok "$f has one main and cannot become another tool"
+    fi
+done
+
+# Hardening is part of the contract for these two, not a preference.
+for flag in _FORTIFY_SOURCE=3 -fstack-protector-strong -fPIE relro; do
+    if grep -q -- "$flag" scripts/40-final-system.sh; then
+        ok "the account tools are built with $flag"
+    else
+        bad "the account tools are not built with $flag"
+    fi
+done
+
+# If a rootfs exists, check the real thing rather than the recipe for it.
+if [ -d "${ROOTFS:-work/aarch64/rootfs}" ]; then
+    rfs="${ROOTFS:-work/aarch64/rootfs}"
+    actual=$(find "$rfs" -xdev -perm -4000 -type f 2>/dev/null |
+             sed "s|^$rfs||" | sort | tr '\n' ' ')
+    case "$actual" in
+        ""|"/usr/bin/passwd /usr/bin/su "|"/usr/bin/su /usr/bin/passwd ")
+            ok "the built rootfs has no unexpected setuid binaries" ;;
+        *)  bad "unexpected setuid binaries in the rootfs: $actual" ;;
+    esac
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

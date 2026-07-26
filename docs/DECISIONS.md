@@ -1676,3 +1676,57 @@ that enables them rather than left to be discovered.
 
 GENI is deliberately left polling: its receive path is unwritten, and enabling
 an interrupt for a driver that cannot read would produce a storm.
+
+## D-051 — Setuid and argv[0] dispatch are incompatible
+
+**The rule: every setuid binary has exactly one `main()` and can only ever
+become one thing. Shared code is shared at the source level, never through
+dispatch.**
+
+A multi-call binary lets its caller choose what it does — busybox does this, and
+so did `vlogin`. A setuid binary runs as root. Put them together and the
+privileged code is selected by a field the caller sets freely: `argv[0]` is
+whatever the caller passes to `execve`, and it is not a name the program can
+trust about itself.
+
+VerkOS had this shape. `su` and `passwd` were copies of the multi-call `vlogin`
+with mode 4755, and `main` chose between eleven tools by `argv[0]` — falling
+back to `argv[1]` when the name matched nothing. Both inputs belong to whoever
+starts the program. It was found by reading for the shape rather than by
+anything failing, and fixed before VerkOS had run anywhere but here.
+
+Now: `vlogin_core.c` is a library. `vlogin` is the multi-call tool and is **not**
+setuid — dispatching on `argv[0]` is fine when the caller gains nothing. `su.c`
+and `passwd.c` are separate programs with a `main()` each that calls one
+function and reads no name at all.
+
+Three things came with it.
+
+**Startup hygiene.** `vlogin_secure_startup()` runs first in both setuid
+programs. It attaches `/dev/null` to any of file descriptors 0, 1 and 2 that is
+missing, because a caller may close them: the program's first `open()` then
+*becomes* descriptor 0, its second becomes 1, its third becomes 2 — so a file it
+opened for its own purposes is now its standard error, and the next message it
+prints lands inside that file. On a program that opens `/etc/shadow` this is
+worth more than the two lines it costs. It also clears `LD_PRELOAD`,
+`LD_LIBRARY_PATH`, `LD_AUDIT`, `IFS`, `BASH_ENV` and `ENV`, which nothing here
+reads but anything it executes might.
+
+**Hardening, which was entirely absent.** The account tools were built with
+plain `-O2`. They are now built `-D_FORTIFY_SOURCE=3 -fstack-protector-strong
+-fPIE` and linked `-pie -Wl,-z,relro,-z,now,-z,noexecstack`, and the properties
+are verified in the binary rather than assumed from the flags.
+
+**An inventory nobody had taken.** The rootfs held four setuid binaries beyond
+ours — `mount`, `umount`, `ssh-keysign` and `dbus-daemon-launch-helper` — each
+installed by its package for a feature VerkOS does not use. The build now
+removes the bit from everything except `su` and `passwd` and fails if any
+remains. `make test` checks the same set, that the bit is set in exactly one
+place in the build, and that neither setuid program contains a string
+comparison, because a program that compares strings to decide what to do is
+dispatching whatever it calls the variable.
+
+This is the same family as the rest of this log: a defect visible in the shape
+of the code and in no output at all. Nothing failed, nothing printed a warning,
+and every test passed — because the tests asked whether the tools worked, and
+they did.
