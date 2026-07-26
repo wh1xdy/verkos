@@ -25,7 +25,8 @@ extern uint64_t thread_entry_point(void);
 #define STACK_PAGES 2
 
 static thread_t threads[MAX_THREADS];
-static int n_threads;
+static int n_threads;            /* how many slots have ever been used        */
+static int next_id;              /* process ids: monotonic, never reused      */
 static thread_t *current;
 static int started;
 
@@ -33,22 +34,68 @@ thread_t *thread_current(void) { return current; }
 int thread_count(void) { return n_threads; }
 thread_t *thread_at(int i) { return (i >= 0 && i < n_threads) ? &threads[i] : 0; }
 
+/* A slot is not an id.
+ *
+ * These used to be the same number — `t->id = n_threads`, with the id doubling
+ * as the array index — and a collected slot was never handed out again, despite
+ * the comment in sched.h saying it may be. Sixteen slots for the whole life of
+ * a boot meant a shell ran a dozen commands and then fork started refusing,
+ * with nothing wrong except that the machine had run out of a resource it was
+ * never returning.
+ *
+ * Reusing the slot while it still *is* the id would be worse than the leak.
+ * `parent` holds an id, and an orphan asks "is my parent still here?" by
+ * comparing it; hand the same number to a new process and an unrelated program
+ * inherits somebody else's children. So the id became a counter of its own,
+ * which costs one int and makes the two questions — which slot, which process —
+ * separately answerable.
+ *
+ * A slot stays THREAD_FREE until its stack and saved registers are complete,
+ * and only the last line of each creator makes it runnable. The old code got
+ * this right by accident — it published the slot with `n_threads++` after
+ * building the frame — and the accident has to be kept on purpose now that a
+ * slot becomes visible the moment it is taken. schedule() runs from the timer
+ * interrupt, so the window between "this slot is mine" and "this slot has a
+ * stack" is a window in which a thread can be resumed on a stack pointer of
+ * zero.
+ */
+static thread_t *alloc_slot(void) {
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].state == THREAD_FREE) return &threads[i];
+    if (n_threads < MAX_THREADS) {
+        thread_t *t = &threads[n_threads];
+        t->state = THREAD_FREE;      /* not runnable until the caller says so */
+        n_threads++;
+        return t;
+    }
+    return 0;
+}
+
+/* Everything a slot carries from its previous occupant, cleared in one place so
+ * a field added later cannot be forgotten in three. Deliberately leaves state
+ * alone: the caller sets it, last. */
+static void slot_init(thread_t *t, const char *name, uint64_t space) {
+    t->id          = next_id++;
+    t->name        = name;
+    t->slices      = 0;
+    t->space       = space;
+    t->parent      = current ? current->id : -1;
+    t->status      = 0;
+    t->wait_reason = 0;
+    t->stack_low   = 0;
+    t->sp          = 0;
+}
+
 /* The frame cpu_switch will pop the first time this thread is resumed. The
  * registers it restores become the thread's starting state, so the entry point
  * goes in x19, its argument in x20, and the return address is the trampoline. */
 thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
-    if (n_threads >= MAX_THREADS) return 0;
+    thread_t *t = alloc_slot();
+    if (!t) return 0;
     unsigned char *stack = alloc_pages(STACK_PAGES);
-    if (!stack) return 0;
+    if (!stack) { t->state = THREAD_FREE; return 0; }
 
-    thread_t *t = &threads[n_threads];
-    t->id = n_threads;
-    t->name = name;
-    t->state = THREAD_RUNNABLE;
-    t->slices = 0;
-    t->space = 0;
-    t->parent = current ? current->id : -1;
-    t->status = 0;
+    slot_init(t, name, 0);
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -59,7 +106,7 @@ thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
     frame[11] = thread_entry_point();       /* x30: where cpu_switch's ret goes */
     t->sp = (uint64_t)(uintptr_t)frame;
 
-    n_threads++;
+    t->state = THREAD_RUNNABLE;             /* last: see alloc_slot */
     return t;
 }
 
@@ -74,18 +121,12 @@ extern uint64_t ret_to_user_addr(void);
  * instruction, with different values.
  */
 thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t space) {
-    if (n_threads >= MAX_THREADS) return 0;
+    thread_t *t = alloc_slot();
+    if (!t) return 0;
     unsigned char *stack = alloc_pages(STACK_PAGES);
-    if (!stack) return 0;
+    if (!stack) { t->state = THREAD_FREE; return 0; }
 
-    thread_t *t = &threads[n_threads];
-    t->id = n_threads;
-    t->name = "child";
-    t->state = THREAD_RUNNABLE;
-    t->slices = 0;
-    t->space = space;
-    t->parent = current ? current->id : -1;
-    t->status = 0;
+    slot_init(t, "child", space);
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -99,7 +140,7 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
     sw[11] = ret_to_user_addr();              /* x30: where cpu_switch returns */
     t->sp = (uint64_t)(uintptr_t)sw;
 
-    n_threads++;
+    t->state = THREAD_RUNNABLE;               /* last: see alloc_slot */
     return t;
 }
 
@@ -107,23 +148,19 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
  * started — so there is something to switch *away from*. Its stack is the one
  * the linker reserved, not one we allocated. */
 void sched_init(const char *name) {
-    thread_t *t = &threads[n_threads];
-    t->id = n_threads;
-    t->name = name;
-    t->state = THREAD_RUNNABLE;
-    t->slices = 0;
-    t->space = 0;
-    t->parent = -1;
-    t->status = 0;
-    t->sp = 0;
-    t->stack_low = 0;
+    thread_t *t = alloc_slot();
+    slot_init(t, name, 0);
+    t->parent = -1;              /* nobody started this one; the machine did */
     current = t;
-    n_threads++;
+    t->state = THREAD_RUNNABLE;
     started = 1;
 }
 
+/* Round robin over *slots*. This used to start from `after->id` and index the
+ * array with it, which worked only while the id and the slot were the same
+ * number. They are not any more, so the position comes from the pointer. */
 static thread_t *next_runnable(thread_t *after) {
-    int start = after ? after->id : 0;
+    int start = after ? (int)(after - threads) : 0;
     for (int i = 1; i <= n_threads; i++) {
         thread_t *t = &threads[(start + i) % n_threads];
         if (t->state == THREAD_RUNNABLE) return t;
@@ -197,7 +234,19 @@ int thread_wait(int *status_out) {
                         free_page((void *)(uintptr_t)(threads[i].stack_low + p * PAGE_SIZE));
                     threads[i].stack_low = 0;
                 }
-                threads[i].state = THREAD_FREE;
+                /* The slot goes back on the shelf, so clear what the next
+                 * occupant must not inherit. `parent` especially: a stale one
+                 * on a free slot is harmless, but a stale one that survived
+                 * into a reused slot would make an unrelated process look like
+                 * somebody's child. */
+                threads[i].parent      = -1;
+                threads[i].id          = -1;
+                threads[i].space       = 0;
+                threads[i].status      = 0;
+                threads[i].wait_reason = 0;
+                threads[i].name        = "free";
+                threads[i].sp          = 0;
+                threads[i].state       = THREAD_FREE;
                 return id;
             }
             if (threads[i].state != THREAD_FREE) have_children = 1;

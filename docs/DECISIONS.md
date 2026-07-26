@@ -1821,3 +1821,71 @@ next defect of this shape will also be found by a person trying to use it. A
 check that starts the kernel under QEMU and looks for its own banner is the
 obvious next thing to write.
 
+## D-054 — argv, and a slot that was never given back
+
+Two of the three things D-049 named as missing are closed.
+
+**Arguments.** `execve` takes an argv, and the shell splits its line and passes
+one. The kernel copies the strings into its own memory *before* installing the
+new address space — the same trap the path fell into in D-047, one address
+space further along — then lays them out at the top of the new stack in the
+order every aarch64 Linux program is started with: `argc`, the pointers, a
+NULL, an empty environment. Nothing invented; a compiler's idea of `main` would
+already find them.
+
+It is bounded at 16 arguments and 512 bytes and **refuses rather than
+truncating**, with `-E2BIG`. A silently shortened argument list is a program
+quietly given different instructions, which is this log's recurring defect in
+the one place it would be hardest to see.
+
+A program with no argv still gets `argv[0]`, synthesised from the name it was
+exec'd under. `init` passes none, so that path is exercised on every boot.
+
+**The proof is in the program.** `hello` prints its own argument list and exits
+non-zero if `argv` is not NULL-terminated, so a wrong answer is a status a
+shell can check rather than prose a person has to read:
+
+    verk$ hello one two
+      [hello] argc = 3
+      [hello] argv[0] = "hello"
+      [hello] argv[1] = "one"
+      [hello] argv[2] = "two"
+
+`argv[0]` is the name as typed, not the path that was resolved, because that is
+what a program printing its own name expects.
+
+### The slot that was never given back
+
+Found while reading the scheduler for this work, not by anything failing.
+`sched.h` said a collected slot **may be reused**; `sched.c` handed out slots
+with `threads[n_threads]` and only ever incremented. Sixteen processes for the
+whole life of a boot, after which `fork` refused — a machine running out of a
+resource it was never returning, with a comment describing behaviour the code
+did not have.
+
+**Reusing the slot while it still *was* the id would have been worse than the
+leak.** `t->id = n_threads` made the two the same number, and `parent` holds an
+id: give the same number to a new process and an unrelated program inherits
+somebody else's children. So the id became a counter of its own — monotonic,
+never reused — and the slot became separately allocatable. `next_runnable` used
+the id as an array index and now takes the position from the pointer.
+
+One thing had to be kept that the old code got right by accident. It published
+a slot with `n_threads++` *after* building the frame; now a slot is visible the
+moment it is taken, and `schedule()` runs from the timer interrupt. So a slot
+stays `THREAD_FREE` until its stack and saved registers are complete, and only
+the last line of each creator makes it runnable. The window between "this slot
+is mine" and "this slot has a stack" is a window in which a thread can be
+resumed on a stack pointer of zero.
+
+**Measured both ways**, twenty `hello` runs typed into the shell:
+
+    old scheduler   10 of 20 ran, then "fork: no room for another process"
+    new scheduler   20 of 20 ran, ids climbing to 25, no failures
+
+Still missing, and still named: pipes, redirection, any filesystem that is not
+the initrd, and no user-pointer validation. And one found on the way: **a burst
+of input longer than a few characters is lost** — typed slowly the shell reads
+a whole line, but a line delivered all at once arrives as its first three
+characters. The ring buffer is 256 bytes and not the cause; the PL011 receive
+FIFO is the first place to look.

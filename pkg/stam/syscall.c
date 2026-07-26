@@ -4,9 +4,10 @@
  * getpid. Inventing our own would be a decision we could only ever undo, and
  * the numbering is the cheapest part of the ABI to agree with.
  *
- * Three calls is not a system-call table so much as proof that the mechanism
- * works in both directions: a call that has an effect, a call that returns a
- * value, and a call that does not return at all.
+ * Seven calls now — read, write, exit, getpid, clone, execve, wait4 — which is
+ * exactly the set a shell needs and no more. That is the measure being used:
+ * not how many calls exist, but whether an ordinary program can be written
+ * against them without the kernel knowing anything about it.
  */
 #include "console.h"
 #include "sched.h"
@@ -78,7 +79,10 @@ typedef struct { uint64_t x[30]; uint64_t lr, elr, spsr, sp_el0; } frame_t;
  * The old address space is not reclaimed. Nothing here frees pages yet; that
  * is a real leak and it is written down rather than hidden.
  */
-static uint64_t do_execve(const char *path, void *frameptr) {
+#define MAX_ARGS  16
+#define ARG_BYTES 512
+
+static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     if (!archive_size) return (uint64_t)-2;                 /* -ENOENT */
 
     /* Copy the name out of the caller's memory before touching the address
@@ -89,6 +93,42 @@ static uint64_t do_execve(const char *path, void *frameptr) {
     unsigned i = 0;
     for (; i < sizeof name - 1 && path && path[i]; i++) name[i] = path[i];
     name[i] = 0;
+
+    /* And the arguments, for exactly the same reason and one more: they have to
+     * end up in the *new* address space, so they must survive the moment when
+     * neither space is fully in place. Flattened into one kernel buffer here,
+     * unpacked onto the new stack below.
+     *
+     * Bounded, and it refuses rather than truncating. A silently shortened
+     * argument list is a program quietly given different instructions, which is
+     * this log's recurring defect in the one place it would be hardest to see.
+     */
+    char  argbuf[ARG_BYTES];
+    unsigned arglen[MAX_ARGS];
+    int   argc = 0;
+    unsigned used = 0;
+    if (argv) {
+        for (; argc < MAX_ARGS && argv[argc]; argc++) {
+            const char *s = argv[argc];
+            unsigned n = 0;
+            while (s[n]) n++;
+            if (used + n + 1 > sizeof argbuf) return (uint64_t)-7;   /* -E2BIG */
+            for (unsigned k = 0; k <= n; k++) argbuf[used + k] = s[k];
+            arglen[argc] = n + 1;
+            used += n + 1;
+        }
+        if (argc == MAX_ARGS && argv[argc]) return (uint64_t)-7;     /* -E2BIG */
+    }
+    /* A program is always told its own name, even when the caller passed none.
+     * argv[0] being absent is a thing programs do not expect and do not check. */
+    if (argc == 0) {
+        unsigned n = 0;
+        while (name[n]) n++;
+        for (unsigned k = 0; k <= n; k++) argbuf[k] = name[k];
+        arglen[0] = n + 1;
+        used = n + 1;
+        argc = 1;
+    }
 
     uint64_t file = 0, len = 0;
     if (cpio_find(archive_addr, archive_size, name, &file, &len) != 0) {
@@ -113,10 +153,38 @@ static uint64_t do_execve(const char *path, void *frameptr) {
     }
     thread_current()->space = space;
 
+    /* Lay the arguments out at the top of the new stack, the way every aarch64
+     * Linux program is started and therefore the way a compiler's idea of
+     * main() already expects:
+     *
+     *     sp -> argc, argv[0..argc-1], NULL, envp NULL
+     *           the strings themselves, higher up
+     *
+     * Written through the kernel's own view of the page rather than through the
+     * user mapping: map_user_page was handed a kernel address and converts it
+     * itself, so `stack` is somewhere the kernel can simply store to, and
+     * nothing here depends on EL1 being allowed to write EL0's pages.
+     */
+    unsigned char *page = (unsigned char *)stack;
+    unsigned str_off = (PAGE_SIZE - used) & ~15u;
+    for (unsigned k = 0; k < used; k++) page[str_off + k] = argbuf[k];
+
+    unsigned ptr_bytes = (unsigned)(8 * (argc + 3) + 15) & ~15u;
+    unsigned sp_off    = str_off - ptr_bytes;
+    uint64_t *p = (uint64_t *)(uintptr_t)(page + sp_off);
+    p[0] = (uint64_t)argc;
+    unsigned at = 0;
+    for (int k = 0; k < argc; k++) {
+        p[1 + k] = stack_va + str_off + at;
+        at += arglen[k];
+    }
+    p[1 + argc] = 0;                 /* end of argv */
+    p[2 + argc] = 0;                 /* an empty environment, but a real one */
+
     frame_t *f = frameptr;
     f->elr    = entry;               /* return to the new program, not the old */
     f->spsr   = 0;                   /* EL0t, interrupts on                    */
-    f->sp_el0 = stack_va + PAGE_SIZE;
+    f->sp_el0 = stack_va + sp_off;
     for (int i = 0; i < 30; i++) f->x[i] = 0;
     if (kchatty())
         kprintf("  [kernel] process %llu is now running %s\n",
@@ -163,7 +231,8 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
     switch (nr) {
     case SYS_READ:  return sys_read(a, b, c);
     case SYS_CLONE:  return do_fork(frame);
-    case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a, frame);
+    case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a,
+                                      (char *const *)(uintptr_t)b, frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
     case SYS_WAIT4: {

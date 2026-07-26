@@ -34,12 +34,41 @@ static void say_num(long v) {
     write(1, out, (unsigned long)o);
 }
 
-void _start(void) {
+/* The kernel starts a program the way every aarch64 Linux one is started: the
+ * stack pointer holds argc, then argv, then a NULL, then the environment. There
+ * is no libc here to unpack that, so _start is two instructions of assembly
+ * that hand the stack pointer to a C function and never come back. */
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "  mov x0, sp\n"
+    "  b    start_c\n");
+
+void start_c(unsigned long *sp) {
+    long argc = (long)sp[0];
+    char **argv = (char **)&sp[1];
+
     say("  [hello] I am a separately compiled ELF, loaded from the initrd.\n");
-    say("  [hello] no libc, no loader, four system calls.\n");
+    say("  [hello] no libc, no loader, a handful of system calls.\n");
     say("  [hello] getpid() says ");
     say_num(getpid());
     say("\n");
+
+    /* The point of this program now: say back what it was told. An argument
+     * list that arrived wrong shows up here as a wrong word, not as a crash. */
+    say("  [hello] argc = ");
+    say_num(argc);
+    say("\n");
+    for (long i = 0; i < argc; i++) {
+        say("  [hello] argv[");
+        say_num(i);
+        say("] = \"");
+        say(argv[i]);
+        say("\"\n");
+    }
+    /* argv must be NULL-terminated, and a program is entitled to rely on it. */
+    say(argv[argc] == 0 ? "  [hello] argv ends with NULL, as it must\n"
+                        : "  [hello] argv IS NOT NULL-TERMINATED\n");
 
     /* Ask for something the kernel does not implement, to show the answer is
      * an error code and not a crash. */
@@ -48,5 +77,8 @@ void _start(void) {
     say_num(-r);
     say(" (as -errno)\n");
 
-    exit_(0);
+    /* Exit non-zero when the arguments did not survive, so a shell that runs
+     * `hello one two` gets an answer it can check rather than prose a person
+     * has to read. */
+    exit_(argv[argc] == 0 ? 0 : 1);
 }

@@ -5,7 +5,7 @@
 #define THREAD_RUNNABLE 0
 #define THREAD_ZOMBIE   1   /* finished, but nobody has collected the result */
 #define THREAD_BLOCKED  2   /* waiting for something: see wait_reason        */
-#define THREAD_FREE     3   /* collected; the slot may be reused             */
+#define THREAD_FREE     3   /* collected, or not yet built: the slot is spare */
 
 typedef struct {
     uint64_t    sp;          /* where its registers are, while not running */

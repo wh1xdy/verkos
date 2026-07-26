@@ -8,7 +8,7 @@
  * the kernel, it is a program like any other, and being able to write it as one
  * is the evidence that the interface beneath it is real.
  *
- * No pipes, no redirection, no arguments — argv is not passed yet.
+ * It passes arguments now. Still no pipes and no redirection.
  */
 static long syscall3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
@@ -22,7 +22,7 @@ static long read_(char *b, unsigned long n)  { return syscall3(63, 0, (long)b, (
 static long write_(const char *s, unsigned long n) { return syscall3(64, 1, (long)s, (long)n); }
 static long getpid(void)          { return syscall3(172, 0, 0, 0); }
 static long fork_(void)           { return syscall3(220, 0, 0, 0); }
-static long exec_(const char *p)  { return syscall3(221, (long)p, 0, 0); }
+static long exec_(const char *p, char *const *av) { return syscall3(221, (long)p, (long)av, 0); }
 static long wait_(int *st)        { return syscall3(260, -1, (long)st, 0); }
 static void exit_(int c)          { syscall3(93, c, 0, 0); __builtin_unreachable(); }
 
@@ -40,12 +40,33 @@ static int same(const char *a, const char *b) {
     return *a == *b;
 }
 
+#define MAX_WORDS 16
+
+/* Split the line in place: every run of spaces becomes a terminator, and each
+ * word is pointed at where it already lies. Nothing is copied, so there is no
+ * second buffer to size wrongly. Returns the number of words found. */
+static int split(char *line, char *words[], int max) {
+    int n = 0;
+    char *p = line;
+    for (;;) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        if (n == max - 1) return -1;         /* one short: argv needs its NULL */
+        words[n++] = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        if (*p) *p++ = 0;
+    }
+    words[n] = 0;
+    return n;
+}
+
 int main_loop(void) {
     char line[128];
     char path[130];
+    char *words[MAX_WORDS];
 
     say("\n  vsh — VerkOS shell, running on stam.\n");
-    say("  Try: hello, forky, twice.  Also: help, pid, exit.\n\n");
+    say("  Try: hello one two, forky, twice.  Also: help, pid, exit.\n\n");
 
     for (;;) {
         say("verk$ ");
@@ -53,19 +74,17 @@ int main_loop(void) {
         if (n <= 0) continue;
         line[n - 1] = 0;                      /* drop the newline */
 
-        /* trim leading spaces; take the first word */
-        char *cmd = line;
-        while (*cmd == ' ') cmd++;
-        char *e = cmd;
-        while (*e && *e != ' ') e++;
-        *e = 0;
-        if (!*cmd) continue;
+        int nw = split(line, words, MAX_WORDS);
+        if (nw < 0) { say("  vsh: too many words\n"); continue; }
+        if (nw == 0) continue;
+        char *cmd = words[0];
 
         if (same(cmd, "exit")) { say("  bye\n"); return 0; }
         if (same(cmd, "pid"))  { say("  I am process "); say_num(getpid()); say("\n"); continue; }
         if (same(cmd, "help")) {
             say("  built in: help, pid, exit\n");
-            say("  anything else is looked for in the initrd and run\n");
+            say("  anything else is looked for in the initrd and run,\n");
+            say("  with the rest of the line as its arguments\n");
             continue;
         }
 
@@ -77,7 +96,10 @@ int main_loop(void) {
 
         long child = fork_();
         if (child == 0) {
-            exec_(path);
+            /* argv[0] is the name as typed, not the path we resolved — which is
+             * what every shell does, and what a program printing its own name
+             * expects to see. */
+            exec_(path, words);
             /* Only reached when exec failed: the kernel has already said why. */
             say("  vsh: could not run ");
             say(cmd);

@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-052.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-054.
 
 ---
 
@@ -133,23 +133,28 @@ What it does today, each verified by running it:
   speaks, both readers ours (D-040, D-047).
 - `fork`, `exec`, `wait4`, zombie reaping and pages that come back — a process
   that exits returns every page of its address space (D-046, D-048).
-- **A shell**, `vsh`: prompt, read a line, fork, exec, wait. That is the
-  evidence, not the feature — being able to write a shell as an ordinary program
-  with no privileges and nothing the kernel knows about it is what shows the
-  interface underneath is real (D-049).
+- **A shell**, `vsh`: prompt, read a line, split it, fork, exec with arguments,
+  wait. That is the evidence, not the feature — being able to write a shell as
+  an ordinary program with no privileges and nothing the kernel knows about it
+  is what shows the interface underneath is real (D-049, D-054).
 - An interrupt-driven console with a line discipline, and a machine that actually
   idles: sitting at the prompt for ten seconds, QEMU consumed no measurable CPU
   (D-050).
 
 Named rather than hidden: no SMP and **no locking** — system calls run with
 interrupts enabled, which is a debt (D-050). No copy-on-write; `fork` copies
-outright. Sixteen thread slots for the whole life of a boot, handed out by a
-counter that only rises: a collected slot is never reused — despite the comment
-in `sched.h` saying it may be — so a long enough session runs out.
-No `argv`, no pipes, no redirection, no filesystem beyond the initrd.
-No user-pointer validation. No FP/SIMD for EL0. A **Qualcomm GENI console driver**
-and `vbootimg` exist for hardware nothing has run them on, and D-045 says so
-plainly rather than letting them sit beside the tested work as equals.
+outright. No pipes, no redirection, no filesystem beyond the initrd. No
+user-pointer validation. No FP/SIMD for EL0. **A burst of input longer than a
+few characters is lost** — typed slowly the shell reads a whole line, pasted it
+does not (D-054). A **Qualcomm GENI console driver** and `vbootimg` exist for
+hardware nothing has run them on, and D-045 says so plainly rather than letting
+them sit beside the tested work as equals.
+
+And one that is about the tests rather than the kernel: **nothing here boots
+stam.** `make test` builds it and checks its shape — Image magic, vector
+ordering, relocation count, no unaligned access before the MMU — but never
+starts it. That is how the kernel came to stop booting entirely, for a reason
+no source change caused, with every check still green (D-053).
 
 **stam is not in any image.** It is built by `pkg/stam/Makefile` and shape-checked
 by `make test`; no numbered build stage ships it. The distribution still boots
