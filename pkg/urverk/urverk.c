@@ -482,6 +482,21 @@ static void run_fsck(const char *dev) {
 }
 /* Last resort when the root cannot be used: give a person a shell instead of
  * hanging or rebooting in a loop. */
+/* urverk.rescue — a shell before the handover, asked for rather than fallen
+ * into. The boot menu has offered this since vboot was written and nothing
+ * implemented it: the entry booted exactly like the normal one. The root is
+ * already mounted at /newroot when this runs, so the system can be repaired
+ * from here; leaving the shell carries on booting. */
+static void rescue_shell(void) {
+    fputs("\n  [urverk] rescue shell requested (urverk.rescue)\n"
+          "  [urverk] the root filesystem is mounted at " NEWROOT "\n"
+          "  [urverk] exit this shell to carry on booting\n\n", stderr);
+    pid_t p = fork();
+    if (p == 0) { execl("/bin/sh", "sh", (char *)NULL); execl("/bin/bash", "bash", (char *)NULL); _exit(127); }
+    if (p > 0) { int st; while (waitpid(p, &st, 0) < 0 && errno == EINTR) {} }
+    fputs("\n  [urverk] carrying on\n", stderr);
+}
+
 static void emergency_shell(const char *why) {
     fputs("\n  [urverk] EMERGENCY: ", stderr); fputs(why, stderr);
     fputs("\n  [urverk] starting a shell; exit to retry the boot\n\n", stderr);
@@ -1627,8 +1642,19 @@ static int stage1(void) {
     /* ---- the root may be a file on what we just mounted ---- */
     char image[256] = "";
     if (cmdline_get("rd.image", image, sizeof image)) {
+        /* The medium moves out of the way to /media: the system image is a file
+         * on it, and both the image and the EFI partition beside it have to
+         * stay reachable. Mounting the image straight over the medium would
+         * hide the very files we still need — and mounting the medium's *EFI
+         * partition* instead is not an option, because the whole device is
+         * already mounted and the kernel refuses the overlap with EBUSY. */
+        mkdir("/media", 0755);
+        if (mount(NEWROOT, "/media", NULL, MS_MOVE, NULL)) {
+            warn_errno("moving the medium to /media");
+            emergency_shell("the live medium could not be set aside");
+        }
         char imgpath[512];
-        snprintf(imgpath, sizeof imgpath, NEWROOT "%s%s", image[0] == '/' ? "" : "/", image);
+        snprintf(imgpath, sizeof imgpath, "/media%s%s", image[0] == '/' ? "" : "/", image);
         struct stat ist;
         if (stat(imgpath, &ist)) {
             say2("no root image at ", image);
@@ -1644,24 +1670,13 @@ static int stage1(void) {
             const char *ldev = loop_attach(src, 1);
             if (!ldev) {
                 emergency_shell("the root image could not be attached to a loop device");
+            } else if (mount(ldev, NEWROOT, "ext4", MS_RDONLY, NULL) &&
+                       mount(ldev, NEWROOT, "ext4", MS_RDONLY, "noload") &&
+                       mount(ldev, NEWROOT, "squashfs", MS_RDONLY, NULL)) {
+                warn_errno("mounting the root image");
+                emergency_shell("the root image would not mount");
             } else {
-                /* The image becomes the root; what we mounted to reach it stays
-                 * mounted underneath at /media until switch_root moves on. */
-                mkdir("/media", 0755);
-                if (mount(NULL, NEWROOT, NULL, MS_MOVE, NULL) != 0) { /* fall through */ }
-                mkdir(NEWROOT, 0755);
-                /* "noload": a medium that cannot be written cannot replay a
-                 * journal either, and ext4 answers EROFS rather than mounting.
-                 * An image straight off a live medium always looks like this,
-                 * because it was last touched by whatever wrote the medium. */
-                if (mount(ldev, NEWROOT, "ext4", MS_RDONLY, NULL) &&
-                    mount(ldev, NEWROOT, "ext4", MS_RDONLY, "noload") &&
-                    mount(ldev, NEWROOT, "squashfs", MS_RDONLY, NULL)) {
-                    warn_errno("mounting the root image");
-                    emergency_shell("the root image would not mount");
-                } else {
-                    say2("root image mounted from ", src);
-                }
+                say2("root image mounted from ", src);
             }
         }
     }
@@ -1690,6 +1705,37 @@ static int stage1(void) {
             }
         }
     }
+
+    /* ---- the medium's own EFI partition ----
+     * A live system that cannot see its bootloader cannot install itself: the
+     * installer needs \EFI\BOOT to copy, and on a live medium that lives in
+     * the EFI image, not in the system image. Mount it where an installed
+     * system would have it. */
+    char espspec[128] = "";
+    if (cmdline_get("rd.esp", espspec, sizeof espspec)) {
+        char bootdir[512];
+        snprintf(bootdir, sizeof bootdir, NEWROOT "/boot");
+        mkdir(bootdir, 0755);
+        if (espspec[0] == '/') {
+            /* A file on the medium — an EFI image beside the system image. */
+            char espfile[512];
+            snprintf(espfile, sizeof espfile, "/media%s", espspec);
+            const char *eldev = loop_attach(espfile, 1);
+            if (!eldev) say2("could not attach ", espfile);
+            else if (mount(eldev, bootdir, "vfat", MS_RDONLY, NULL))
+                warn_errno("mounting the EFI image at /boot");
+            else
+                say2("EFI image mounted at /boot from ", espspec);
+        } else if (resolve_spec(espspec, sizeof espspec, 20)) {
+            say2("no EFI partition matching ", espspec);
+        } else if (mount(espspec, bootdir, "vfat", MS_RDONLY, NULL)) {
+            warn_errno("mounting the EFI partition at /boot");
+        } else {
+            say2("EFI partition mounted at /boot from ", espspec);
+        }
+    }
+
+    if (cmdline_flag("urverk.rescue")) rescue_shell();
 
     /* sanity: does the new root actually contain an init? */
     struct stat st;

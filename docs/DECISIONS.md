@@ -788,3 +788,57 @@ Three further checks agree that the partition covers the right bytes: `fdisk`
 reports `ef EFI (FAT-12/16/32)`, xorriso resolves the partition back to
 `/EFI.IMG`, and mounting at that offset gives the FAT volume with the kernel in
 it.
+
+## D-027 — The live medium moves aside, and the ESP is a file
+
+Installing *from* the live medium did not work: vinstall reported
+
+    is the bootloader reachable? NO
+    vinstall: no bootloader at /boot/EFI/BOOT/BOOTAA64.EFI
+
+because nothing mounted `/boot` on a live system. The obvious fix — point
+`rd.esp` at the ESP by label, as an installed system does — fails on a live
+medium:
+
+    mounting the EFI partition at /boot: Device or resource busy
+
+The medium is one device that is *already mounted whole*. The EFI image inside
+it is not a partition the kernel can mount separately; it is a region of a
+filesystem that is in use. Nothing about hybrid MBRs or El Torito changes that.
+
+So the live path was restructured. urverk mounts the medium, `MS_MOVE`s it to
+`/media`, loop-mounts the system image from there, and — because the EFI image
+is now reachable as an ordinary *file* — loop-mounts `/media/efi.img` onto
+`NEWROOT/boot`. `rd.esp` therefore takes two kinds of value: a leading `/` means
+a file on the medium, anything else is a device spec, as before.
+
+The result is that the installer sees the same `/boot/EFI/BOOT/BOOTAA64.EFI` it
+would see on an installed system, and needs no live-specific case at all.
+
+## D-028 — A menu entry that named a flag nothing implemented
+
+Testing the ISO's four boot entries one at a time found that the rescue entry
+booted exactly like the normal one. The cause was not a typo: the kernel command
+line carried `urverk.rescue` faithfully from the menu, and **urverk had never
+implemented it**. The flag had been in the boot menu since vboot was written —
+in the installed system's configuration too — and choosing it had always been
+indistinguishable from choosing the first entry.
+
+Nothing could have caught this except selecting the entry and looking. A boot
+option that does nothing does not fail; it silently does something else, which
+is the same shape as the eight defects in D-021.
+
+Two changes:
+
+1. `urverk.rescue` now does what the menu promises: a shell after the root is
+   mounted at `/newroot` and before the handover, so the system can be repaired
+   from a medium that is not it. Leaving the shell carries on booting.
+2. `make test` now checks the invariant directly: every `rd.*`/`urverk.*` token
+   that any boot configuration hands to urverk must be a token urverk reads.
+   The check found no second instance — but it would have found this one, and
+   it is the only defence against the next entry someone adds and forgets.
+
+Writing that check also produced a small lesson of its own: the first version
+matched `[a-z_]+` after the dot, so `rd.luks.uuid` was compared as `rd.luks` and
+reported as unimplemented. A test that reports a defect that is not there is
+worse than no test, because the next person deletes it.

@@ -569,5 +569,25 @@ for arch in aarch64 x86_64; do
     then ok "vboot $arch"; else bad "vboot $arch — $(tail -1 "$T/vb-$arch.log")"; fi
 done
 
+
+# --- boot options must exist ------------------------------------------------
+# The rescue menu entry named urverk.rescue for as long as vboot has existed
+# and nothing implemented it: choosing it booted exactly like the normal entry,
+# silently. Every rd.*/urverk.* token a boot configuration hands to urverk must
+# be a token urverk actually reads.
+say "boot options a menu offers must be options urverk reads"
+for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot.sh pkg/vinstall/vinstall.c; do
+    [ -f "$cfg" ] || continue
+    # [a-z_.]+, not [a-z_]+: a token may be dotted twice (rd.luks.uuid), and
+    # stopping at the second dot compares a prefix that nothing ever reads.
+    for tok in $(grep -oE '\b(rd|urverk)\.[a-z_.]+' "$cfg" 2>/dev/null | sed 's/\.$//' | sort -u); do
+        if grep -q "\"$tok\"" pkg/urverk/urverk.c; then
+            ok "$tok is read by urverk ($(basename "$cfg"))"
+        else
+            bad "$(basename "$cfg") offers $tok but urverk never reads it"
+        fi
+    done
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

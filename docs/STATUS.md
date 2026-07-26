@@ -4,7 +4,7 @@ Written 2026-07-26, as a handover. The point of this file is to let a new
 session start without reading the whole history: what is proved, what is
 merely written, and what is known to be wrong.
 
-`make test` — 121 checks, all passing.
+`make test` — 135 checks, all passing.
 
 ---
 
@@ -25,6 +25,9 @@ reading code.
 | **Modules** | verkmod replaces kmod: `modprobe btrfs` pulls in five dependencies, the kernel reports the refcounts, `rmmod` refuses one in use |
 | **Full userland** | Native GCC built and installed; `libstdc++` has working threads (self-checked during the build) |
 | **Live ISO** | `make iso` → a 731 MB medium that boots: firmware → vboot → kernel → initramfs → urverk mounts the ISO by label, loop-mounts the system image, overlays a tmpfs. Installer present, root writable and ephemeral |
+| **All four live entries** | Each ISO menu entry was selected and watched: normal; `rd.toram` (copies 648 MB in, then mounts from `/ram/root.img`); verbose; and the rescue shell, which now exists (D-028) and returns to the boot when left |
+| **Install from the live medium** | Booting the ISO, running `vinstall` on it, then detaching the ISO: the installed disk boots on its own with a persistent root, `/boot` mounted, three services and 489 programs |
+| **Live ephemerality** | Files written on one live boot — `/root`, `/etc` — are gone on the next |
 | **Bootable from USB** | The same ISO attached as a `usb-storage` device boots: the firmware logs "USB HARDDRIVE" and the guest sees `sda1` (vfat), so it was read through the hybrid MBR, not El Torito |
 
 ## What exists but has never been booted

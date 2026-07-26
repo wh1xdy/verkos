@@ -50,22 +50,22 @@ default 0
 entry VerkOS ${VERK_VERSION:-0.1} (live)
   kernel  \\vmlinuz
   initrd  \\initramfs.img
-  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rw console=$CONSOLE init=/sbin/urverk
+  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rd.esp=/efi.img rw console=$CONSOLE init=/sbin/urverk
 
 entry VerkOS ${VERK_VERSION:-0.1} (live, copied into RAM)
   kernel  \\vmlinuz
   initrd  \\initramfs.img
-  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.toram rd.overlay rw console=$CONSOLE init=/sbin/urverk
+  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.toram rd.overlay rd.esp=/efi.img rw console=$CONSOLE init=/sbin/urverk
 
 entry VerkOS ${VERK_VERSION:-0.1} (live, verbose)
   kernel  \\vmlinuz
   initrd  \\initramfs.img
-  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rw console=$CONSOLE init=/sbin/urverk urverk.debug
+  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rd.esp=/efi.img rw console=$CONSOLE init=/sbin/urverk urverk.debug
 
 entry VerkOS ${VERK_VERSION:-0.1} (rescue shell)
   kernel  \\vmlinuz
   initrd  \\initramfs.img
-  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rw console=$CONSOLE init=/sbin/urverk urverk.rescue
+  cmdline root=LABEL=$ISO_LABEL rootfstype=iso9660 rd.image=/rootfs.img rd.overlay rd.esp=/efi.img rw console=$CONSOLE init=/sbin/urverk urverk.rescue
 EOF
     echo "$cfg"
 }

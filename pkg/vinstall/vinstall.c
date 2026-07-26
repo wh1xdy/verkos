@@ -454,9 +454,9 @@ static void check_source(const char *arch) {
     snprintf(p, sizeof p, "%s/boot/EFI/BOOT/%s", sroot, efi_name);
     if (access(p, R_OK) != 0)
         die("no bootloader at %s\n"
-            "       The EFI system partition has to be mounted at %s/boot.\n"
-            "       On the live medium: mount /dev/vdb1 %s/boot",
-            p, sroot[0] ? sroot : "", sroot[0] ? sroot : "");
+            "       The EFI system partition has to be mounted at %s/boot — it holds\n"
+            "       the loader this install would copy. Find it with: lsblk -f",
+            p, sroot[0] ? sroot : "");
 
     snprintf(p, sizeof p, "%s/boot/vmlinuz", sroot);
     if (access(p, R_OK) != 0) die("no kernel at %s", p);
