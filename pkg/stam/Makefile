@@ -10,7 +10,7 @@ CFLAGS   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
            -fno-pic -fno-pie -O2 -Wall -Wextra -std=c11 -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -53,8 +53,8 @@ clean:
 EFI_CFLAGS = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
              -fshort-wchar -fpic -fno-jump-tables -fvisibility=hidden \
              -O2 -Wall -std=c11 -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c main.c exceptions.c
-EFI_ASM    = vectors.S switch.S
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c syscall.c main.c exceptions.c
+EFI_ASM    = vectors.S switch.S userprog.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
 	@for a in $(EFI_ASM); do $(CC) $(EFI_CFLAGS) -c $$a -o efi-$${a%.S}.o || exit 1; done

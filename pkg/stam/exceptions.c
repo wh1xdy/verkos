@@ -72,14 +72,14 @@ static const char *fault_reason(unsigned iss) {
     }
 }
 
-void exception_fatal(unsigned long kind, regs_t *r) {
+void exception_report(unsigned long kind, regs_t *r) {
     uint64_t esr, far;
     __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
     __asm__ volatile("mrs %0, far_el1" : "=r"(far));
     unsigned ec = (unsigned)(esr >> 26) & 0x3f;
 
     kprintf("\n");
-    kprintf("  ---- stam: unhandled exception ----\n");
+    kprintf("  ---- stam: exception ----\n");
     kprintf("  kind      %s\n", kind_name((unsigned)kind));
     kprintf("  cause     %s (EC 0x%llx)\n", ec_name(ec), (unsigned long long)ec);
     if (ec == 0x24 || ec == 0x25 || ec == 0x20 || ec == 0x21) {
@@ -94,6 +94,14 @@ void exception_fatal(unsigned long kind, regs_t *r) {
             (unsigned long long)r->x[0], (unsigned long long)r->x[1],
             (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
     kprintf("  lr        0x%llx\n", (unsigned long long)r->lr);
+}
+
+/* A fault in the kernel is the end of the machine: carrying on after something
+ * we do not understand corrupts state and fails later, somewhere unrelated.
+ * A fault in a *program* is not — see handle_user_sync, which kills the
+ * program and lets the kernel continue. */
+void exception_fatal(unsigned long kind, regs_t *r) {
+    exception_report(kind, r);
     kprintf("\n  halted. this is a kernel bug, not a machine fault.\n\n");
     for (;;) __asm__ volatile("wfe");
 }

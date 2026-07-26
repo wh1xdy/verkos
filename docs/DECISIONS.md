@@ -1217,3 +1217,57 @@ exactly like the noise they have learned to dismiss.
 
 It was also found the same way as everything else this session — by running the
 thing repeatedly rather than once, and noticing the number moved.
+
+## D-039 — stam milestone 4: something ran that was not the kernel
+
+A program now runs at EL0, asks the kernel for things through `svc`, and is
+killed rather than taking the machine with it when it oversteps.
+
+The program is assembly carried inside the kernel image as bytes. An ELF loader
+is a separate problem from reaching EL0 and returning, and doing both at once
+means not knowing which one is broken. It uses Linux's aarch64 system-call
+numbers — 64 write, 93 exit, 172 getpid — because the numbering is the cheapest
+part of an ABI to agree with, and choosing our own is a decision we could only
+undo. Three calls: one with an effect, one that returns a value, one that does
+not return at all.
+
+**One address space, not two.** The kernel is mapped AP=00 — EL1 may touch it,
+EL0 may not — and user pages AP=01. The hardware enforces it on every access. A
+split TTBR0/TTBR1 layout is the eventual answer, because it lets processes share
+the kernel's half of the map instead of copying it, but it is not what makes the
+protection work, and doing it now would change the address of every kernel
+symbol at the same moment as introducing userspace.
+
+The claim was proved rather than asserted: a second program deliberately reads
+`0x40000000`, gets a permission fault, and is killed while the kernel carries
+on. If that load ever succeeds, nothing built above it can be trusted.
+
+### The vector table had been wrong since milestone 2
+
+The first system call arrived at the handler for an SError. Not a mistake in the
+handler — a mistake in the *table*. Each of the sixteen entries is exactly 128
+bytes, and an entry holding a full save-and-restore sequence runs to about 160.
+Every entry after the first long one had been pushed 128 bytes down the table
+since interrupts were added. Interrupts still worked, because the IRQ entry sits
+*before* the overflow. Entry 8 was the first displaced entry anything used.
+
+Each slot now holds four instructions and a branch, and `.org` directives make
+the size a build error: the assembler will not move its location counter
+backwards, so an entry that outgrows its slot cannot be assembled.
+
+### Never take the address of a symbol from C
+
+This kernel is position-independent and nothing applies relocations to it, so
+anything the compiler routes through the GOT holds the address the image had
+when it was *linked*. Hidden visibility is not enough — the compiler still
+emitted a GOT entry for a hidden, local symbol.
+
+It has now been found twice. First as a thread beginning execution at `0x193c`
+(D-037). Then, immediately after, as the first user program being copied out of
+empty space and faulting: `extern const unsigned char user_prog_start[]` has the
+same problem. Both are now reached through two-instruction assembly accessors
+that compute the address with `adrp`/`add`.
+
+The second instance was caught by the test the first one prompted — `stam.efi`
+must need zero relocations — which is the argument for writing the check at the
+time rather than only fixing the bug.

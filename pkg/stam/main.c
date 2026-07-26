@@ -13,6 +13,9 @@
 #include "gic.h"
 #include "timer.h"
 #include "sched.h"
+#include "vm.h"
+
+extern void enter_user(uint64_t entry, uint64_t stack_top);
 
 #define STAM_VERSION "0.1"
 
@@ -24,6 +27,37 @@ static boot_info_t boot;
  * counter rising and two at zero. */
 static volatile uint64_t work[3];
 static volatile int stop_work;
+
+/* Somewhere nothing else lives: high in the 39-bit space the page tables
+ * describe, well past any RAM or device this machine has. Its 1 GiB block is
+ * split on first use, which is exactly the case worth exercising. */
+#define USER_CODE_VA   0x7f00000000ul
+#define USER_STACK_VA  0x7f00100000ul
+
+/* Reached through assembly accessors, never as &symbol — see userprog.S. */
+extern uint64_t user_prog_addr(void), user_prog_size(void);
+extern uint64_t user_bad_addr(void),  user_bad_size(void);
+
+static void run_program(uint64_t start, uint64_t n) {
+    unsigned char *code  = alloc_page();
+    unsigned char *stack = alloc_page();
+    if (!code || !stack) { kprintf("  [kernel] no memory for the program\n"); return; }
+
+    const unsigned char *src = (const unsigned char *)(uintptr_t)start;
+    for (uint64_t i = 0; i < n && i < PAGE_SIZE; i++) code[i] = src[i];
+
+    if (map_user_page(USER_CODE_VA,  (uint64_t)(uintptr_t)code,  1) ||
+        map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
+        kprintf("  [kernel] could not map the program\n");
+        return;
+    }
+    kprintf("  [kernel] %llu bytes of program mapped at 0x%llx, entering EL0\n\n",
+            (unsigned long long)n, (unsigned long long)USER_CODE_VA);
+    enter_user(USER_CODE_VA, USER_STACK_VA + PAGE_SIZE);
+}
+
+static void first_program(void *a)  { (void)a; run_program(user_prog_addr(), user_prog_size()); }
+static void bad_program(void *a)    { (void)a; run_program(user_bad_addr(),  user_bad_size());  }
 
 static void worker(void *arg) {
     unsigned long id = (unsigned long)(uintptr_t)arg;
@@ -119,7 +153,17 @@ void kmain(void *dtb) {
                 kprintf(", counted to %llu", (unsigned long long)work[t->id - 1]);
             kprintf("\n");
         }
-        kprintf("\n  every thread ran: the kernel takes the CPU back.\n");
+        kprintf("\n  every thread ran: the kernel takes the CPU back.\n\n");
+
+        /* And now something that is not the kernel. */
+        thread_create("program", first_program, 0);
+        while (threads_alive() > 1) thread_yield();
+        kprintf("\n  [kernel] the program is gone; the kernel is still here.\n\n");
+
+        /* And one that oversteps. */
+        thread_create("trespasser", bad_program, 0);
+        while (threads_alive() > 1) thread_yield();
+        kprintf("\n  [kernel] still running after a program faulted.\n");
     }
 
     /* Prove the fault path works, on request. A handler that has never run is
@@ -145,11 +189,11 @@ void kmain(void *dtb) {
      * support and where the timer never started — a summary that lies is
      * worse than no summary, because it is believed. */
     if (ticking)
-        kprintf("  milestone 3: threads, preempted by the timer.\n");
+        kprintf("  milestone 4: a program ran outside the kernel and asked it for things.\n");
     else
         kprintf("  milestone 2 only: memory mapped and faults reported, but this\n"
                 "  machine has no interrupt controller we support, so nothing ticks.\n");
-    kprintf("  no userspace yet.\n");
+    kprintf("  no filesystem, no ELF loader, one address space.\n");
     kprintf("\n");
 
     for (;;) __asm__ volatile("wfe");
