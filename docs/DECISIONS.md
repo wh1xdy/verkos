@@ -723,3 +723,37 @@ the callers' buffers were sized for the shortest.
 `dd`-able to a USB stick as a hybrid image), no Joliet or Rock Ridge (the
 system ships as one opaque image, so the ISO needs neither), and no squashfs
 compression — the medium is 1.3 GB because the system carries a full compiler.
+
+## D-025 — Trimming the live medium: 1.3 GB to 731 MB
+
+Two findings, one of which was waste in every VerkOS install and not only the
+ISO.
+
+**The superseded cross toolchain was still installed.** When the native GCC was
+built it added its own triple (`aarch64-unknown-linux-gnu`) and left the cross
+one (`aarch64-verk-linux-gnu`) in place: two complete copies of `cc1`,
+`cc1plus` and `lto1` side by side, 150 MB. Nothing referenced the older one —
+checked before removing, by asking gcc itself for its search directories, its
+C++ include paths and the specs files it reads. Removed in stage 60's trim, and
+the compiler is exercised afterwards: C and C++ both still build and run,
+including `std::mutex`.
+
+**A live image needs neither headroom nor a journal.** Stage 60 sizes the
+system image for a *writable installed* system — a quarter of slack, and a
+journal. On a medium that can never be written, both are dead weight, and the
+journal is worse than dead: an image with `needs_recovery` set cannot be mounted
+read-only at all, which is what cost a boot attempt in D-024. Stage 71 now
+builds its own image with `mkfs.ext4 -O ^has_journal`, sized to the files plus
+five per cent. This removes the problem at the source rather than working around
+it at every boot — urverk keeps its `noload` fallback for media built elsewhere.
+
+    system image   1098 MB → 648 MB
+    ISO            1.3 GB  → 731 MB
+
+`mkfs.ext4 -d` is used here, which D-022 rejected for the diskless installer.
+The difference is where it runs: on the build host the rootfs is an ordinary
+directory with nothing mounted inside it (stage 60's guard enforces exactly
+that), so the self-inclusion that broke the installer cannot arise.
+
+The live ext4 is labelled `VERKROOT` and the ISO volume `VERKLIVE`, so the two
+can never be confused by a label lookup.

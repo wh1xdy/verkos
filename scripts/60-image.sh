@@ -66,6 +66,21 @@ trim_rootfs() {
     $SUDO rm -rf "$ROOTFS"/usr/share/cmake-* "$ROOTFS"/usr/share/aclocal/cmake*
     $SUDO rm -f  "$ROOTFS"/usr/bin/{cmake,ctest,cpack,ccmake,cmake-gui}
 
+    # The cross toolchain's triple, left behind when the native GCC installed
+    # its own. Two complete copies of cc1, cc1plus and lto1 sit side by side —
+    # 150 MB — and nothing references the older one: gcc's search dirs, the C++
+    # include paths and every specs file name the native triple only. Checked
+    # before removing, and the compiler is exercised after the trim below.
+    if [ -n "${VERK_TARGET:-}" ] && [ -d "$ROOTFS/usr/libexec/gcc/${VERK_TARGET}" ] \
+       && [ -d "$ROOTFS/usr/libexec/gcc" ] \
+       && [ "$(ls -1 "$ROOTFS/usr/libexec/gcc" | wc -l)" -gt 1 ]; then
+        log "removing the superseded cross toolchain (${VERK_TARGET})"
+        $SUDO rm -rf "$ROOTFS/usr/libexec/gcc/${VERK_TARGET}" \
+                     "$ROOTFS/usr/lib/gcc/${VERK_TARGET}" \
+                     "$ROOTFS/usr/${VERK_TARGET}"
+        $SUDO rm -f  "$ROOTFS"/usr/bin/${VERK_TARGET}-*
+    fi
+
     # Strip debug info. The LFS recipe: never touch the dynamic loader, keep
     # symbols in libraries and modules, take everything from executables.
     local STRIP=strip

@@ -76,12 +76,12 @@ build_iso() {
 
     local kernel="$OUT_DIR/vmlinuz"
     local initramfs="$OUT_DIR/initramfs.img"
-    local rootimg="$OUT_DIR/verkos-${ARCH}.ext4"
+    local rootimg="$BUILD_DIR/live-rootfs.img"
     local vboot_efi="$BUILD_DIR/vboot/$EFI_NAME"
 
     [ -f "$kernel" ]    || die "no kernel at $kernel — run: make kernel ARCH=$ARCH"
     [ -f "$initramfs" ] || die "no initramfs at $initramfs — run: make boot ARCH=$ARCH"
-    [ -f "$rootimg" ]   || die "no root image at $rootimg — run: make image ARCH=$ARCH"
+    [ -d "$ROOTFS" ]    || die "no rootfs at $ROOTFS — run: make system ARCH=$ARCH"
     [ -f "$vboot_efi" ] || die "no vboot at $vboot_efi — run: make boot ARCH=$ARCH"
 
     # viso is ours, built for the host: the ISO is assembled here, not inside
@@ -112,22 +112,35 @@ build_iso() {
     mcopy -i "$esp" "$initramfs" ::/initramfs.img
     mcopy -i "$esp" "$cfg"       ::/vboot.conf
 
+    # --- the system image ---------------------------------------------------
+    # Built here rather than reused from stage 60: that image is sized for a
+    # writable installed system, with a quarter of headroom and a journal it
+    # will never use here. A live image is read-only for its whole life, so it
+    # gets neither — which took 1098 MB down to about what the files occupy,
+    # and removes the needs_recovery problem at the source rather than working
+    # around it at every boot.
+    mount | grep -q " ${ROOTFS}/" && die "something is mounted inside $ROOTFS — unmount it first"
+    local content_mb
+    content_mb=$(du -sxm "$ROOTFS" | cut -f1)
+    local img_mb=$(( content_mb + content_mb / 20 + 32 ))     # 5% and a little
+    log "system image: ${content_mb} MB of files, ${img_mb} MB image (no journal)"
+    rm -f "$rootimg"
+    truncate -s "${img_mb}M" "$rootimg"
+    # a different label from the ISO volume, so the two are never confused
+    mkfs.ext4 -q -F -m 0 -O ^has_journal -L VERKROOT -d "$ROOTFS" "$rootimg" \
+        || die "could not build the live system image"
+
     # --- what goes on the ISO ----------------------------------------------
     # The names matter: viso maps them to uppercase 8.3, and the kernel maps
     # them back to lower case, so rd.image=/rootfs.img resolves. Hard-link
     # rather than copy — the root image is over a gigabyte.
     ln -f "$esp" "$staged/efi.img" 2>/dev/null || cp "$esp" "$staged/efi.img"
     ln -f "$rootimg" "$staged/rootfs.img" 2>/dev/null || cp "$rootimg" "$staged/rootfs.img"
-
-    # An image that still has needs_recovery set cannot be mounted from a medium
-    # that cannot be written: ext4 will not replay a journal it cannot write to,
-    # and answers EROFS. Clear it here rather than leaving urverk to work around
-    # it at every boot.
     if command -v e2fsck >/dev/null; then
         e2fsck -fp "$staged/rootfs.img" >/dev/null 2>&1
         case $? in
-            0|1) ok "root image checked and clean" ;;
-            *)   warn "e2fsck could not clean the root image — urverk will mount it with noload" ;;
+            0|1) ok "system image checked and clean" ;;
+            *)   warn "e2fsck reported trouble with the system image" ;;
         esac
     fi
 
