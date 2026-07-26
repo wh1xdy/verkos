@@ -557,14 +557,14 @@ prompts, opens it, and the system comes up with root on
 **What it cost.** Reaching this needed cmake, json-c, libdevmapper and
 cryptsetup, and those needed a native GCC — which had never been built here,
 because the flag that enables it never reached the chroot. Getting through that
-found eight defects in VerkOS' own tools, most of which produced a wrong answer
+found twelve defects in VerkOS' own tools, most of which produced a wrong answer
 with a zero exit status. They are listed in D-021.
 
 ## D-021 — What building cryptsetup found in our own tools
 
 Adding one feature put VerkOS' own userland in front of real third-party build
 systems — autotools, gnulib, kwsys, libtool, pax archives — for the first time
-at that scale. Eight defects surfaced. Most produced a **wrong answer with a
+at that scale. Twelve defects surfaced. Most produced a **wrong answer with a
 zero exit status**, and none was found by reading code:
 
 **vtar** (five). Requiring the ustar magic rejected pre-POSIX archives, which
@@ -575,7 +575,7 @@ characters were truncated: not merely lost, but written to the *wrong* path,
 which cost 465 of cmake's 26212 files. `-p` was refused, and `-` was treated as
 a file name rather than standard input, so GCC's header install moved nothing.
 
-**vawk** (three). An FS longer than one character is an extended regular
+**vawk** (two). An FS longer than one character is an extended regular
 expression, not a literal; using only its first character made `-F'[(, ]+'`
 split on `[`. A regex literal's `\t` was passed to regcomp, which reads it as
 the letter t. Both produced empty fields where GCC expected CPU names, and its
@@ -610,6 +610,19 @@ far from the cause.
   toolchain's own drivers still being present, which is luck rather than design.
 - 46 GB for one package's build directory on a 79 GB volume is not sustainable;
   the build does not clean up after itself.
+
+**Corrected on 2026-07-26: this entry said "eight" and enumerated more.** The
+headline was written before the per-tool lists were, and never revisited; the
+four counts below it summed to thirteen, and `vawk` said "(three)" while its
+own paragraph described two. Settled against the commits rather than against
+either number: vtar five (`a2a1abc` three, `959415d` two), vawk two (`b32054f`,
+`565889c`), vsed two (`0cdcbbb`, `bf85e67`), verkbox three — **twelve**. D-028,
+D-033 and STATUS.md cited the eight and were corrected with it.
+
+It is worth noting what this was. The entry is *about* reports that do not depend
+on what they report, and its own headline did not depend on the list underneath
+it. Nothing here was wrong about the defects; the summary just stopped being
+recomputed when the detail grew.
 
 ## D-022 — Two ways to run a system that forgets itself
 
@@ -826,7 +839,7 @@ indistinguishable from choosing the first entry.
 
 Nothing could have caught this except selecting the entry and looking. A boot
 option that does nothing does not fail; it silently does something else, which
-is the same shape as the eight defects in D-021.
+is the same shape as the twelve defects in D-021.
 
 Two changes:
 
@@ -1006,7 +1019,7 @@ same thing whether or not the work it described had happened.
 
 That is the same defect as the boot menu entry that named a flag nothing
 implemented (D-028), as the four vpk refusals that exited zero (D-029), and as
-the eight tool bugs in D-021: **a report that does not depend on the outcome it
+the twelve tool bugs in D-021: **a report that does not depend on the outcome it
 reports.** Three of them in one day, in three unrelated pieces of code, found
 three different ways — by selecting a menu entry, by reading for it
 deliberately, and by running on a machine we do not support.

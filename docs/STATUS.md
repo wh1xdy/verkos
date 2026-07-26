@@ -66,7 +66,7 @@ reads nothing but GPT will not find it.
 ## The thing most worth remembering
 
 Building cryptsetup's dependency chain put VerkOS' own userland in front of real
-third-party build systems for the first time at scale. **Eight defects fell out**
+third-party build systems for the first time at scale. **Twelve defects fell out**
 (D-021), and nearly all produced *a wrong answer with a zero exit status*:
 `vtar` truncating paths over 100 characters and writing files to the wrong
 place, `vawk` treating a regex field separator as a literal, `vsed` silently
