@@ -6,6 +6,10 @@
 CROSS   ?=
 CC       = $(CROSS)gcc
 OBJCOPY  = $(CROSS)objcopy
+# The EFI link goes through ld directly, so it needs the prefix too. Missing
+# it means the host linker is handed aarch64 objects, which fails in a way
+# that names neither the linker nor the architecture.
+LD       = $(CROSS)ld
 # The two builds — raw Image and UEFI application — must share their code
 # generation flags. They did not, and only the UEFI one had -fno-jump-tables:
 # the compiler turned a switch into a table of absolute addresses, which the
@@ -69,7 +73,7 @@ EFI_ASM    = vectors.S switch.S userprog.S
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
 	@for a in $(EFI_ASM); do $(CC) $(EFI_CFLAGS) -c $$a -o efi-$${a%.S}.o || exit 1; done
 	@for s in $(EFI_SRCS); do $(CC) $(EFI_CFLAGS) -c $$s -o efi-$${s%.c}.o || exit 1; done
-	ld -nostdlib -znocombreloc -shared -Bsymbolic -T stam-efi.lds \
+	$(LD) -nostdlib -znocombreloc -shared -Bsymbolic -T stam-efi.lds \
 	    $(patsubst %.S,efi-%.o,$(EFI_ASM)) $(patsubst %.c,efi-%.o,$(EFI_SRCS)) -o stam-efi.so
 	$(OBJCOPY) -j .text -j .data -j .reloc --target efi-app-aarch64 \
 	    --subsystem=10 --file-alignment 0x1000 --section-alignment 0x1000 \
