@@ -174,7 +174,10 @@ build_boot_disk() {
 
     log "building a ${ESP_MB} MiB EFI system partition"
     dd if=/dev/zero of="$esp" bs=1M count="$ESP_MB" status=none
-    mkfs.vfat -n VERKESP "$esp" >/dev/null
+    # -F 32, for the reason spelled out in 71-iso.sh: left to choose, dosfstools
+    # made this FAT16 at the default 160 MiB, and UEFI requires FAT32 for an ESP
+    # on a fixed disk.
+    mkfs.vfat -F 32 -n VERKESP "$esp" >/dev/null
     mmd -i "$esp" ::/EFI ::/EFI/BOOT
     mcopy -i "$esp" "$BUILD_DIR/vboot/$EFI_NAME" "::/EFI/BOOT/$EFI_NAME"
     mcopy -i "$esp" "$kernel"    ::/vmlinuz

@@ -614,6 +614,30 @@ for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot-image.sh pkg/v
     done
 done
 
+# --- the ESP must be FAT32 --------------------------------------------------
+# Left to choose, dosfstools picks the FAT type from the cluster count, and it
+# chose FAT16 at both sizes VerkOS builds — 48 MiB for the ISO, 160 MiB for the
+# boot disk — while every comment and document around it said FAT32. UEFI
+# requires FAT32 for an ESP on fixed media; AAVMF and OVMF accept FAT16 anyway,
+# which is the only reason this ever booted. Nothing reported it, because
+# mkfs.vfat succeeded and the firmware did not object.
+say "the EFI system partition is FAT32, not whatever mkfs.vfat felt like"
+for s in scripts/70-boot-image.sh scripts/71-iso.sh; do
+    check "$(basename "$s") builds its ESP with mkfs.vfat -F 32" \
+        "grep -qE 'mkfs\.vfat +-F +32' $s"
+done
+# Structural greps say what the script asks for; this says what comes out.
+if command -v mkfs.vfat >/dev/null 2>&1 && command -v file >/dev/null 2>&1; then
+    for mb in 48 160; do
+        dd if=/dev/zero of="$T/esp$mb.img" bs=1M count=$mb status=none 2>/dev/null
+        mkfs.vfat -F 32 -n VERKESP "$T/esp$mb.img" >/dev/null 2>&1
+        check "a ${mb} MiB ESP really comes out FAT32" \
+            "file '$T/esp$mb.img' | grep -q 'FAT (32 bit)'"
+    done
+else
+    printf '  \033[33mskip\033[0m  ESP FAT32 build check (no mkfs.vfat)\n'
+fi
+
 say "stam (our own kernel) builds, and is a valid arm64 Image"
 # Same trap as vboot: the Makefile builds with $(CROSS)gcc, and finding
 # aarch64-linux-gnu-gcc on an x86_64 host means nothing unless CROSS is set to

@@ -1743,3 +1743,33 @@ This is the same family as the rest of this log: a defect visible in the shape
 of the code and in no output at all. Nothing failed, nothing printed a warning,
 and every test passed — because the tests asked whether the tools worked, and
 they did.
+
+## D-052 — The ESP was FAT16 the whole time
+
+**Every document in this repository said the EFI system partition was FAT32.
+Every one that VerkOS has ever built was FAT16.**
+
+`mkfs.vfat -n VERKESP` was called without `-F`, so dosfstools chose the type
+from the cluster count, and at both sizes VerkOS builds — 48 MiB for the ISO's
+embedded image, 160 MiB for the boot disk — it chose FAT16. Measured, not
+reasoned about: `file` reports `FAT (16 bit)` on both. `-F 32` is accepted at
+both sizes and produces `FAT (32 bit)`, so the fix costs three characters.
+
+UEFI requires FAT32 for an ESP on fixed media and permits FAT12/16 only on
+removable media. **AAVMF and OVMF accept FAT16 anyway**, which is the entire
+reason this has always booted. That is D-023's shape exactly — two things vboot
+got away with only because it had met one filesystem — except that this time it
+was the firmware we had only met one of, and the untried real hardware in
+STATUS.md is precisely where it would have surfaced.
+
+What made it invisible is worth naming, because it is the log's recurring
+defect wearing new clothes. `mkfs.vfat` succeeded. The firmware booted. Every
+test passed. The comment immediately above the call said *"FAT32 needs about
+33 MB to exist at all"* and the code sized the image to 48 MiB **for that
+reason** — so the intent was recorded, acted on, and never checked against what
+came out. A statement of intent next to a call is not a test of the call.
+
+`make test` now asserts both halves: that each stage script passes `-F 32`, and
+— where `mkfs.vfat` exists — that an image built that way actually comes out
+FAT32. The structural grep says what we asked for; the second says what we got,
+and only the second would have caught this. 161 → 165 checks.

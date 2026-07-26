@@ -105,7 +105,14 @@ build_iso() {
     [ "$need_mb" -lt 48 ] && need_mb=48
     log "EFI boot image: ${need_mb} MiB"
     dd if=/dev/zero of="$esp" bs=1M count="$need_mb" status=none
-    mkfs.vfat -n VERKESP "$esp" >/dev/null
+    # -F 32 is not optional. Without it dosfstools picks the type from the
+    # cluster count and chose FAT16 at every size this has ever been built at,
+    # while everything around it — this comment, the 33 MB floor, the docs —
+    # said FAT32. UEFI requires FAT32 on fixed media and permits FAT12/16 only
+    # on removable; AAVMF and OVMF accept FAT16 anyway, which is the only
+    # reason it has always booted. That is D-023's shape: something we got away
+    # with because we had only met one firmware.
+    mkfs.vfat -F 32 -n VERKESP "$esp" >/dev/null
     mmd -i "$esp" ::/EFI ::/EFI/BOOT
     mcopy -i "$esp" "$vboot_efi" "::/EFI/BOOT/$EFI_NAME"
     mcopy -i "$esp" "$(readlink -f "$kernel")" ::/vmlinuz
