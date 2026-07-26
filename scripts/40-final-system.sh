@@ -253,7 +253,12 @@ cd /sources
 say "bash ${BASH_VERSION_PKG}"
 d=$(unpack bash-${BASH_VERSION_PKG}.tar.gz); cd "$d"
 ./configure --prefix=/usr --without-bash-malloc --with-installed-readline=no
-make; make install
+# Serially, on purpose. bash's rule for pathnames.h generates pathnames.tmp
+# and moves it, and with a high -j two paths into that rule race: one moves the
+# file while the other still expects it, and the build dies with
+# "mv: cannot stat 'pathnames.tmp'". It only appears on machines with many
+# cores — it never happened on the 8-core builder and failed immediately on 36.
+MAKEFLAGS=-j1 make; make install
 ln -sfv bash /usr/bin/sh
 cd /sources
 
@@ -301,6 +306,20 @@ d=$(unpack file-${FILE_VERSION}.tar.gz); cd "$d"
 say "m4 ${M4_VERSION}"
 d=$(unpack m4-${M4_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr; make; make install; cd /sources
+
+# zlib, before anything that asks for a system one.
+#
+# binutils below is configured --with-system-zlib and gcc links against it, so
+# zlib has to exist first. It is otherwise built further down with the other
+# small libraries, which was fine for years because every rootfs that reached
+# this point already had one from a previous build — and wrong the first time
+# the tree was genuinely empty. Guarded on the header rather than a stamp so it
+# is a no-op wherever zlib is already installed.
+if [ ! -f /usr/include/zlib.h ]; then
+    say "zlib ${ZLIB_VERSION} (needed by binutils and gcc)"
+    d=$(unpack "zlib-${ZLIB_VERSION}.tar.gz"); cd "$d"
+    ./configure --prefix=/usr; make; make install; cd /sources
+fi
 
 # binutils (final, native)
 say "binutils ${BINUTILS_VERSION} (final)"
