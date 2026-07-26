@@ -405,6 +405,25 @@ PYEOF
         if command -v xorriso >/dev/null 2>&1; then
             check "xorriso recognises the boot record" \
                   "xorriso -indev '$T/t.iso' -report_el_torito plain 2>&1 | grep -q 'El Torito boot img'"
+            # The hybrid MBR is what lets the ISO boot from a USB stick: firmware
+            # then finds an EFI partition on an ordinary block device rather than
+            # an El Torito catalogue on a CD. xorriso resolves the partition back
+            # to the file it covers, which is the check worth making.
+            check "the hybrid MBR partition covers the EFI image" \
+                  "xorriso -indev '$T/t.iso' -report_system_area plain 2>&1 | grep -q 'MBR partition path.*EFI.IMG'"
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+            cat > "$T/mbr.py" <<'PYEOF'
+import sys
+d = open(sys.argv[1], "rb").read(512)
+e = d[446:462]
+lba = int.from_bytes(e[8:12], "little")
+cnt = int.from_bytes(e[12:16], "little")
+ok = (d[510] == 0x55 and d[511] == 0xAA and e[4] == 0xEF and lba > 0 and cnt > 0)
+sys.exit(0 if ok else 1)
+PYEOF
+            check "the MBR names one 0xEF partition and is signed 55AA" \
+                  "python3 '$T/mbr.py' '$T/t.iso'"
         fi
     else bad "viso could not write an image"; fi
 else

@@ -148,6 +148,7 @@ static size_t dir_record(unsigned char *p, unsigned long lba, unsigned long size
 
 int main(int argc, char **argv) {
     const char *out = NULL, *volid = "VERKLIVE", *esp = NULL;
+    int hybrid = 1;   /* -M writes no MBR */
     struct entry files[MAX_FILES];
     int nfiles = 0;
 
@@ -156,8 +157,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-V") && i + 1 < argc) volid = argv[++i];
         else if (!strcmp(argv[i], "-e") && i + 1 < argc) esp = argv[++i];
         else if (!strcmp(argv[i], "-v")) verbose = 1;
+        else if (!strcmp(argv[i], "-M")) hybrid = 0;
         else if (argv[i][0] == '-' && argv[i][1]) {
-            fprintf(stderr, "usage: viso [-V VOLID] [-e ESP.IMG] [-v] -o OUT.iso FILE...\n");
+            fprintf(stderr, "usage: viso [-V VOLID] [-e ESP.IMG] [-M] [-v] -o OUT.iso FILE...\n"
+                            "  -M   do not write the hybrid MBR\n");
             return 1;
         }
         else {
@@ -219,10 +222,40 @@ int main(int argc, char **argv) {
     int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) die("%s: %s", out, strerror(errno));
 
-    /* ---- system area: 16 zeroed sectors ---- */
+    /* ---- the system area, and the MBR that makes this bootable from USB ----
+     * Written to a stick, an ISO is just a block device: firmware looks for a
+     * FAT filesystem, either as the whole device or inside a partition. An
+     * MBR entry of type 0xEF pointing at the EFI image's extent gives it one
+     * to find, and costs 512 bytes with no checksum and no backup structure to
+     * keep consistent. A GPT would add compatibility with firmware that reads
+     * nothing else, but it also needs a backup header at the end of the
+     * *device* — which is the stick, not the image — and that is the kind of
+     * structure where a mistake is silent. Not written here on purpose. */
     unsigned char zero[SECTOR];
     memset(zero, 0, sizeof zero);
     for (unsigned long s = 0; s < SYSTEM_AREA; s++) write_at(fd, s, zero, SECTOR);
+
+    if (esp && hybrid) {
+        unsigned char mbr[512];
+        memset(mbr, 0, sizeof mbr);
+        /* One entry, describing where the EFI image actually lies. Both figures
+         * are in 512-byte sectors, while everything else here counts 2048-byte
+         * ones. */
+        unsigned long efi_lba512 = files[boot_index].lba * (SECTOR / 512);
+        unsigned long efi_cnt512 = (files[boot_index].size + 511) / 512;
+        unsigned char *e = mbr + 446;
+        e[0] = 0x00;                       /* not "active": UEFI does not care */
+        e[1] = 0xFF; e[2] = 0xFF; e[3] = 0xFF;   /* CHS: meaningless, all ones */
+        e[4] = 0xEF;                       /* EFI System Partition */
+        e[5] = 0xFF; e[6] = 0xFF; e[7] = 0xFF;
+        le32(e + 8, efi_lba512);
+        le32(e + 12, efi_cnt512);
+        mbr[510] = 0x55; mbr[511] = 0xAA;
+        write_at(fd, 0, mbr, sizeof mbr);
+        if (verbose)
+            fprintf(stderr, "  MBR: one 0xEF partition at sector %lu, %lu sectors of 512 bytes\n",
+                    efi_lba512, efi_cnt512);
+    }
 
     /* ---- the root directory, one sector: ".", ".." and the files ---- */
     unsigned char root[SECTOR];

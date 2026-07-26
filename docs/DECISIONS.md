@@ -757,3 +757,34 @@ that), so the self-inclusion that broke the installer cannot arise.
 
 The live ext4 is labelled `VERKROOT` and the ISO volume `VERKLIVE`, so the two
 can never be confused by a label lookup.
+
+## D-026 — isohybrid: an MBR, and deliberately no GPT
+
+**Decision:** `viso` writes a 512-byte MBR at the start of the image with one
+partition of type 0xEF covering the embedded EFI image. `-M` suppresses it.
+
+Written to a USB stick, an ISO is simply a block device, and firmware looks for
+a FAT filesystem — either as the whole device or inside a partition. The El
+Torito catalogue that makes it bootable as a CD is not consulted. One MBR entry
+gives the firmware something to find, and costs 512 bytes with no checksum and
+no second copy to keep consistent.
+
+**No GPT, on purpose.** A GPT would add compatibility with firmware that reads
+nothing else, but it requires a backup header at the end of the *device* — which
+is the stick, not the image, and therefore not somewhere the image can put it.
+Getting that wrong is silent: the medium either boots or does not, with no
+diagnostic. That is the shape D-014 says to buy rather than own, so if GPT
+becomes necessary it is the point to hand the whole job to xorriso.
+
+**Verified as a USB stick, not by inspection.** The ISO was attached to QEMU as
+a `usb-storage` device behind an xHCI controller, which is what a real stick
+looks like. The firmware's own log settles which path it took:
+
+    BdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:01.0-1"
+
+— a hard drive, not optical media — and the running system sees `sda` (iso9660)
+with `sda1` (vfat) on it, so the partition table is what the firmware read.
+Three further checks agree that the partition covers the right bytes: `fdisk`
+reports `ef EFI (FAT-12/16/32)`, xorriso resolves the partition back to
+`/EFI.IMG`, and mounting at that offset gives the FAT volume with the kernel in
+it.
