@@ -140,7 +140,13 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     uint64_t n = 0;
     for (;;) {
         int c = kgetc();
-        if (c < 0) { thread_yield(); continue; }
+        if (c < 0) {
+            /* Sleep if the port can wake us; otherwise there is nothing to do
+             * but give way and look again. */
+            if (console_is_interrupt_driven()) thread_block_on_console();
+            else thread_yield();
+            continue;
+        }
         if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return n; }
         if (c == 0x7f || c == 8) {           /* backspace */
             if (n) { n--; kputs("\b \b"); }
@@ -183,6 +189,14 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
 void handle_user_sync(regs_t *r) {
     uint64_t esr;
     __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
+    /* System calls run with interrupts enabled. They have to: a call that waits
+     * for a device cannot be woken by that device if the exception entry left
+     * interrupts masked, which is a deadlock rather than a slow path. It also
+     * means a system call can be preempted, and this kernel has no locking —
+     * one CPU and a scheduler simple enough that it holds, but it is the next
+     * thing to be wrong when either of those changes. */
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
+
     if ((esr >> 26) == 0x15) {              /* SVC from AArch64 */
         r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2], r);
         return;

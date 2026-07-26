@@ -215,10 +215,22 @@ void kmain_high(void) {
         kprintf("  %llu threads, none of which ever yields.\n",
                 (unsigned long long)thread_count());
 
+        /* Now that interrupts work, let the console raise one too. */
+        int cirq = console_irq(machine_tree());
+        if (cirq > 0) {
+            gic_set_console_irq(cirq);
+            gic_enable_irq((unsigned)cirq);
+            console_enable_interrupt();
+            kprintf("  console   interrupt %llu — a reader can sleep\n",
+                    (unsigned long long)cirq);
+        } else {
+            kprintf("  console   no interrupt in the device tree; readers will poll\n");
+        }
+
         uint64_t until = timer_ticks() + timer_hz() * 2;
         while (timer_ticks() < until) __asm__ volatile("wfi");
         stop_work = 1;
-        while (threads_alive() > 1) thread_yield();
+        while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
 
         kprintf("  after two seconds of everyone refusing to give way:\n");
         for (int i = 0; i < thread_count(); i++) {
@@ -233,7 +245,7 @@ void kmain_high(void) {
 
         kprintf("\n  --- 2. can something run outside the kernel? ---\n");
         thread_create("program", first_program, 0);
-        while (threads_alive() > 1) thread_yield();
+        while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
         kprintf("  the program is gone; the kernel is still here. yes.\n");
 
         /* If a program was handed to us, run that too — a real ELF, built by
@@ -242,7 +254,7 @@ void kmain_high(void) {
         if (boot.initrd_end > boot.initrd_start) {
             syscall_set_archive(boot.initrd_start, boot.initrd_end - boot.initrd_start);
             thread_create("initrd", initrd_program, 0);
-            while (threads_alive() > 1) thread_yield();
+            while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
             kprintf("  it ran and exited. yes.\n");
             kprintf("  memory returned to the free list: %llu pages\n",
                     (unsigned long long)pmm_pages_free_listed());
@@ -255,13 +267,13 @@ void kmain_high(void) {
             kprintf("  the same binary twice, code and data at the same addresses in both\n");
             thread_create("copy-a", initrd_program, 0);
             thread_create("copy-b", initrd_program, 0);
-            while (threads_alive() > 1) thread_yield();
+            while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
             kprintf("  both finished without disturbing each other. yes.\n");
         }
 
         kprintf("\n  --- 4. is a program kept out of the kernel's memory? ---\n");
         thread_create("trespasser", bad_program, 0);
-        while (threads_alive() > 1) thread_yield();
+        while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
         kprintf("  the program was killed, the kernel was not. yes.\n");
     }
 

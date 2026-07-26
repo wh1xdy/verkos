@@ -22,6 +22,12 @@ extern size_t strlen(const char *);
 #define PL011_FR   0x18
 #define PL011_FR_TXFF (1u << 5)
 #define PL011_FR_RXFE (1u << 4)     /* receive FIFO empty */
+#define PL011_IFLS 0x34             /* FIFO level that raises an interrupt */
+#define PL011_IMSC 0x38             /* which interrupts are wanted         */
+#define PL011_MIS  0x40             /* which are asserted, after masking   */
+#define PL011_ICR  0x44             /* acknowledge                         */
+#define PL011_INT_RX  (1u << 4)
+#define PL011_INT_RT  (1u << 6)     /* receive timeout: the last few bytes */
 
 /* 8250/16550 */
 #define UART_THR   0x00
@@ -29,6 +35,8 @@ extern size_t strlen(const char *);
 #define UART_LSR   0x05
 #define UART_LSR_THRE (1u << 5)
 #define UART_LSR_DR   (1u << 0)     /* data ready */
+#define UART_IER   0x01
+#define UART_IER_RX (1u << 0)
 
 /* Qualcomm GENI. Not a UART with registers so much as a programmable serial
  * engine told to behave like one: every character is a transfer that must be
@@ -43,6 +51,7 @@ extern size_t strlen(const char *);
 #define GENI_UART_START_TX (1u << 27)     /* opcode 1, shifted into place */
 
 static volatile uint8_t *uart_base;
+static int console_node = FDT_NONE;   /* the tree node it came from */
 static enum { UART_NONE, UART_PL011, UART_8250, UART_GENI } uart_kind;
 static uint32_t uart_shift;      /* reg-shift: registers may be spaced out  */
 static uint32_t uart_width;      /* reg-io-width: 1, 2 or 4 bytes per access */
@@ -116,7 +125,31 @@ static int chatty = 1;
 void kquiet(int on) { chatty = !on; }
 int  kchatty(void)  { return chatty; }
 
-int kgetc(void) {
+/* Characters the interrupt has taken off the port but nobody has asked for
+ * yet. Small on purpose: it holds a typed line, not a paste of a file, and
+ * anything larger would be pretending to be a buffer cache. */
+#define RING 256
+static volatile char ring[RING];
+static volatile unsigned ring_head, ring_tail;
+static int interrupt_driven;
+
+static int ring_get(void) {
+    if (ring_head == ring_tail) return -1;
+    int c = ring[ring_tail];
+    ring_tail = (ring_tail + 1) % RING;
+    return c;
+}
+
+static void ring_put(int c) {
+    unsigned next = (ring_head + 1) % RING;
+    if (next == ring_tail) return;       /* full: drop, rather than overwrite */
+    ring[ring_head] = (char)c;
+    ring_head = next;
+}
+
+/* Read straight from the port, with no buffering. Used by the interrupt to
+ * drain it, and as the whole implementation when there is no interrupt. */
+static int hw_getc(void) {
     switch (uart_kind) {
     case UART_PL011:
         if (reg_read(PL011_FR) & PL011_FR_RXFE) return -1;
@@ -127,6 +160,40 @@ int kgetc(void) {
     default:
         return -1;          /* GENI receive is not written yet */
     }
+}
+
+/* Called from the interrupt. Drains the port completely: the interrupt says
+ * that at least one character arrived, not how many, and leaving any behind
+ * means the next one may never raise another. */
+void console_interrupt(void) {
+    int c;
+    while ((c = hw_getc()) >= 0) ring_put(c);
+    if (uart_kind == UART_PL011)
+        reg_write(PL011_ICR, PL011_INT_RX | PL011_INT_RT);
+}
+
+int kgetc(void) {
+    if (interrupt_driven) return ring_get();
+    return hw_getc();
+}
+
+int console_is_interrupt_driven(void) { return interrupt_driven; }
+
+/* Ask the port to raise an interrupt when something arrives. Until this is
+ * called a reader has to poll, which works and wastes a time slice each time
+ * round; afterwards it can sleep. */
+void console_enable_interrupt(void) {
+    if (uart_kind == UART_PL011) {
+        reg_write(PL011_IFLS, 0);                          /* raise at 1/8 full */
+        reg_write(PL011_ICR, 0x7ff);                       /* start clean       */
+        reg_write(PL011_IMSC, PL011_INT_RX | PL011_INT_RT);
+        interrupt_driven = 1;
+    } else if (uart_kind == UART_8250) {
+        reg_write(UART_IER, UART_IER_RX);
+        interrupt_driven = 1;
+    }
+    /* GENI is left polling: its receive path is unwritten, and enabling an
+     * interrupt for a driver that cannot read would produce a storm. */
 }
 
 static void kputu(uint64_t v, unsigned base, int pad) {
@@ -197,6 +264,7 @@ int console_init(const fdt_t *f) {
     p = fdt_getprop(f, node, "reg-io-width", &len);
     if (p && len == 4) uart_width = (uint32_t)fdt_cells(p, 1);
 
+    console_node = node;
     uart_base = (volatile uint8_t *)(uintptr_t)addr;
     if (fdt_is_compatible(f, node, "arm,pl011")) {
         uart_kind = UART_PL011; uart_shift = 0; uart_width = 4;
@@ -218,6 +286,21 @@ int console_init(const fdt_t *f) {
  * own window onto that memory. */
 void console_rebase(uint64_t offset) {
     if (uart_kind != UART_NONE) uart_base += offset;
+}
+
+/* The console's interrupt, out of the same node its address came from. A
+ * device tree writes an SPI as type 0 and numbers it from the start of the
+ * shared range, which begins at 32; a PPI is type 1 and starts at 16. Both
+ * conventions are relative, and both are easy to get wrong in the direction
+ * that produces a port which works when polled and never interrupts. */
+int console_irq(const fdt_t *f) {
+    if (console_node == FDT_NONE) return -1;
+    uint32_t len = 0;
+    const void *p = fdt_getprop(f, console_node, "interrupts", &len);
+    if (!p || len < 12) return -1;
+    uint32_t type = (uint32_t)fdt_cells(p, 1);
+    uint32_t num  = (uint32_t)fdt_cells((const uint8_t *)p + 4, 1);
+    return (int)(type == 1 ? num + 16 : num + 32);
 }
 
 const char *console_kind(void) {

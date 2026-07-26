@@ -166,8 +166,10 @@ int gic_timer_irq(const fdt_t *f) {
 /* Called from the vector table. Acknowledge, act, tell the controller we are
  * done — in that order, or the interrupt arrives again immediately. */
 extern void timer_tick(void);
-static int timer_intid = -1;
-void gic_set_timer_irq(int id) { timer_intid = id; }
+extern void console_interrupt(void);
+static int timer_intid = -1, console_intid = -1;
+void gic_set_timer_irq(int id)   { timer_intid = id; }
+void gic_set_console_irq(int id) { console_intid = id; }
 
 void irq_dispatch(void) {
     if (!gic_present) return;
@@ -175,6 +177,7 @@ void irq_dispatch(void) {
     unsigned id = iar & 0xffffff;
     if (id >= 1020) return;                  /* spurious */
     if ((int)id == timer_intid) timer_tick();
+    else if ((int)id == console_intid) { console_interrupt(); thread_wake_console(); }
     /* Tell the controller we are done *before* switching threads. Otherwise
      * the interrupt stays active while another thread runs, and that thread
      * can never be interrupted in turn — the machine would appear to schedule

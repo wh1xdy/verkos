@@ -1639,3 +1639,40 @@ A shell running a program that itself forks, on a kernel that is a day old:
 
 Still missing, and named: argv, pipes, redirection, and any filesystem that is
 not the initrd.
+
+## D-050 — The console interrupts, and the machine sleeps
+
+`read` used to wait by yielding: the thread stayed runnable, was scheduled,
+found nothing, and gave way again — burning a slice each time round. It worked,
+and it is the difference between a machine that is idle and one that is merely
+not doing anything useful.
+
+The console now raises an interrupt, found in the device tree like everything
+else: the serial node's `interrupts` property, with the same relative numbering
+as the timer's — type 0 is a shared interrupt counted from 32, type 1 a
+per-processor one counted from 16. Getting that wrong gives a port that works
+perfectly when polled and never interrupts, which is a hard thing to look for.
+
+Characters go into a small ring buffer, and the handler **drains the port
+completely** rather than taking one: the interrupt says something arrived, not
+how much, and a character left behind may be the reason no further interrupt
+comes.
+
+A reader with nothing to read is now properly blocked — not scheduled at all
+until the interrupt puts it back in the queue. The idle loops in the kernel
+`wfi` between ticks. Sitting at the shell prompt for ten seconds, QEMU consumed
+no measurable CPU at all.
+
+### System calls now run with interrupts enabled, and that is a debt
+
+They have to. A call that waits for a device cannot be woken by that device if
+the exception entry left interrupts masked; that is a deadlock, not a slow path.
+
+It also means a system call can be preempted, and **this kernel has no
+locking**. One CPU and a scheduler simple enough that it holds today, but it is
+the next thing that will be wrong — the moment there is a second CPU, or a data
+structure that takes more than a moment to update. It is written at the line
+that enables them rather than left to be discovered.
+
+GENI is deliberately left polling: its receive path is unwritten, and enabling
+an interrupt for a driver that cannot read would produce a storm.

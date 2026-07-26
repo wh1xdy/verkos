@@ -158,9 +158,27 @@ void thread_exit(int status) {
     if (current->space) { vm_free_space(current->space); current->space = 0; }
     /* Wake a parent that is waiting for exactly this. */
     for (int i = 0; i < n_threads; i++)
-        if (threads[i].id == current->parent && threads[i].state == THREAD_BLOCKED)
+        if (threads[i].id == current->parent && threads[i].state == THREAD_BLOCKED &&
+            threads[i].wait_reason == WAIT_CHILD)
             threads[i].state = THREAD_RUNNABLE;
     for (;;) schedule();
+}
+
+/* Sleep until a character arrives. Unlike yielding in a loop, a thread parked
+ * here is not scheduled at all — the CPU goes to whoever has work, and the
+ * interrupt is what puts this one back in the queue. */
+void thread_block_on_console(void) {
+    current->wait_reason = WAIT_CONSOLE;
+    current->state = THREAD_BLOCKED;
+    schedule();
+}
+
+/* Called from the interrupt, so it does the least it can: mark them runnable
+ * and let the ordinary scheduler decide when. */
+void thread_wake_console(void) {
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].state == THREAD_BLOCKED && threads[i].wait_reason == WAIT_CONSOLE)
+            threads[i].state = THREAD_RUNNABLE;
 }
 
 /* Collect a finished child. Blocks if one is still running, returns -1 if
@@ -185,6 +203,7 @@ int thread_wait(int *status_out) {
             if (threads[i].state != THREAD_FREE) have_children = 1;
         }
         if (!have_children) return -1;
+        current->wait_reason = WAIT_CHILD;
         current->state = THREAD_BLOCKED;
         schedule();
     }
