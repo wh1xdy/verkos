@@ -15,6 +15,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "sched.h"
+#include "mmu.h"
 
 /* Distributor */
 #define GICD_CTLR         0x000
@@ -61,8 +62,10 @@ int gic_init(const fdt_t *f) {
 
     uint64_t dist = 0, cpu = 0;
     if (reg_index(f, node, 0, &dist) || reg_index(f, node, 1, &cpu)) return -1;
-    gicd = (volatile uint8_t *)(uintptr_t)dist;
-    gicc = (volatile uint8_t *)(uintptr_t)cpu;
+    /* The tree gives physical addresses; the kernel reaches devices through
+     * its own window onto them, exactly as it does the UART. */
+    gicd = (volatile uint8_t *)(uintptr_t)phys_to_kva(dist);
+    gicc = (volatile uint8_t *)(uintptr_t)phys_to_kva(cpu);
 
     wr(gicd, GICD_CTLR, 1);          /* distributor on                     */
     wr(gicc, GICC_PMR, 0xf0);        /* accept anything of decent priority */

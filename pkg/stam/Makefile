@@ -6,8 +6,20 @@
 CROSS   ?=
 CC       = $(CROSS)gcc
 OBJCOPY  = $(CROSS)objcopy
-CFLAGS   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
-           -fno-pic -fno-pie -O2 -Wall -Wextra -std=c11 -g
+# The two builds — raw Image and UEFI application — must share their code
+# generation flags. They did not, and only the UEFI one had -fno-jump-tables:
+# the compiler turned a switch into a table of absolute addresses, which the
+# kernel jumped to after moving to the high half, where they point at nothing.
+# It faulted in a loop, and only on one of the two paths. Anything that changes
+# how addresses are formed belongs in COMMON.
+COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
+           -fno-jump-tables -fvisibility=hidden -O2 -Wall -std=c11
+# -fpic here too, not just for the UEFI build. Without it the compiler builds
+# tables of absolute pointers — a switch returning string constants becomes one
+# — and those are link-time low addresses that stop resolving the moment the
+# kernel moves to the high half. The exception decoder then cannot read its own
+# messages, and faults while reporting a fault, forever.
+CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
 OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o syscall.o userprog.o main.o
@@ -50,9 +62,7 @@ clean:
 # are never relocated because nothing here processes relocations. The kernel
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
-EFI_CFLAGS = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
-             -fshort-wchar -fpic -fno-jump-tables -fvisibility=hidden \
-             -O2 -Wall -std=c11 -I../vboot
+EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
 EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S
 

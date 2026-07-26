@@ -91,6 +91,8 @@ static void print_size(uint64_t bytes) {
     else kprintf("%llu bytes", (unsigned long long)bytes);
 }
 
+void kmain_high(void);
+
 void kmain(void *dtb) {
     if (handover_dtb(dtb, &boot) != 0) {
         /* No tree means no console either — there is nothing to print to and
@@ -136,6 +138,34 @@ void kmain(void *dtb) {
         print_size(pmm_free_bytes());
         kprintf("\n");
     }
+
+    /* Move to the high half and carry on there. Does not return. */
+    mmu_go_high();
+    kprintf("  mmu       could not move to the high half — stopping\n");
+    for (;;) __asm__ volatile("wfe");
+}
+
+/* Everything from here runs at 0xffffff80_________, with the low half of the
+ * address space handed over to whatever program is running. */
+void kmain_high(void) {
+    mmu_note_high();
+    console_rebase(KVA_OFFSET);
+    handover_rebase(KVA_OFFSET);
+    boot.dtb = (const void *)(uintptr_t)phys_to_kva((uint64_t)(uintptr_t)boot.dtb);
+    if (boot.initrd_end > boot.initrd_start) {
+        boot.initrd_start = phys_to_kva(boot.initrd_start);
+        boot.initrd_end   = phys_to_kva(boot.initrd_end);
+    }
+    /* The vector table was installed at its low address. Now that the low half
+     * is gone, VBAR_EL1 points at nothing — and the first interrupt would be a
+     * fault whose handler is also unreachable, which is a hang with no output
+     * at all. exceptions_install computes the address PC-relative, so calling
+     * it again from up here installs the high one. */
+    exceptions_install();
+    mmu_drop_low_half();
+    kprintf("  kernel    now running from 0x%llx upwards; the low half is a\n"
+            "            program's to use\n",
+            (unsigned long long)KVA_OFFSET);
 
     int ticking = 0;
     if (gic_init(machine_tree()) == 0 && timer_init(machine_tree(), 100) == 0) {

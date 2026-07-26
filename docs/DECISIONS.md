@@ -1331,3 +1331,60 @@ which happened.
 The boot output was also reorganised into four numbered questions, each with its
 answer, because three demonstrations running in sequence with no separation read
 as noise. A log nobody can follow is a log nobody reads.
+
+## D-042 — The kernel moved to the high half
+
+TTBR1 now holds the kernel's map and TTBR0 a process's own. While the kernel
+lived in the low half it shared TTBR0 with whatever was running, so every
+process would have needed a copy of the kernel's mappings and a process switch
+would have meant switching the kernel's map too. Now the halves are independent:
+the kernel is mapped once, for everyone, and switching process touches only
+TTBR0.
+
+This was possible only because the kernel is built position-independent and
+needs no relocations — the same instructions run correctly at `0x40080000` and
+at `0xffffff8040080000`. Nothing had to be rewritten, only re-pointed.
+
+The move itself is one function that does not return. It cannot: the stack it
+was called on is full of return addresses in the low half, and the moment TTBR0
+stops describing the low half those become faults. So `go_high` moves the stack
+pointer to the same memory seen through its high alias, abandons the old frames,
+and branches to `kmain_high`, which starts a fresh call chain.
+
+Dropping the low half immediately afterwards is deliberate. Any pointer still
+holding a physical address then faults at once and loudly, rather than working
+by accident until something moves.
+
+An unexpected gain: the isolation got *stronger*. A program reaching for
+`0x40000000` used to take a permission fault, because the kernel was mapped in
+its address space but marked EL1-only. It now takes a translation fault —
+nothing is mapped there at all. The kernel is not merely unreadable to a
+program; it is absent.
+
+### Three things that had to be re-pointed, and one that was missed
+
+Everything the kernel learned *before* the move holds physical addresses: the
+UART's registers, the device tree, the GIC's two banks, the initrd. Each is
+rebased once, in `kmain_high`.
+
+The one that was missed was `VBAR_EL1`. The vector table had been installed at
+its low address, so the moment the low half went away the first interrupt was a
+fault whose handler was also unreachable — a hang with no output whatsoever.
+`exceptions_install` computes the address PC-relative, so calling it again from
+the high side installs the right one.
+
+### The two builds had different code generation, and it hid a bug
+
+After the move the raw-Image build faulted in a loop while *reporting* a fault,
+printing an empty description of itself; the UEFI build was fine. The two
+Makefile variable lists had drifted apart, and only the UEFI one had `-fpic`.
+Without it the compiler builds tables of absolute pointers — a `switch`
+returning string constants becomes exactly that — holding link-time low
+addresses that stop resolving the instant the kernel moves.
+
+`-fno-jump-tables` was not enough; that only governs branch tables, not tables
+of returned constants. Both builds now share a single `COMMON` list, and
+anything affecting how addresses are formed belongs in it. Two builds of one
+kernel differing in code generation is a bug generator: it means a defect can
+be present on one path and invisible on the other, which is exactly how this one
+survived until the address space changed underneath it.

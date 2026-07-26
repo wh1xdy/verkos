@@ -8,6 +8,7 @@ int  console_init(const fdt_t *f);
 void kputc(char c);
 void kputs(const char *s);
 void kprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void console_rebase(uint64_t offset);
 const char *console_kind(void);
 uint64_t console_addr(void);
 #endif

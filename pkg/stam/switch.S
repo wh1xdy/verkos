@@ -67,3 +67,28 @@ thread_trampoline:
     blr     x19
     bl      thread_exit
     b       .
+
+/* Move the kernel to its high addresses and continue there.
+ *
+ *   x0 = the offset between a physical address and its high alias
+ *
+ * This does not return, and cannot: the stack it was called on is full of
+ * return addresses in the low half, and the moment TTBR0 stops describing the
+ * low half those become faults. So the old frames are abandoned. The stack
+ * pointer is moved to the same memory seen through its high alias, and control
+ * goes to kmain_high, which starts a fresh call chain.
+ *
+ * The address of kmain_high is computed here with adrp/add rather than passed
+ * in from C — see userprog.S for why taking a symbol's address in C does not
+ * survive in this kernel.
+ */
+    .global go_high
+    .hidden go_high
+go_high:
+    mov     x2, sp
+    add     x2, x2, x0
+    mov     sp, x2
+    adrp    x3, kmain_high
+    add     x3, x3, :lo12:kmain_high
+    add     x3, x3, x0
+    br      x3

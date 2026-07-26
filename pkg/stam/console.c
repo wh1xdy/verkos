@@ -131,6 +131,13 @@ int console_init(const fdt_t *f) {
     return 0;
 }
 
+/* The UART's address came out of the device tree, so it is physical. Once the
+ * kernel runs from the high half it must reach the same registers through its
+ * own window onto that memory. */
+void console_rebase(uint64_t offset) {
+    if (uart_kind != UART_NONE) uart_base += offset;
+}
+
 const char *console_kind(void) {
     return uart_kind == UART_PL011 ? "PL011" : uart_kind == UART_8250 ? "8250" : "none";
 }

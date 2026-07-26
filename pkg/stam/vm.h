@@ -2,5 +2,5 @@
 #define STAM_VM_H
 #include <stdint.h>
 /* Map one 4 KiB page so EL0 may reach it. Splits any larger block it meets. */
-int map_user_page(uint64_t va, uint64_t pa, int executable);
+int map_user_page(uint64_t va, uint64_t page, int executable);
 #endif

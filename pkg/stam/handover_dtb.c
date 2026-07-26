@@ -30,6 +30,13 @@ void handover_set_free_region(uint64_t base, uint64_t size) {
 
 const fdt_t *machine_tree(void) { return &tree; }
 
+/* The tree is still where the firmware put it; only our way of reaching it
+ * changed. Both pointers into it move by the same amount. */
+void handover_rebase(uint64_t offset) {
+    tree.strukt  += offset;
+    tree.strings += offset;
+}
+
 int handover_dtb(const void *dtb, boot_info_t *bi) {
     if (fdt_init(&tree, dtb) != 0) return -1;
 

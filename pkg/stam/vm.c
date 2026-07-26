@@ -26,6 +26,8 @@
 #include "mmu.h"
 #include "console.h"
 
+/* pa is a physical address throughout: it goes into a descriptor. */
+
 #define D_TABLE     0x3ul
 #define D_BLOCK     0x1ul
 #define D_PAGE      0x3ul
@@ -39,8 +41,10 @@
 
 #define ADDR_MASK   0x0000fffffffff000ul
 
+/* A descriptor holds a physical address; the kernel has to look at the table
+ * through its own mapping of that memory. */
 static uint64_t *table_at(uint64_t desc) {
-    return (uint64_t *)(uintptr_t)(desc & ADDR_MASK);
+    return (uint64_t *)(uintptr_t)phys_to_kva(desc & ADDR_MASK);
 }
 
 /* Replace a block descriptor with a table of 512 descriptors covering exactly
@@ -58,7 +62,7 @@ static uint64_t *split(uint64_t *slot, uint64_t child_size) {
     } else {
         for (unsigned i = 0; i < 512; i++) tbl[i] = 0;
     }
-    *slot = (uint64_t)(uintptr_t)tbl | D_TABLE;
+    *slot = kva_to_phys(tbl) | D_TABLE;
     return tbl;
 }
 
@@ -68,8 +72,16 @@ static uint64_t *descend(uint64_t *tbl, unsigned idx, uint64_t child_size) {
     return split(&tbl[idx], child_size);
 }
 
-int map_user_page(uint64_t va, uint64_t pa, int executable) {
-    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_table();
+/* `page` is a kernel pointer, as returned by alloc_page; the descriptor needs
+ * the physical address behind it. Converting here rather than at every call
+ * site means one place to be wrong. */
+int map_user_page(uint64_t va, uint64_t page, int executable) {
+    uint64_t pa = kva_to_phys((const void *)(uintptr_t)page);
+    /* Into the process's own table, not the kernel's. Before the kernel moves
+     * to the high half these are the same table; afterwards they are not, and
+     * mapping a user page into the kernel's would put it somewhere no program
+     * can reach. */
+    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_user_table_kva();
     if (!l1) return -1;
 
     uint64_t *l2 = descend(l1, (unsigned)((va >> 30) & 511), 1ul << 21);

@@ -25,6 +25,21 @@ extern char _kernel_end[] __attribute__((visibility("hidden")));
 static uint64_t free_next, free_top;
 static unsigned pages_taken;
 
+/* Before the move, a kernel pointer *is* a physical address. After it, every
+ * kernel pointer is the high alias. Rather than dust conversions through every
+ * caller, the allocator hands back whichever is currently correct, and
+ * kva_to_phys goes the other way for the one place that needs the real
+ * address: a page-table entry, which the hardware reads. */
+static int high_half;
+void mmu_note_high(void) { high_half = 1; }
+uint64_t kva_to_phys(const void *p) {
+    uint64_t v = (uint64_t)(uintptr_t)p;
+    return high_half ? v - KVA_OFFSET : v;
+}
+static void *usable(uint64_t phys) {
+    return (void *)(uintptr_t)(high_half ? phys + KVA_OFFSET : phys);
+}
+
 /* `ram_base`/`ram_size` is either the whole of memory — in which case the
  * kernel image sits inside it and must be stepped over — or a region the
  * firmware has already told us is free, in which case it is authoritative and
@@ -46,8 +61,9 @@ void *alloc_page(void) {
     uint64_t p = free_next;
     free_next += PAGE_SIZE;
     pages_taken++;
-    for (unsigned i = 0; i < PAGE_SIZE / 8; i++) ((volatile uint64_t *)(uintptr_t)p)[i] = 0;
-    return (void *)(uintptr_t)p;
+    volatile uint64_t *z = usable(p);
+    for (unsigned i = 0; i < PAGE_SIZE / 8; i++) z[i] = 0;
+    return (void *)z;
 }
 
 /* Contiguous by construction — the allocator only ever bumps forward — but
@@ -59,9 +75,9 @@ void *alloc_pages(unsigned n) {
     uint64_t p = free_next;
     free_next += (uint64_t)n * PAGE_SIZE;
     pages_taken += n;
-    for (uint64_t i = 0; i < (uint64_t)n * PAGE_SIZE / 8; i++)
-        ((volatile uint64_t *)(uintptr_t)p)[i] = 0;
-    return (void *)(uintptr_t)p;
+    volatile uint64_t *z = usable(p);
+    for (uint64_t i = 0; i < (uint64_t)n * PAGE_SIZE / 8; i++) z[i] = 0;
+    return (void *)z;
 }
 
 unsigned pmm_pages_used(void) { return pages_taken; }
@@ -177,3 +193,83 @@ int mmu_init(uint64_t ram_base, uint64_t ram_size) {
 }
 
 uint64_t mmu_table(void) { return (uint64_t)(uintptr_t)l1; }
+
+/* ---- moving the kernel to the high half -------------------------------- */
+/* Why bother: while the kernel lives in the low half it shares TTBR0 with any
+ * program, so every process would need its own copy of the kernel's mappings
+ * and switching process would mean switching the kernel's map too. With the
+ * kernel in TTBR1 the two halves are independent — the kernel is mapped once,
+ * for everyone, and a process switch touches only TTBR0.
+ *
+ * This is possible at all because the kernel is built position-independent and
+ * needs no relocations: the same instructions run correctly at 0x40080000 and
+ * at 0xffffff8040080000. Nothing has to be rewritten, only re-pointed. */
+
+extern void go_high(uint64_t offset);
+
+static uint64_t *l1_high;      /* TTBR1: the kernel's own map              */
+static uint64_t *l1_user;      /* TTBR0: empty, until a process fills it   */
+
+void mmu_go_high(void) {
+    l1_high = alloc_page();
+    l1_user = alloc_page();
+    if (!l1_high || !l1_user) { kprintf("  mmu       no memory for the high map\n"); return; }
+
+    /* The high half is a straight window onto physical memory: the kernel sees
+     * address P as P + KVA_OFFSET, always, with no exceptions to remember. */
+    for (unsigned i = 0; i < 512; i++) l1_high[i] = l1[i];
+    for (unsigned i = 0; i < 512; i++) l1_user[i] = 0;
+
+    dcache_clean_to_memory(l1_high, PAGE_SIZE);
+    dcache_clean_to_memory(l1_user, PAGE_SIZE);
+
+    /* Install both halves and clear EPD1, which has been disabling TTBR1
+     * walks since milestone 2 precisely because there was no table there. */
+    uint64_t tcr;
+    __asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
+    tcr &= ~(1ul << 23);
+    __asm__ volatile(
+        "msr  ttbr1_el1, %0\n"
+        "msr  ttbr0_el1, %1\n"
+        "msr  tcr_el1,   %2\n"
+        "isb\n"
+        "tlbi vmalle1\n"
+        "dsb  ish\n"
+        "isb\n"
+        :: "r"(kva_to_phys(l1_high)),
+           "r"(kva_to_phys(l1)),              /* keep the low map for one more moment */
+           "r"(tcr) : "memory");
+
+    /* From here the kernel exists at both addresses. Step across, abandon the
+     * low one, and never come back. */
+    l1      = (uint64_t *)(uintptr_t)phys_to_kva(l1);
+    l1_high = (uint64_t *)(uintptr_t)phys_to_kva(l1_high);
+    l1_user = (uint64_t *)(uintptr_t)phys_to_kva(l1_user);
+    go_high(KVA_OFFSET);
+}
+
+/* Called from kmain_high, once the low half is no longer needed. Dropping it
+ * means any pointer still holding a physical address faults immediately and
+ * loudly, instead of working by accident until something moves. */
+void mmu_drop_low_half(void) {
+    __asm__ volatile(
+        "msr  ttbr0_el1, %0\n"
+        "isb\n"
+        "tlbi vmalle1\n"
+        "dsb  ish\n"
+        "isb\n"
+        :: "r"(kva_to_phys(l1_user)) : "memory");
+}
+
+uint64_t mmu_user_table(void)  { return kva_to_phys(l1_user); }
+uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }
+
+void mmu_set_user_table(uint64_t phys) {
+    __asm__ volatile(
+        "msr  ttbr0_el1, %0\n"
+        "isb\n"
+        "tlbi vmalle1\n"
+        "dsb  ish\n"
+        "isb\n"
+        :: "r"(phys) : "memory");
+}
