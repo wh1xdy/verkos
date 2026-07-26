@@ -1410,3 +1410,46 @@ exit zero.
 An assertion in a log is something the reader has to believe. A program that
 checks its own memory and exits non-zero if it was disturbed is something the
 machine believes.
+
+## D-044 — GICv3, and the end of "QEMU only"
+
+stam supported GICv2 and said so honestly when it met anything else (D-033).
+That was the right answer while nothing depended on it, but nearly every ARM
+machine built in the last decade is v3 — including the board on the desk — so
+"v2 only" meant "QEMU only".
+
+They are not variations on a theme. In v3 the CPU interface **stopped being
+memory-mapped** and became system registers, and the per-CPU interrupts moved
+out of the distributor into a redistributor of their own, one per core. Three
+things must all happen or the machine takes no interrupts and explains nothing:
+wake this core's redistributor and wait for it to say its children are awake;
+set `ICC_SRE_EL1` and *read it back*, because on some implementations the bit is
+write-once; and enable group 1 in both the distributor and the interface.
+
+The trap is `gic_enable_irq`. In v2 a per-CPU interrupt is enabled in the
+distributor. In v3 those registers are reserved and the real ones are in the
+redistributor's second 64 KiB frame. Configuring the timer the v2 way on a v3
+machine writes to reserved registers, returns no error, and the timer simply
+never fires.
+
+vboot now describes a v3 too, which it deliberately refused to do before: it
+reads the redistributor's address from MADT's type 0x0E entry and emits
+`arm,gic-v3` with distributor and redistributor ranges instead of distributor
+and CPU interface. The refusal was correct when stam could not drive one — a
+node the kernel would misconfigure is worse than no node — and became wrong the
+moment it could.
+
+Verified across the whole matrix, five configurations, each answering all five
+of the kernel's own questions:
+
+| | |
+|---|---|
+| raw Image, GICv2 | 5 of 5 |
+| raw Image, GICv3 | 5 of 5 |
+| UEFI + ACPI, GICv2 | 5 of 5 |
+| UEFI + ACPI, GICv3 | 5 of 5 |
+| UEFI + device tree | 5 of 5 |
+
+What remains before stam runs on the Arduino UNO Q is a Qualcomm GENI console
+driver and an Android boot image; the interrupt controller is no longer in the
+way.

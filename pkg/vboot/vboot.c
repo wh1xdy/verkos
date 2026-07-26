@@ -520,11 +520,12 @@ static UINT64 vb_le64(const unsigned char *p) {
  * entries we want are the GIC distributor (type 0x0C) and one GIC CPU
  * interface (type 0x0B) per processor — which is also how the CPUs are
  * counted, since ACPI has no separate list of them. */
-static int vb_madt(UINT64 *dist, UINT64 *cpuif, unsigned *ncpu, unsigned *gicver) {
+static int vb_madt(UINT64 *dist, UINT64 *cpuif, unsigned *ncpu, unsigned *gicver,
+                   UINT64 *redist) {
     unsigned char *t = vb_acpi_table("APIC");
     if (!t) return 0;
     UINT32 len = vb_le32(t + 4);
-    *dist = 0; *cpuif = 0; *ncpu = 0; *gicver = 0;
+    *dist = 0; *cpuif = 0; *ncpu = 0; *gicver = 0; *redist = 0;
     for (UINT32 o = 44; o + 2 <= len; ) {
         unsigned type = t[o], elen = t[o + 1];
         if (elen < 2 || o + elen > len) break;
@@ -536,6 +537,8 @@ static int vb_madt(UINT64 *dist, UINT64 *cpuif, unsigned *ncpu, unsigned *gicver
         } else if (type == 0x0c && elen >= 24) {     /* GIC distributor   */
             *dist = vb_le64(t + o + 8);
             *gicver = t[o + 20];
+        } else if (type == 0x0e && elen >= 16) {     /* GIC redistributor */
+            if (!*redist) *redist = vb_le64(t + o + 4);
         } else if (type == 0x00 && elen >= 8) {      /* x86 local APIC    */
             if (vb_le32(t + o + 4) & 1) (*ncpu)++;
         }
@@ -642,8 +645,11 @@ static int vb_install_dtb(void) {
         fg_end_node(&g);
 
         /* Processors and the interrupt controller, out of ACPI's MADT. */
-        UINT64 gicd = 0, gicc = 0; unsigned ncpu = 0, gicver = 0;
-        int have_madt = vb_madt(&gicd, &gicc, &ncpu, &gicver);
+        UINT64 gicd = 0, gicc = 0, gicr = 0; unsigned ncpu = 0, gicver = 0;
+        int have_madt = vb_madt(&gicd, &gicc, &ncpu, &gicver, &gicr);
+        /* A GICv3 redistributor may be described by its own MADT entry or,
+         * on some firmware, only by the per-processor GICR field. Neither is
+         * guaranteed, so a v3 without one is reported rather than guessed at. */
         if (have_madt && ncpu) {
             fg_node(&g, "cpus");
                 fg_prop_u32(&g, "#address-cells", 1);
@@ -666,7 +672,9 @@ static int vb_install_dtb(void) {
          * supported. Emitting a v3 node the kernel would then misconfigure is
          * worse than emitting none: it would look like a working machine that
          * silently takes no interrupts. */
-        if (have_madt && gicd && gicc && (gicver == 0 || gicver == 1 || gicver == 2)) {
+        int v2_ok = have_madt && gicd && gicc && gicver <= 2;
+        int v3_ok = have_madt && gicd && gicr && gicver >= 3;
+        if (v2_ok || v3_ok) {
             char nm[32]; int n = 0;
             for (const char *q = "intc@"; *q; q++) nm[n++] = *q;
             UINT64 v = gicd; char hex[17]; int hn = 0;
@@ -674,16 +682,20 @@ static int vb_install_dtb(void) {
             while (v) { unsigned d = (unsigned)(v & 15); hex[hn++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; }
             while (hn--) nm[n++] = hex[hn];
             nm[n] = 0;
+            UINT64 second     = v3_ok ? gicr   : gicc;
+            UINT64 first_size = v3_ok ? 0x10000 : 0x1000;
+            UINT64 second_size= v3_ok ? 0x20000 : 0x2000;
             fg_node(&g, nm);
-                fg_prop_str(&g, "compatible", "arm,cortex-a15-gic");
+                fg_prop_str(&g, "compatible", v3_ok ? "arm,gic-v3" : "arm,cortex-a15-gic");
                 fg_prop_u32(&g, "#interrupt-cells", 3);
                 fg_prop(&g, "interrupt-controller", 0, 0);
-                /* two ranges: distributor, then CPU interface */
+                /* v2: distributor then CPU interface. v3: distributor then
+                 * redistributor — the CPU interface is not memory-mapped. */
                 { unsigned char b[32];
-                  fg_be32(b,      (unsigned)(gicd >> 32)); fg_be32(b + 4,  (unsigned)gicd);
-                  fg_be32(b + 8,  0);                      fg_be32(b + 12, 0x1000);
-                  fg_be32(b + 16, (unsigned)(gicc >> 32)); fg_be32(b + 20, (unsigned)gicc);
-                  fg_be32(b + 24, 0);                      fg_be32(b + 28, 0x2000);
+                  fg_be32(b,      (unsigned)(gicd >> 32));   fg_be32(b + 4,  (unsigned)gicd);
+                  fg_be32(b + 8,  0);                        fg_be32(b + 12, (unsigned)first_size);
+                  fg_be32(b + 16, (unsigned)(second >> 32)); fg_be32(b + 20, (unsigned)second);
+                  fg_be32(b + 24, 0);                        fg_be32(b + 28, (unsigned)second_size);
                   fg_prop(&g, "reg", b, 32); }
             fg_end_node(&g);
 

@@ -27,8 +27,21 @@
 #define GICC_IAR          0x00c
 #define GICC_EOIR         0x010
 
-static volatile uint8_t *gicd, *gicc;
+static volatile uint8_t *gicd, *gicc;   /* v2: distributor, CPU interface   */
+static volatile uint8_t *gicr;          /* v3: this CPU's redistributor     */
 static int gic_present;
+static int gic_v3;
+
+/* v3's CPU interface, reached with system registers rather than loads and
+ * stores. Written as S3_ encodings because that spelling assembles on every
+ * toolchain, named registers only on some. */
+#define ICC_SRE_EL1      "S3_0_C12_C12_5"
+#define ICC_PMR_EL1      "S3_0_C4_C6_0"
+#define ICC_IGRPEN1_EL1  "S3_0_C12_C12_7"
+#define ICC_IAR1_EL1     "S3_0_C12_C12_0"
+#define ICC_EOIR1_EL1    "S3_0_C12_C12_1"
+#define SYSREG_READ(r)   ({ uint64_t v_; __asm__ volatile("mrs %0, " r : "=r"(v_)); v_; })
+#define SYSREG_WRITE(r,v) __asm__ volatile("msr " r ", %0\nisb\n" :: "r"((uint64_t)(v)))
 
 static void wr(volatile uint8_t *base, unsigned off, uint32_t v) {
     *(volatile uint32_t *)(base + off) = v;
@@ -48,14 +61,51 @@ static int reg_index(const fdt_t *f, int node, unsigned idx, uint64_t *addr) {
     return 0;
 }
 
+/* v3 initialisation. Three parts must all happen, and leaving any one out
+ * produces a machine that takes no interrupts and says nothing about why:
+ * wake this core's redistributor, tell the CPU interface to use system
+ * registers, and enable group 1 in both the distributor and the interface. */
+static int gic_init_v3(const fdt_t *f, int node) {
+    uint64_t dist = 0, redist = 0;
+    if (reg_index(f, node, 0, &dist) || reg_index(f, node, 1, &redist)) return -1;
+    gicd = (volatile uint8_t *)(uintptr_t)phys_to_kva(dist);
+    gicr = (volatile uint8_t *)(uintptr_t)phys_to_kva(redist);
+
+    /* Wake the redistributor: clear ProcessorSleep, then wait until it says
+     * its children are awake. Skipping the wait is a race that usually works. */
+    uint32_t waker = rd(gicr, 0x0014);
+    wr(gicr, 0x0014, waker & ~(1u << 1));
+    for (int spin = 0; spin < 1000000; spin++)
+        if (!(rd(gicr, 0x0014) & (1u << 2))) break;
+
+    /* ARE_NS and group 1, at the distributor. Without ARE the redistributor
+     * layout is not the one we just used. */
+    wr(gicd, GICD_CTLR, (1u << 4) | (1u << 1));
+
+    /* The CPU interface only answers as a system register once SRE is set,
+     * and on some implementations the bit is write-once — so read it back
+     * rather than assume. */
+    SYSREG_WRITE(ICC_SRE_EL1, SYSREG_READ(ICC_SRE_EL1) | 1);
+    if (!(SYSREG_READ(ICC_SRE_EL1) & 1)) {
+        kprintf("  gic       v3 refuses the system register interface\n");
+        return -1;
+    }
+    SYSREG_WRITE(ICC_PMR_EL1, 0xf0);
+    SYSREG_WRITE(ICC_IGRPEN1_EL1, 1);
+
+    gic_present = 1; gic_v3 = 1;
+    kprintf("  gic       v3 at 0x%llx, redistributor 0x%llx (from the device tree)\n",
+            (unsigned long long)dist, (unsigned long long)redist);
+    return 0;
+}
+
 int gic_init(const fdt_t *f) {
-    int node = fdt_find_compatible(f, "arm,gic-400");
+    int node = fdt_find_compatible(f, "arm,gic-v3");
+    if (node != FDT_NONE) return gic_init_v3(f, node);
+
+    node = fdt_find_compatible(f, "arm,gic-400");
     if (node == FDT_NONE) node = fdt_find_compatible(f, "arm,cortex-a15-gic");
     if (node == FDT_NONE) {
-        if (fdt_find_compatible(f, "arm,gic-v3") != FDT_NONE) {
-            kprintf("  gic       v3 found — not supported yet\n");
-            return -1;
-        }
         kprintf("  gic       no interrupt controller in the device tree\n");
         return -1;
     }
@@ -80,6 +130,19 @@ void gic_enable_irq(unsigned intid) {
     if (!gic_present) return;
     /* Priority first, then enable: enabling an interrupt whose priority is
      * still zero means it can be masked out by PMR and never arrive. */
+    if (gic_v3 && intid < 32) {
+        /* Per-CPU interrupts live in the redistributor's second 64 KiB frame,
+         * not in the distributor. Configuring them in the distributor — where
+         * v2 kept them — writes to registers that are reserved in v3, and the
+         * timer then simply never fires. */
+        volatile uint8_t *sgi = gicr + 0x10000;
+        wr(sgi, 0x0080, rd(sgi, 0x0080) | (1u << intid));   /* group 1 */
+        *(volatile uint8_t *)(sgi + 0x0400 + intid) = 0xa0;
+        wr(sgi, 0x0100, 1u << intid);
+        return;
+    }
+    if (gic_v3) wr(gicd, 0x0080 + (intid / 32) * 4,
+                   rd(gicd, 0x0080 + (intid / 32) * 4) | (1u << (intid % 32)));
     *(volatile uint8_t *)(gicd + GICD_IPRIORITYR + intid) = 0xa0;
     wr(gicd, GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
 }
@@ -108,14 +171,15 @@ void gic_set_timer_irq(int id) { timer_intid = id; }
 
 void irq_dispatch(void) {
     if (!gic_present) return;
-    uint32_t iar = rd(gicc, GICC_IAR);
-    unsigned id = iar & 0x3ff;
-    if (id == 1023) return;                  /* spurious */
+    uint32_t iar = gic_v3 ? (uint32_t)SYSREG_READ(ICC_IAR1_EL1) : rd(gicc, GICC_IAR);
+    unsigned id = iar & 0xffffff;
+    if (id >= 1020) return;                  /* spurious */
     if ((int)id == timer_intid) timer_tick();
     /* Tell the controller we are done *before* switching threads. Otherwise
      * the interrupt stays active while another thread runs, and that thread
      * can never be interrupted in turn — the machine would appear to schedule
      * exactly once and then stop. */
-    wr(gicc, GICC_EOIR, iar);
+    if (gic_v3) SYSREG_WRITE(ICC_EOIR1_EL1, iar);
+    else        wr(gicc, GICC_EOIR, iar);
     if ((int)id == timer_intid) schedule();
 }
