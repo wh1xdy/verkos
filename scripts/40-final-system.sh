@@ -283,6 +283,14 @@ if [ "${VERK_FULL_USERLAND:-0}" = "1" ] && need full-userland; then
 # bzip2 (LFS recipe: shared lib + binaries)
 say "bzip2 ${BZIP2_VERSION}"
 d=$(unpack bzip2-${BZIP2_VERSION}.tar.gz); cd "$d"
+# Clean first, not just between the two builds. unpack reuses an existing
+# source directory, so a previous run that got as far as the static build and
+# then failed elsewhere leaves non-PIC object files behind — and the shared
+# build finds them up to date, skips recompiling, and links them into a shared
+# object. x86_64 refuses that outright ("relocation R_X86_64_PC32 ... recompile
+# with -fPIC"); aarch64 accepts it, which is why this only ever appeared on the
+# second architecture.
+make clean 2>/dev/null || true
 make -f Makefile-libbz2_so
 make clean
 make
