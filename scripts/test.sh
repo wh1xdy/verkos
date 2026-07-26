@@ -589,32 +589,40 @@ for cfg in pkg/vboot/vboot.conf scripts/71-iso.sh scripts/70-boot.sh pkg/vinstal
     done
 done
 
-say "vkern (our own kernel) builds, and is a valid arm64 Image"
-if [ -f "pkg/vkern/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || [ "$(uname -m)" = aarch64 ]; then
-    if ( cd pkg/vkern && make clean >/dev/null 2>&1 && make >/dev/null 2>&1 ); then
-        ok "vkern compiles"
-        IMG=pkg/vkern/vkern.img
+say "stam (our own kernel) builds, and is a valid arm64 Image"
+if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || [ "$(uname -m)" = aarch64 ]; then
+    if ( cd pkg/stam && make clean >/dev/null 2>&1 && make >/dev/null 2>&1 ); then
+        ok "stam compiles"
+        IMG=pkg/stam/stam.img
         # The arm64 boot protocol puts "ARM\x64" at offset 56 — which reads as
         # the four characters ARMd, because \x64 is the letter d. Comparing
         # against "ARM" fails on a correct image; the first version of this
         # check did exactly that and reported a defect that was not there.
         if [ "$(dd if="$IMG" bs=1 skip=56 count=4 2>/dev/null)" = "ARMd" ]; then
-            ok "vkern carries the arm64 Image magic"
+            ok "stam carries the arm64 Image magic"
         else
-            bad "vkern is missing the arm64 Image magic at offset 56"
+            bad "stam is missing the arm64 Image magic at offset 56"
+        fi
+        # Vectors must be installed before the MMU is switched on: a fault
+        # with no vector table is a reset with nothing on the console.
+        if grep -n "exceptions_install\|mmu_init" pkg/stam/main.c | head -2 | \
+           awk 'NR==1{a=$0} NR==2{b=$0} END{exit !(a ~ /exceptions_install/ && b ~ /mmu_init/)}'; then
+            ok "stam installs exception vectors before enabling the MMU"
+        else
+            bad "stam enables the MMU before installing exception vectors"
         fi
         # No hardcoded machine addresses: the whole point of reading the DTB.
-        if grep -qE '0x9000000|0x3f201000|0x1c090000' pkg/vkern/*.c 2>/dev/null; then
-            bad "vkern has a hardcoded UART address — it must come from the device tree"
+        if grep -qE '0x9000000|0x3f201000|0x1c090000' pkg/stam/*.c 2>/dev/null; then
+            bad "stam has a hardcoded UART address — it must come from the device tree"
         else
-            ok "vkern hardcodes no UART address"
+            ok "stam hardcodes no UART address"
         fi
-        ( cd pkg/vkern && make clean >/dev/null 2>&1 )
+        ( cd pkg/stam && make clean >/dev/null 2>&1 )
     else
-        bad "vkern does not compile"
+        bad "stam does not compile"
     fi
 else
-    say "  (no aarch64 compiler here; skipping vkern)"
+    say "  (no aarch64 compiler here; skipping stam)"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

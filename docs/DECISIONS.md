@@ -883,7 +883,7 @@ status. They were found by reading the code with the question "what returns
 success when it should not", after a boot-menu entry that did nothing (D-028)
 made that the obvious question to ask.
 
-## D-030 — vkern's boot protocol: a device tree, and a shim for everything else
+## D-030 — stam's boot protocol: a device tree, and a shim for everything else
 
 The question was put directly: define our own protocol between loader and
 kernel, or follow Multiboot2 or Limine so the loader can boot other kernels
@@ -909,7 +909,7 @@ one way to learn about hardware on every architecture. On x86_64, where
 firmware provides no tree, the loader will build one and hang the ACPI RSDP off
 `/chosen`; the kernel will not know the difference.
 
-vkern uses the standard arm64 `Image` header rather than anything of our own,
+stam uses the standard arm64 `Image` header rather than anything of our own,
 so QEMU's `-kernel`, U-Boot and every ARM bootloader can already start it. That
 is interoperability without implementing anybody's specification.
 
@@ -921,10 +921,10 @@ file, not a change to the kernel.
 One consequence, found while looking: vboot hands over with `LoadImage` and
 `StartImage`, i.e. it treats the kernel as an EFI application, which works for
 Linux because its arm64 Image is also a PE binary with an EFI stub. For vboot
-to start vkern, vkern needs its own stub — or vboot needs a raw-Image path.
+to start stam, stam needs its own stub — or vboot needs a raw-Image path.
 That is the next protocol decision, not this one.
 
-## D-031 — vkern milestone 1: the kernel finds its own hardware
+## D-031 — stam milestone 1: the kernel finds its own hardware
 
 6 591 bytes. It boots under QEMU, reads the device tree it was handed, and
 reports the machine: model, console type and address, CPU count, memory base
@@ -944,3 +944,41 @@ through. Every number followed.
 For scale: the Linux kernel this replaces is 36.3 million lines, of which we
 compile 6.8 million and ship 1 298 modules, producing a 46 MB image — to run on
 one machine.
+
+## D-032 — stam milestone 2: vectors before virtual memory
+
+The kernel was renamed from the placeholder `vkern` to **stam** — the trunk
+everything else branches from.
+
+Two things landed, and the order is the decision. **Exception vectors were
+installed before the MMU was enabled.** A mistake in a page table is a fault,
+and a fault with no vector table is a machine that resets or hangs with nothing
+on the console — the single most expensive failure mode to debug, because it
+destroys the evidence. Installing the handler first means the first thing
+virtual memory can do wrong is *reported*.
+
+The handler earns its place by being readable rather than by being clever: it
+decodes ESR_EL1's exception class into a sentence ("data abort (bad load or
+store)"), decodes the fault status into a reason ("translation fault (nothing
+mapped)"), and prints the address that was touched, the instruction that
+touched it, and the first registers. It is exercised on demand with
+`stam.fault` on the command line, because a handler that has never run is one
+you find out about at the worst possible moment.
+
+The mapping is deliberately coarse — 1 GiB blocks, one 4 KiB table, no second
+level. Finer mapping is only useful when there is something to protect from
+something else, and there is not yet. What matters at this stage is that memory
+gets the right *attributes*: normal write-back for RAM so the caches can be
+turned on, Device-nGnRnE for everything else so a store to a UART register is
+not sitting in a cache line while we wait for the character to appear.
+
+Two things were learned by running it rather than by reading it:
+
+- The first self-test touched `0x7000000000` expecting nothing to be there, and
+  got an *external abort* instead of a translation fault — because that address
+  **is** mapped, as device memory, by a table that covers 512 GiB. The test now
+  uses an address above the 39-bit space, which is the shape of a real kernel
+  bug.
+- `exceptions.S` and `exceptions.c` both build `exceptions.o`. make picks one,
+  and the link then fails with an undefined symbol that is plainly defined in a
+  file you are looking at. The assembly is now `vectors.S`.

@@ -1,4 +1,4 @@
-/* vkern — link map.
+/* stam — link map.
  *
  * 0x40080000 is where QEMU's virt machine puts a kernel: RAM starts at
  * 0x40000000 and the arm64 Image header asks for a 0x80000 offset. This is

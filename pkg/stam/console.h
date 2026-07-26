@@ -1,5 +1,5 @@
-#ifndef VKERN_CONSOLE_H
-#define VKERN_CONSOLE_H
+#ifndef STAM_CONSOLE_H
+#define STAM_CONSOLE_H
 #include <stdint.h>
 #include <stddef.h>
 struct fdt_t_fwd;

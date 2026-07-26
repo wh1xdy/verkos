@@ -1,4 +1,4 @@
-/* vkern — the device-tree handover shim.
+/* stam — the device-tree handover shim.
  *
  * Turns "a pointer to a DTB" into a boot_info_t. This is the only file that
  * knows the kernel was started the ARM way; everything above it just reads

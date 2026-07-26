@@ -1,4 +1,4 @@
-/* vkern — the handful of C library functions a freestanding kernel still needs.
+/* stam — the handful of C library functions a freestanding kernel still needs.
  *
  * These carry their standard names on purpose. GCC emits calls to memcpy,
  * memset and memmove on its own, from struct assignments and array

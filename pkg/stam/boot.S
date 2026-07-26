@@ -1,4 +1,4 @@
-/* vkern — the VerkOS kernel. Entry point, aarch64.
+/* stam — the VerkOS kernel. Entry point, aarch64.
  *
  * We use the standard arm64 Image protocol rather than inventing our own, even
  * though vboot is ours and could hand over any way we liked. Two reasons: QEMU's

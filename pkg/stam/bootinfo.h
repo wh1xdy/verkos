@@ -1,4 +1,4 @@
-/* vkern — what the kernel knows about the machine it woke up on.
+/* stam — what the kernel knows about the machine it woke up on.
  *
  * This struct is the whole point of the boot-protocol decision. The kernel
  * reads *this* and nothing else: it never learns whether it was started by
@@ -10,8 +10,8 @@
  * Keep it to facts about the machine. Anything a driver can discover for
  * itself belongs in the driver, not here.
  */
-#ifndef VKERN_BOOTINFO_H
-#define VKERN_BOOTINFO_H
+#ifndef STAM_BOOTINFO_H
+#define STAM_BOOTINFO_H
 #include <stdint.h>
 
 typedef struct {

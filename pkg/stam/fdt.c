@@ -1,4 +1,4 @@
-/* vkern — flattened device tree reader. See fdt.h for why this exists. */
+/* stam — flattened device tree reader. See fdt.h for why this exists. */
 #include "fdt.h"
 #include <stddef.h>
 

@@ -1,4 +1,4 @@
-/* vkern — the console.
+/* stam — the console.
  *
  * Two serial drivers, chosen by what the device tree says is actually there.
  * Two is the smallest number that forces the code to be honest: with one

@@ -1,4 +1,4 @@
-/* vkern — device tree (flattened, .dtb) reader.
+/* stam — device tree (flattened, .dtb) reader.
  *
  * This is why the kernel can be portable at all. A kernel that writes to
  * 0x9000000 because that is where QEMU's serial port lives will never run
@@ -6,8 +6,8 @@
  * into every driver written afterwards. Reading the tree the firmware hands us
  * costs a few hundred lines once, at the very beginning.
  */
-#ifndef VKERN_FDT_H
-#define VKERN_FDT_H
+#ifndef STAM_FDT_H
+#define STAM_FDT_H
 #include <stdint.h>
 
 typedef struct {
