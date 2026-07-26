@@ -27,6 +27,7 @@ uint64_t kva_to_phys(const void *p);
 uint64_t mmu_user_table_kva(void);
 uint64_t mmu_current_user_table_kva(void);
 void     mmu_switch_user(uint64_t l1_kva);
+void     mmu_set_current_user_table_kva(uint64_t l1_kva);
 uint64_t mmu_table(void);
 void     exceptions_install(void);
 #endif

@@ -1493,3 +1493,33 @@ it is the moment they are typing the command.
 
 What remains before stam runs on an Arduino UNO Q is now only the parts that
 require the board itself.
+
+## D-046 — fork, and why exec is not here yet
+
+`fork` is the one system call whose implementation is about the shape of the
+stack it was called on rather than about its arguments. The child has to wake up
+*inside* the parent's system call and finish it with a different answer.
+
+So the child's kernel stack is built to look exactly like the parent's does at
+that moment — a byte copy of the exception frame, with `x0` set to 0 instead of
+the child's id — and its saved context is arranged so that the first thing it
+does when scheduled is `ret` into a routine that restores that frame and returns
+to EL0. One instruction, two processes, two answers.
+
+The address space is copied outright rather than shared copy-on-write. Copy-on-
+write is the thing to do eventually and the wrong thing to do first: it needs
+write faults, reference counts per page, and a fault handler that can tell "not
+allowed" from "not yet". Being able to *see* fork work is worth more right now
+than seeing it work quickly.
+
+The proof is again inside the program. Both processes have the same variable at
+the same address; the child sets it to 222 and the parent checks that it still
+reads 100, exiting non-zero if not. Parent 5 reports 100, child 6 reports 222.
+
+**`exec` is deliberately absent.** The mechanism is easy — replace the address
+space, load an ELF, jump, do not return. What is missing is anything to point
+at: with no filesystem there is exactly one program, the initrd, so `fork` then
+`exec` would start the same program again, forever. The honest next step is to
+make the initrd a cpio archive — vcpio already writes them — so it can hold
+several programs with names. Writing `exec` before there is something to exec
+would be writing a demonstration rather than a feature.

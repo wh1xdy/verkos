@@ -10,6 +10,8 @@
  */
 #include "console.h"
 #include "sched.h"
+#include "vm.h"
+#include "mmu.h"
 #include <stdint.h>
 
 typedef struct {
@@ -21,6 +23,7 @@ typedef struct {
 
 extern void exception_report(unsigned long kind, regs_t *r);
 
+#define SYS_CLONE  220        /* aarch64 Linux has no fork; clone does both */
 #define SYS_WRITE   64
 #define SYS_EXIT    93
 #define SYS_GETPID 172
@@ -37,8 +40,20 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     return len;
 }
 
-static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c) {
+/* fork. The frame is passed in because the child needs a copy of it — this is
+ * the one system call whose implementation is about the shape of the stack it
+ * was called on rather than about its arguments. */
+static uint64_t do_fork(void *frame) {
+    uint64_t child_space = vm_copy_space(mmu_current_user_table_kva());
+    if (!child_space) { kprintf("  [kernel] fork: no memory for a copy\n"); return (uint64_t)-12; }
+    thread_t *child = thread_fork(frame, 272, child_space);
+    if (!child) { kprintf("  [kernel] fork: no room for another process\n"); return (uint64_t)-11; }
+    return (uint64_t)child->id;
+}
+
+static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void *frame) {
     switch (nr) {
+    case SYS_CLONE: return do_fork(frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
     case SYS_EXIT:
@@ -59,7 +74,7 @@ void handle_user_sync(regs_t *r) {
     uint64_t esr;
     __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
     if ((esr >> 26) == 0x15) {              /* SVC from AArch64 */
-        r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2]);
+        r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2], r);
         return;
     }
     /* A program that faults is killed; the machine is not. This is the point

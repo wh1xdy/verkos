@@ -134,6 +134,24 @@ user_sync_common:
     RESTORE_ALL
     eret
 
+/* Where a forked child begins. Its kernel stack was built to look exactly like
+ * the parent's did in the middle of the system call, with x0 set to 0 instead
+ * of the child's id, so restoring it and returning to EL0 resumes the same
+ * instruction with a different answer. */
+    .global ret_to_user
+    .hidden ret_to_user
+ret_to_user:
+    RESTORE_ALL
+    eret
+
+/* Its address, PC-relative, for the same reason as everything else here. */
+    .global ret_to_user_addr
+    .hidden ret_to_user_addr
+ret_to_user_addr:
+    adrp    x0, ret_to_user
+    add     x0, x0, :lo12:ret_to_user
+    ret
+
     .global exceptions_install
     .hidden exceptions_install
 exceptions_install:

@@ -115,3 +115,49 @@ uint64_t vm_new_space(void) {
     for (unsigned i = 0; i < 512; i++) l1[i] = 0;
     return (uint64_t)(uintptr_t)l1;
 }
+
+/* Duplicate an address space, page by page.
+ *
+ * Copy-on-write is the thing to do eventually, and it is not what to do first:
+ * it needs write faults, reference counts on pages, and a fault handler that
+ * can distinguish "not allowed" from "not yet". Copying outright is obviously
+ * correct, and being able to see fork work is worth more right now than being
+ * able to see it work quickly.
+ *
+ * The parent's pages are read through the kernel's window onto physical
+ * memory, not through the user addresses, so this does not depend on which
+ * address space is currently installed.
+ */
+uint64_t vm_copy_space(uint64_t src_l1_kva) {
+    uint64_t *src = (uint64_t *)(uintptr_t)src_l1_kva;
+    uint64_t dst_l1 = vm_new_space();
+    if (!dst_l1) return 0;
+
+    uint64_t saved = mmu_current_user_table_kva();
+    mmu_set_current_user_table_kva(dst_l1);      /* map_user_page targets it */
+
+    for (unsigned i1 = 0; i1 < 512; i1++) {
+        if ((src[i1] & 0x3ul) != D_TABLE) continue;
+        uint64_t *l2 = table_at(src[i1]);
+        for (unsigned i2 = 0; i2 < 512; i2++) {
+            if ((l2[i2] & 0x3ul) != D_TABLE) continue;
+            uint64_t *l3 = table_at(l2[i2]);
+            for (unsigned i3 = 0; i3 < 512; i3++) {
+                uint64_t d = l3[i3];
+                if ((d & 0x3ul) != D_PAGE) continue;
+                uint64_t va = ((uint64_t)i1 << 30) | ((uint64_t)i2 << 21) | ((uint64_t)i3 << 12);
+                unsigned char *from = (unsigned char *)(uintptr_t)phys_to_kva(d & ADDR_MASK);
+                unsigned char *to = alloc_page();
+                if (!to) { mmu_set_current_user_table_kva(saved); return 0; }
+                for (unsigned b = 0; b < PAGE_SIZE; b++) to[b] = from[b];
+                int exec = !(d & D_UXN);
+                if (map_user_page(va, (uint64_t)(uintptr_t)to, exec)) {
+                    mmu_set_current_user_table_kva(saved);
+                    return 0;
+                }
+            }
+        }
+    }
+    mmu_set_current_user_table_kva(saved);
+    return dst_l1;
+}

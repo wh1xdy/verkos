@@ -267,6 +267,11 @@ uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }
 static uint64_t cur_user_kva;
 uint64_t mmu_current_user_table_kva(void) { return cur_user_kva ? cur_user_kva : (uint64_t)(uintptr_t)l1_user; }
 
+/* Change which table map_user_page writes into, without touching the hardware.
+ * Copying an address space needs exactly this: build into the child's tables
+ * while still running with the parent's installed. */
+void mmu_set_current_user_table_kva(uint64_t l1_kva) { cur_user_kva = l1_kva; }
+
 void mmu_switch_user(uint64_t l1_kva) {
     cur_user_kva = l1_kva;
     mmu_set_user_table(kva_to_phys((const void *)(uintptr_t)l1_kva));

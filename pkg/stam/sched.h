@@ -17,6 +17,7 @@ typedef struct {
 
 void      sched_init(const char *name_of_current);
 thread_t *thread_create(const char *name, void (*fn)(void *), void *arg);
+thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t space);
 void      schedule(void);
 void      thread_yield(void);
 void      thread_exit(void);

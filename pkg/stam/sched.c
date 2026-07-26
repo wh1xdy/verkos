@@ -59,6 +59,44 @@ thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
     return t;
 }
 
+extern uint64_t ret_to_user_addr(void);
+
+/* Build a thread that is a copy of one already in the middle of a system call.
+ *
+ * The child never runs thread_create's trampoline: its kernel stack is made to
+ * look exactly like the parent's does right now, so the first thing it does
+ * when scheduled is finish the system call the parent is still inside. That is
+ * what makes fork return twice — once in each process, from the same
+ * instruction, with different values.
+ */
+thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t space) {
+    if (n_threads >= MAX_THREADS) return 0;
+    unsigned char *stack = alloc_pages(STACK_PAGES);
+    if (!stack) return 0;
+
+    thread_t *t = &threads[n_threads];
+    t->id = n_threads;
+    t->name = "child";
+    t->state = THREAD_RUNNABLE;
+    t->slices = 0;
+    t->space = space;
+    t->stack_low = (uint64_t)(uintptr_t)stack;
+
+    uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
+    unsigned char *frame = (unsigned char *)(uintptr_t)(top - frame_bytes);
+    const unsigned char *src = parent_frame;
+    for (unsigned i = 0; i < frame_bytes; i++) frame[i] = src[i];
+    ((uint64_t *)frame)[0] = 0;               /* x0: what fork returns to the child */
+
+    uint64_t *sw = (uint64_t *)(uintptr_t)((uint64_t)(uintptr_t)frame - 96);
+    for (int i = 0; i < 12; i++) sw[i] = 0;
+    sw[11] = ret_to_user_addr();              /* x30: where cpu_switch returns */
+    t->sp = (uint64_t)(uintptr_t)sw;
+
+    n_threads++;
+    return t;
+}
+
 /* Adopt the thread of execution we are already on — the one the boot code
  * started — so there is something to switch *away from*. Its stack is the one
  * the linker reserved, not one we allocated. */
