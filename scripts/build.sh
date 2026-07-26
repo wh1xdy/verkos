@@ -11,12 +11,12 @@ source "$(dirname "$0")/lib/common.sh"
 
 STAGE="all"
 case "${1:-}" in
-    check|fetch|toolchain|temp|system|kernel|image|boot|all)
+    check|fetch|toolchain|temp|system|kernel|image|boot|iso|all)
         STAGE="$1"; shift ;;
     x86_64|i686|aarch64)
         : ;;                      # first arg is an arch, keep STAGE=all
     "" ) : ;;
-    * )  die "unknown stage/arch '$1' (stages: check fetch toolchain temp system kernel image boot all)" ;;
+    * )  die "unknown stage/arch '$1' (stages: check fetch toolchain temp system kernel image boot iso all)" ;;
 esac
 # Allow an ARCH as the remaining positional arg.
 [ -n "${1:-}" ] && export ARCH="$1"
@@ -33,6 +33,7 @@ case "$STAGE" in
     kernel)    run "Kernel"            50-kernel.sh ;;
     image)     run "Image"             60-image.sh ;;
     boot)      run "Boot image"        70-boot-image.sh ;;
+    iso)       run "Live ISO"          71-iso.sh ;;
     all)
         run "Host check"      00-check-host.sh
         run "Fetch sources"   10-fetch-sources.sh

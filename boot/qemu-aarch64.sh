@@ -29,6 +29,33 @@ QMP_ARGS=()
 NET_ARGS=(-netdev user,id=net0,hostfwd=tcp::2222-:22
           -device virtio-net-pci,netdev=net0,romfile=)
 
+# Boot the live ISO instead of the disk. Attached as a read-only virtio-blk
+# device rather than through -cdrom: the firmware finds the El Torito entry
+# either way, and this needs no SCSI CD-ROM driver in the kernel.
+ISO="$OUT/verkos-live-${ARCH:-aarch64}.iso"
+if [ "${VERK_ISO:-0}" = "1" ]; then
+    [ -f "$ISO" ] || { echo "no ISO at $ISO — run: make iso ARCH=aarch64" >&2; exit 1; }
+    FW=""
+    for c in /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd \
+             /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+        [ -f "$c" ] && { FW="$c"; break; }
+    done
+    [ -n "$FW" ] || { echo "no aarch64 UEFI firmware found" >&2; exit 1; }
+    CODE="${WORK:-$HERE/../work}/aarch64/efi-code.fd"
+    VARS="${WORK:-$HERE/../work}/aarch64/efi-vars-iso.fd"
+    [ -f "$CODE" ] || { dd if=/dev/zero of="$CODE" bs=1M count=64 status=none
+                        dd if="$FW" of="$CODE" conv=notrunc status=none; }
+    [ -f "$VARS" ] || dd if=/dev/zero of="$VARS" bs=1M count=64 status=none
+    exec "$QEMU_BIN" \
+        -machine "$QEMU_MACHINE" -cpu "$QEMU_CPU" -m "${VERK_ISO_MEM:-3072}" -smp 2 \
+        -drive if=pflash,format=raw,file="$CODE",readonly=on \
+        -drive if=pflash,format=raw,file="$VARS" \
+        -drive if=none,id=isodisk,file="$ISO",format=raw,readonly=on \
+        -device virtio-blk-pci,drive=isodisk,bootindex=0 \
+        "${NET_ARGS[@]}" "${GPU_ARGS[@]}" "${QMP_ARGS[@]}" "${EXTRA_ARGS[@]}" \
+        $QEMU_EXTRA
+fi
+
 if [ "${VERK_DIRECT:-0}" != "1" ] && [ -f "$BOOTIMG" ]; then
     # Locate the aarch64 UEFI firmware and give it a writable variable store, so
     # vboot can remember the last entry it booted.

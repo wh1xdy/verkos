@@ -681,3 +681,45 @@ on the ESP now appears in the menu, and the system still boots.
 
 Neither defect was reachable from anything VerkOS had booted from so far. That
 is the point: they were waiting for the first medium that behaves differently.
+
+## D-024 — The live ISO, and the three things that stood between us and it
+
+**Decision:** `make iso` produces a bootable live medium carrying two files —
+a FAT32 EFI image (vboot, kernel, initramfs, a live boot configuration) and the
+ext4 system image — with the EFI image registered as an El Torito no-emulation
+entry. It boots: firmware → vboot → kernel → initramfs → urverk mounts the ISO
+by its volume label, loop-mounts the system image out of it, and stacks a tmpfs
+overlay. The installer is on the medium and runs from it.
+
+**vboot needed no changes**, which was the design's central bet: the firmware
+presents the embedded FAT image as an ordinary volume, so vboot opens it exactly
+as it does a disk's ESP. The bet was hedged rather than trusted — D-023 fixed
+the two ways it could have bitten before the ISO was ever built, so that when
+the first boot failed, the failure was unambiguously somewhere else.
+
+It failed three times, each somewhere different, and each worth recording:
+
+1. **urverk mounted the medium writable.** `rw` on the command line is a request
+   aimed at the real root; on a live medium the root is an image *on* the
+   filesystem, and the filesystem itself is only ever read. ISO 9660 answers
+   EACCES. It retries read-only now.
+2. **The loop device was configured but the image would not mount.** Not the
+   loop attachment — that worked, with the right size, straight out of the ISO.
+   The image had `needs_recovery` set, and ext4 will not replay a journal onto
+   a device it cannot write to, so it answers EROFS. Fixed on both sides: stage
+   71 runs `e2fsck -fp` so the shipped image is clean, and urverk falls back to
+   `noload`, because a live medium can never replay a journal whatever we do.
+3. **The EFI image came out too small.** `$OUT_DIR/vmlinuz` is a symlink, and
+   `stat -c%s` measures the link — fourteen bytes rather than forty-five
+   megabytes. `stat -L`.
+
+urverk also learned to read ISO 9660 volume labels, since nothing else can
+identify a live medium: it has no filesystem the other probes understand until
+it is mounted. Writing that reader produced a stack overflow the compiler
+caught — the label field is 32 characters, longer than any other format's, and
+the callers' buffers were sized for the shortest.
+
+**Deliberately not done:** no isohybrid MBR/GPT (so the ISO is not yet
+`dd`-able to a USB stick as a hybrid image), no Joliet or Rock Ridge (the
+system ships as one opaque image, so the ISO needs neither), and no squashfs
+compression — the medium is 1.3 GB because the system carries a full compiler.

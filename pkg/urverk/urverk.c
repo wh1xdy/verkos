@@ -394,10 +394,34 @@ static int copy_to_ram(const char *src, const char *dst, unsigned long long size
     return 0;
 }
 
+/* An ISO 9660 volume names itself in its primary volume descriptor, which
+ * always sits at logical sector 16 — 32768 bytes in — and carries "CD001" and
+ * a 32-character volume identifier. A live medium is found by that label, and
+ * nothing else on it can be read until it is. */
+/* label must have room for 33 bytes; callers size it for the longest of the
+ * formats probe_dev knows, which is this one. */
+static int iso_super(const char *dev, char *label, char *uuid) {
+    int fd = open(dev, O_RDONLY);
+    if (fd < 0) return -1;
+    unsigned char pvd[128];
+    int ok = -1;
+    if (pread(fd, pvd, sizeof pvd, 32768) == (ssize_t)sizeof pvd &&
+        pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5)) {
+        memcpy(label, pvd + 40, 32);
+        label[32] = 0;
+        for (int i = 31; i >= 0 && (label[i] == ' ' || label[i] == 0); i--) label[i] = 0;
+        uuid[0] = 0;                    /* ISO 9660 has no UUID of its own */
+        ok = 0;
+    }
+    close(fd);
+    return ok;
+}
+
 static int probe_dev(const char *dev, char *label, char *uuid) {
     if (ext_super(dev, label, uuid) == 0) return 0;
     if (fat_super(dev, label, uuid) == 0) return 0;
-    return swap_super(dev, label, uuid);
+    if (swap_super(dev, label, uuid) == 0) return 0;
+    return iso_super(dev, label, uuid);
 }
 
 /* Turn "LABEL=x" / "UUID=y" into a device path; anything else is passed through.
@@ -415,7 +439,7 @@ static int resolve_spec(char *spec, size_t cap, int attempts) {
             /* only the usual block-device names, to avoid opening every node */
             if (strncmp(e->d_name, "sd", 2) && strncmp(e->d_name, "vd", 2) &&
                 strncmp(e->d_name, "nvme", 4) && strncmp(e->d_name, "mmcblk", 6)) continue;
-            char dev[128], label[24], uuid[40];
+            char dev[128], label[40], uuid[48];   /* ISO 9660 labels run to 32 chars */
             snprintf(dev, sizeof dev, "/dev/%.100s", e->d_name);
             if (probe_dev(dev, label, uuid)) continue;
             if ((by_label && !strcmp(label, want)) || (by_uuid && !strcasecmp(uuid, want))) {
@@ -1570,15 +1594,26 @@ static int stage1(void) {
     /* Mount read-only first (fsck-friendly, and 'rw' on the cmdline is really a
      * request for the real init to remount); honour rw when asked. */
     unsigned long flags = cmdline_flag("rw") ? 0 : MS_RDONLY;
-    const char *types[] = { fstype[0] ? fstype : "ext4", "ext4", "ext2", "vfat", NULL };
+    const char *types[] = { fstype[0] ? fstype : "ext4", "ext4", "ext2", "vfat",
+                            "iso9660", "squashfs", NULL };
     int mounted = 0;
     for (int i = 0; types[i] && !mounted; i++) {
         if (mount(root, NEWROOT, types[i], flags, NULL) == 0) {
             say2("mounted root as ", types[i]);
             mounted = 1;
-        } else if (debug) {
-            warn_errno(types[i]);
+            continue;
         }
+        /* A medium that cannot be written refuses a writable mount with EACCES,
+         * and "rw" on the command line is a request aimed at the real root — on
+         * a live medium the root is an image *on* this filesystem, and this one
+         * is only ever read. Retry read-only rather than give up. */
+        if ((errno == EACCES || errno == EROFS) && !(flags & MS_RDONLY) &&
+            mount(root, NEWROOT, types[i], flags | MS_RDONLY, NULL) == 0) {
+            say2("mounted root read-only as ", types[i]);
+            mounted = 1;
+            continue;
+        }
+        if (debug) warn_errno(types[i]);
     }
     if (!mounted) {
         warn_errno("mount root");
@@ -1615,7 +1650,12 @@ static int stage1(void) {
                 mkdir("/media", 0755);
                 if (mount(NULL, NEWROOT, NULL, MS_MOVE, NULL) != 0) { /* fall through */ }
                 mkdir(NEWROOT, 0755);
+                /* "noload": a medium that cannot be written cannot replay a
+                 * journal either, and ext4 answers EROFS rather than mounting.
+                 * An image straight off a live medium always looks like this,
+                 * because it was last touched by whatever wrote the medium. */
                 if (mount(ldev, NEWROOT, "ext4", MS_RDONLY, NULL) &&
+                    mount(ldev, NEWROOT, "ext4", MS_RDONLY, "noload") &&
                     mount(ldev, NEWROOT, "squashfs", MS_RDONLY, NULL)) {
                     warn_errno("mounting the root image");
                     emergency_shell("the root image would not mount");

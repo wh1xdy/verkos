@@ -33,6 +33,8 @@ system:     ; @bash $(BUILD) system    $(ARCH)
 kernel:     ; @bash $(BUILD) kernel    $(ARCH)
 image:      ; @bash $(BUILD) image     $(ARCH)
 boot:       ; @bash $(BUILD) boot      $(ARCH)
+iso:        ; @bash $(BUILD) iso       $(ARCH)
+run-iso:    ; @VERK_ISO=1 bash boot/qemu-$(ARCH).sh
 
 run:
 	@bash boot/qemu-$(ARCH).sh
