@@ -882,3 +882,65 @@ Three of the four are the D-021 shape again: a wrong answer with a zero exit
 status. They were found by reading the code with the question "what returns
 success when it should not", after a boot-menu entry that did nothing (D-028)
 made that the obvious question to ask.
+
+## D-030 — vkern's boot protocol: a device tree, and a shim for everything else
+
+The question was put directly: define our own protocol between loader and
+kernel, or follow Multiboot2 or Limine so the loader can boot other kernels
+too? It decides how the memory map and the modules are handed over, and it is
+hard to change later.
+
+**Multiboot2 was rejected because it is x86-only.** It has no meaningful
+aarch64 story, and aarch64 is the architecture VerkOS actually runs on. Adopting
+it would give the kernel two different pictures of the world — tags on one
+architecture, a device tree on the other — and that split spreads into every
+driver that needs to know where something is.
+
+**Limine is the best of the ready-made ones** — x86_64, aarch64 and riscv64,
+handing over a memory map, framebuffer, modules and RSDP already prepared. But
+adopting it means our bootloader implements someone else's specification, and
+we would still write our own for anything Limine does not target.
+
+**A device tree was chosen, because it already is a boot protocol** — and a
+better one than most. It carries the memory map, the console, the initrd, the
+command line and every device in the machine. It is not a hand-rolled struct
+but a standard the whole ARM world shares, which means the kernel has exactly
+one way to learn about hardware on every architecture. On x86_64, where
+firmware provides no tree, the loader will build one and hang the ACPI RSDP off
+`/chosen`; the kernel will not know the difference.
+
+vkern uses the standard arm64 `Image` header rather than anything of our own,
+so QEMU's `-kernel`, U-Boot and every ARM bootloader can already start it. That
+is interoperability without implementing anybody's specification.
+
+**The decision that actually prevents lock-in is the separation**, not the
+choice: `bootinfo.h` is what the kernel reads, and a shim fills it in.
+`handover_dtb.c` is the first. Supporting Multiboot2 or Limine later is a new
+file, not a change to the kernel.
+
+One consequence, found while looking: vboot hands over with `LoadImage` and
+`StartImage`, i.e. it treats the kernel as an EFI application, which works for
+Linux because its arm64 Image is also a PE binary with an EFI stub. For vboot
+to start vkern, vkern needs its own stub — or vboot needs a raw-Image path.
+That is the next protocol decision, not this one.
+
+## D-031 — vkern milestone 1: the kernel finds its own hardware
+
+6 591 bytes. It boots under QEMU, reads the device tree it was handed, and
+reports the machine: model, console type and address, CPU count, memory base
+and size, initrd, command line.
+
+Nothing in it is hardcoded. The console driver finds its UART through
+`/chosen/stdout-path`, falling back to searching for a `arm,pl011` or
+`ns16550a` node, and honours `reg-shift` and `reg-io-width` so a board that
+spaces its registers differently still works. Two drivers rather than one on
+purpose: with a single driver it is possible to pretend the register layout is
+universal, and every board that disagrees then costs a rewrite.
+
+Proved by varying the machine rather than by reading the code: 1, 2, 4 and 8
+CPUs; 512 MiB, 1 GiB and 4 GiB of memory; a command line and an initrd passed
+through. Every number followed.
+
+For scale: the Linux kernel this replaces is 36.3 million lines, of which we
+compile 6.8 million and ship 1 298 modules, producing a 46 MB image — to run on
+one machine.
