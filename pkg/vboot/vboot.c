@@ -444,6 +444,169 @@ static int verify_payload(EFI_FILE_PROTOCOL *root, CHAR16 *path,
 }
 
 /* ---- boot ---------------------------------------------------------------- */
+
+/* ---- building a device tree when the firmware has none -------------------
+ *
+ * The asymmetry this solves: aarch64 firmware normally publishes a device tree
+ * in the configuration table, and x86_64 firmware never does — it describes the
+ * machine with ACPI. Without this, the kernel would need two ways to learn
+ * about hardware and every driver would be written twice.
+ *
+ * So vboot builds a tree and installs it under the GUID the firmware would
+ * have used. The kernel looks in exactly one place, on every machine.
+ *
+ * The tree is deliberately thin. It carries what cannot be discovered without
+ * firmware help — where memory is, where the console is, where ACPI's root
+ * pointer is — and nothing else. Everything a driver can probe for itself is
+ * the driver's business.
+ */
+#include "fdtgen.h"
+
+static EFI_GUID acpi20_guid =
+    { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81 } };
+static EFI_GUID dtb_guid =
+    { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83,0x0b,0xd9,0x15,0x2c,0x69,0xaa,0xe0 } };
+
+typedef struct { EFI_GUID VendorGuid; void *VendorTable; } vb_cfg_t;
+typedef EFI_STATUS (EFIAPI *vb_getmmap_t)(UINTN *, void *, UINTN *, UINTN *, UINT32 *);
+typedef EFI_STATUS (EFIAPI *vb_instcfg_t)(EFI_GUID *, void *);
+
+static unsigned char dtb_area[16 * 1024];
+static unsigned char mmap_area[32 * 1024];
+
+static int vb_guid_eq(const EFI_GUID *a, const EFI_GUID *b) {
+    if (a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3) return 0;
+    for (int i = 0; i < 8; i++) if (a->Data4[i] != b->Data4[i]) return 0;
+    return 1;
+}
+
+static void *vb_find_cfg(EFI_GUID *want) {
+    vb_cfg_t *ct = (vb_cfg_t *)ST->ConfigurationTable;
+    for (UINTN i = 0; i < ST->NumberOfTableEntries; i++)
+        if (vb_guid_eq(&ct[i].VendorGuid, want)) return ct[i].VendorTable;
+    return 0;
+}
+
+/* ACPI's SPCR table says where the console serial port is and what kind it is.
+ * That is the only reason we look at ACPI at all here: on a machine described
+ * purely by ACPI there is no other way to find the console, and a kernel with
+ * no console is a kernel that cannot tell you why it stopped. */
+static int vb_spcr(UINT64 *base, const char **compat) {
+    unsigned char *rsdp = vb_find_cfg(&acpi20_guid);
+    if (!rsdp) return 0;
+    UINT64 xsdt = 0;
+    for (int i = 0; i < 8; i++) xsdt |= (UINT64)rsdp[24 + i] << (8 * i);
+    if (!xsdt) return 0;
+    unsigned char *x = (unsigned char *)(UINTN)xsdt;
+    UINT32 len = (UINT32)x[4] | ((UINT32)x[5] << 8) | ((UINT32)x[6] << 16) | ((UINT32)x[7] << 24);
+    if (len < 36) return 0;
+    for (UINT32 o = 36; o + 8 <= len; o += 8) {
+        UINT64 t = 0;
+        for (int i = 0; i < 8; i++) t |= (UINT64)x[o + i] << (8 * i);
+        unsigned char *tab = (unsigned char *)(UINTN)t;
+        if (!tab) continue;
+        if (tab[0] != 'S' || tab[1] != 'P' || tab[2] != 'C' || tab[3] != 'R') continue;
+        unsigned iface = tab[36];
+        unsigned space = tab[40];          /* 0 = memory-mapped, 1 = port I/O */
+        UINT64 addr = 0;
+        for (int i = 0; i < 8; i++) addr |= (UINT64)tab[44 + i] << (8 * i);
+        /* Port I/O cannot be expressed as a device-tree "reg", and pretending
+         * otherwise would give the kernel an address it would happily write
+         * to. x86 will need its console described another way. */
+        if (space != 0 || !addr) return 0;
+        *base = addr;
+        *compat = (iface == 3) ? "arm,pl011" : "ns16550a";
+        return 1;
+    }
+    return 0;
+}
+
+/* The extent of usable RAM, as one range. Deliberately coarse: the UEFI map is
+ * only valid until ExitBootServices, which the kernel calls after we are gone,
+ * so a detailed map baked in here would be describing a machine that no longer
+ * exists. The kernel refines this from the map it takes itself. */
+static int vb_ram_extent(UINT64 *lo, UINT64 *hi) {
+    vb_getmmap_t get = (vb_getmmap_t)BS->GetMemoryMap;
+    UINTN size = sizeof mmap_area, key = 0, dsize = 0; UINT32 dver = 0;
+    if (EFI_ERROR(get(&size, mmap_area, &key, &dsize, &dver)) || !dsize) return 0;
+    UINT64 l = ~0ull, h = 0;
+    for (UINTN o = 0; o + dsize <= size; o += dsize) {
+        unsigned char *d = mmap_area + o;
+        UINT32 type = (UINT32)d[0] | ((UINT32)d[1] << 8) | ((UINT32)d[2] << 16) | ((UINT32)d[3] << 24);
+        UINT64 start = 0, pages = 0;
+        for (int i = 0; i < 8; i++) start |= (UINT64)d[8 + i] << (8 * i);
+        for (int i = 0; i < 8; i++) pages |= (UINT64)d[24 + i] << (8 * i);
+        /* conventional, loader and boot-services memory all become ours */
+        if (type != 1 && type != 2 && type != 3 && type != 4 && type != 7) continue;
+        if (start < l) l = start;
+        if (start + pages * 4096 > h) h = start + pages * 4096;
+    }
+    if (l == ~0ull || h <= l) return 0;
+    *lo = l; *hi = h;
+    return 1;
+}
+
+/* Returns 1 if it installed a tree, 0 if the firmware already had one, -1 on
+ * failure. */
+static int vb_install_dtb(void) {
+    if (vb_find_cfg(&dtb_guid)) return 0;
+
+    UINT64 lo = 0, hi = 0;
+    if (!vb_ram_extent(&lo, &hi)) return -1;
+
+    UINT64 uart = 0; const char *uart_compat = 0;
+    int have_uart = vb_spcr(&uart, &uart_compat);
+
+    fdtgen_t g;
+    fg_init(&g, dtb_area, sizeof dtb_area);
+    fg_node(&g, "");
+        fg_prop_u32(&g, "#address-cells", 2);
+        fg_prop_u32(&g, "#size-cells", 2);
+        fg_prop_str(&g, "model", "VerkOS machine described by vboot");
+        fg_prop_str(&g, "compatible", "verkos,synthetic");
+
+        fg_node(&g, "chosen");
+            void *rsdp = vb_find_cfg(&acpi20_guid);
+            if (rsdp) fg_prop_u64(&g, "verkos,acpi-rsdp", (unsigned long long)(UINTN)rsdp);
+            if (have_uart) {
+                CHAR16 wpath[64]; char path[64]; int n = 0;
+                path[n++] = '/'; 
+                for (const char *q = "serial@"; *q; q++) path[n++] = *q;
+                UINT64 v = uart; char hex[17]; int hn = 0;
+                if (!v) hex[hn++] = '0';
+                while (v) { unsigned d = (unsigned)(v & 15); hex[hn++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; }
+                while (hn--) path[n++] = hex[hn];
+                path[n] = 0; (void)wpath;
+                fg_prop_str(&g, "stdout-path", path);
+            }
+        fg_end_node(&g);
+
+        fg_node(&g, "memory@0");
+            fg_prop_str(&g, "device_type", "memory");
+            fg_prop_reg(&g, (unsigned long long)lo, (unsigned long long)(hi - lo));
+        fg_end_node(&g);
+
+        if (have_uart) {
+            char nodename[64]; int n = 0;
+            for (const char *q = "serial@"; *q; q++) nodename[n++] = *q;
+            UINT64 v = uart; char hex[17]; int hn = 0;
+            if (!v) hex[hn++] = '0';
+            while (v) { unsigned d = (unsigned)(v & 15); hex[hn++] = (char)(d < 10 ? '0'+d : 'a'+d-10); v >>= 4; }
+            while (hn--) nodename[n++] = hex[hn];
+            nodename[n] = 0;
+            fg_node(&g, nodename);
+                fg_prop_str(&g, "compatible", uart_compat);
+                fg_prop_reg(&g, (unsigned long long)uart, 0x1000ull);
+            fg_end_node(&g);
+        }
+    fg_end_node(&g);
+
+    if (!fg_finish(&g)) return -1;
+    vb_instcfg_t inst = (vb_instcfg_t)BS->InstallConfigurationTable;
+    if (EFI_ERROR(inst(&dtb_guid, dtb_area))) return -1;
+    return 1;
+}
+
 static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t *e) {
     EFI_GUID li_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_STATUS st;
@@ -451,6 +614,15 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
     ST->ConOut->ClearScreen(ST->ConOut);
     print(L"\r\n  vboot: "); print(e->title); print(L"\r\n");
     print(L"  [..] loading "); print(e->kernel); print(L"\r\n");
+
+    /* A kernel started here may be ours, which expects a device tree. If the
+     * firmware did not publish one, build it — this is the whole reason vboot
+     * exists on a machine whose firmware could have loaded the kernel itself. */
+    switch (vb_install_dtb()) {
+    case 1:  print(L"  [ok] device tree built and installed (firmware had none)\r\n"); break;
+    case 0:  print(L"  [ok] firmware provides a device tree\r\n"); break;
+    default: print(L"  [!!] could not build a device tree\r\n"); break;
+    }
 
     UINTN ksize = 0;
     void *kbuf = read_file(root, e->kernel, &ksize);

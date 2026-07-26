@@ -1054,3 +1054,48 @@ writes it into `/chosen/bootargs`; UEFI passes it as LoadOptions on the loaded
 image, in UTF-16. The string was there the whole time, in a place nothing was
 reading. The shim now converts it and it overrides the tree, because a loader
 that took the trouble to pass one meant it.
+
+## D-035 — vboot builds the device tree the firmware would not
+
+The asymmetry: aarch64 firmware usually publishes a device tree, and x86_64
+firmware never does — it describes the machine with ACPI. Left alone, that
+gives the kernel two ways to learn about hardware and every driver gets written
+twice.
+
+vboot now builds a tree and installs it under `EFI_DTB_GUID`, the same GUID
+firmware would have used. The kernel looks in exactly one place on every
+machine and cannot tell which happened.
+
+**Proved on aarch64 rather than argued about.** Running AAVMF with ACPI enabled
+puts us in precisely the x86 situation: no tree in the configuration table. On
+that machine vboot distilled the UEFI memory map into a `/memory` node, read
+ACPI's SPCR table to find the console, emitted a matching `serial@9000000` node
+with `compatible = "arm,pl011"`, and installed the result. stam then found its
+console through a tree that did not exist until the loader made one. The same
+code path is what x86_64 will use, so it is tested before the architecture it
+was written for exists.
+
+The tree is deliberately thin: what cannot be discovered without firmware help
+— where memory is, where the console is, where ACPI's root pointer is — and
+nothing more. Anything a driver can probe for itself is the driver's business.
+
+`/memory` is one coarse range on purpose. The UEFI map is only valid until
+ExitBootServices, which the kernel calls *after* vboot is gone, so a detailed
+map baked in here would describe a machine that no longer exists. The kernel is
+meant to refine it from the map it takes itself.
+
+Three things this does not do yet, each reported honestly by the kernel rather
+than papered over:
+
+- **No CPU or interrupt-controller nodes.** Those live in ACPI's MADT, which
+  vboot does not read yet, so stam says `cpus 0` and "no interrupt controller
+  we support, so nothing ticks" — which is true.
+- **Port-I/O consoles are refused.** SPCR can describe a console in I/O space,
+  which is what x86 usually has, and a device-tree `reg` cannot express it.
+  Emitting one anyway would hand the kernel an address it would write to. x86
+  will need its console described another way — the UEFI framebuffer, through
+  the standard `simple-framebuffer` binding, is the obvious candidate.
+- **The page allocator wastes almost all memory under UEFI.** It starts at the
+  end of the kernel image, which firmware places high, so it reported 58 MiB
+  free on a 1 GiB machine. Correct, and nearly useless; the fix is to allocate
+  from the UEFI map's free regions rather than from one bump pointer.
