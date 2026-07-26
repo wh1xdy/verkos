@@ -107,6 +107,23 @@ progs/init.elf: progs/init.c
 # The initrd as every Linux initramfs is: a newc cpio archive, written by
 # VerkOS' own vcpio. Names have no leading slash, which is the convention;
 # stam accepts either when a program asks.
+progs/vsh.elf: progs/vsh.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+# A second archive whose /init is the shell. Kept separate so the automatic
+# demonstration still ends by itself: a shell waits for a person, and a test
+# that waits for a person never finishes.
+progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf
+	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
+	    { echo "vcpio did not build"; exit 1; }
+	@rm -rf progs/sroot && mkdir -p progs/sroot
+	@cp progs/vsh.elf progs/sroot/init
+	@cp progs/hello.elf progs/sroot/hello
+	@cp progs/forky.elf progs/sroot/forky
+	@cp progs/twice.elf progs/sroot/twice
+	( cd progs/sroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
+
 progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
@@ -116,10 +133,18 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf
 	@cp progs/forky.elf progs/root/forky
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
-progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/initrd.cpio
+progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
+       progs/initrd.cpio progs/initrd-shell.cpio
 
 run-prog: stam.img progs/hello.elf
 	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \
 	    -kernel stam.img -initrd progs/hello.elf
 
 .PHONY: progs
+
+# An interactive VerkOS: stam, with a shell as its first program.
+shell: stam.img progs/initrd-shell.cpio
+	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \
+	    -kernel stam.img -initrd progs/initrd-shell.cpio
+
+.PHONY: shell

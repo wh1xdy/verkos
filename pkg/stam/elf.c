@@ -80,7 +80,7 @@ int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out) {
         /* The rest of memsz is already zero: alloc_page clears each page, and
          * that is exactly what .bss requires. */
 
-        kprintf("  [elf] %llu bytes at 0x%llx%s%s\n",
+        if (kchatty()) kprintf("  [elf] %llu bytes at 0x%llx%s%s\n",
                 (unsigned long long)memsz, (unsigned long long)vaddr,
                 (flags & PF_X) ? ", executable" : "",
                 (memsz > filesz) ? ", partly zero-filled" : "");

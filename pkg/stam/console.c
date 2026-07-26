@@ -21,11 +21,14 @@ extern size_t strlen(const char *);
 #define PL011_DR   0x00
 #define PL011_FR   0x18
 #define PL011_FR_TXFF (1u << 5)
+#define PL011_FR_RXFE (1u << 4)     /* receive FIFO empty */
 
 /* 8250/16550 */
 #define UART_THR   0x00
+#define UART_RBR   0x00
 #define UART_LSR   0x05
 #define UART_LSR_THRE (1u << 5)
+#define UART_LSR_DR   (1u << 0)     /* data ready */
 
 /* Qualcomm GENI. Not a UART with registers so much as a programmable serial
  * engine told to behave like one: every character is a transfer that must be
@@ -95,6 +98,36 @@ void kputc(char c) {
 }
 
 void kputs(const char *s) { while (*s) kputc(*s++); }
+
+/* A character if one is waiting, or -1. Deliberately not a blocking read: the
+ * kernel has no business deciding how long a program should wait, and the one
+ * caller that does want to wait can yield between attempts.
+ *
+ * There is no interrupt behind this. A UART interrupt would let a reading
+ * thread genuinely sleep instead of being scheduled only to find nothing; that
+ * is the next thing this file needs, and until it exists a program waiting for
+ * input costs a time slice each time round. Saying so is better than a comment
+ * claiming it blocks. */
+/* Once a person is sitting at the console, the kernel's running commentary is
+ * noise between their prompt and their answer. It stays available — a program
+ * that will not load is exactly when the loader's reasoning is wanted — but it
+ * is off unless asked for. */
+static int chatty = 1;
+void kquiet(int on) { chatty = !on; }
+int  kchatty(void)  { return chatty; }
+
+int kgetc(void) {
+    switch (uart_kind) {
+    case UART_PL011:
+        if (reg_read(PL011_FR) & PL011_FR_RXFE) return -1;
+        return (int)(reg_read(PL011_DR) & 0xff);
+    case UART_8250:
+        if (!(reg_read(UART_LSR) & UART_LSR_DR)) return -1;
+        return (int)(reg_read(UART_RBR) & 0xff);
+    default:
+        return -1;          /* GENI receive is not written yet */
+    }
+}
 
 static void kputu(uint64_t v, unsigned base, int pad) {
     char buf[32]; int n = 0;

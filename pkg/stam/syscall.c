@@ -30,6 +30,7 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_WAIT4  260
 #define SYS_EXECVE 221
 #define SYS_CLONE  220        /* aarch64 Linux has no fork; clone does both */
+#define SYS_READ    63
 #define SYS_WRITE   64
 #define SYS_EXIT    93
 #define SYS_GETPID 172
@@ -117,13 +118,44 @@ static uint64_t do_execve(const char *path, void *frameptr) {
     f->spsr   = 0;                   /* EL0t, interrupts on                    */
     f->sp_el0 = stack_va + PAGE_SIZE;
     for (int i = 0; i < 30; i++) f->x[i] = 0;
-    kprintf("  [kernel] process %llu is now running %s\n",
-            (unsigned long long)thread_current()->id, name);
+    if (kchatty())
+        kprintf("  [kernel] process %llu is now running %s\n",
+                (unsigned long long)thread_current()->id, name);
     return 0;
+}
+
+/* A line from the console, with the editing a person expects: characters are
+ * echoed as they arrive, backspace removes one, and the line is delivered when
+ * Return is pressed. Doing this in the kernel is what a terminal driver is
+ * for — a program should not have to know that a backspace is three bytes to
+ * undo on screen.
+ *
+ * It waits by yielding, because nothing wakes a thread on input yet. */
+static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
+    if (fd != 0) return (uint64_t)-9;                        /* -EBADF */
+    if (!len) return 0;
+    /* Somebody is reading from the console, so somebody is sitting at it. */
+    kquiet(1);
+    char *out = (char *)(uintptr_t)buf;
+    uint64_t n = 0;
+    for (;;) {
+        int c = kgetc();
+        if (c < 0) { thread_yield(); continue; }
+        if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return n; }
+        if (c == 0x7f || c == 8) {           /* backspace */
+            if (n) { n--; kputs("\b \b"); }
+            continue;
+        }
+        if (c < 32 || c > 126) continue;     /* ignore what we cannot show */
+        if (n + 1 >= len) continue;          /* full: stop accepting, keep the line */
+        kputc((char)c);
+        out[n++] = (char)c;
+    }
 }
 
 static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void *frame) {
     switch (nr) {
+    case SYS_READ:  return sys_read(a, b, c);
     case SYS_CLONE:  return do_fork(frame);
     case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a, frame);
     case SYS_WRITE:  return sys_write(a, b, c);

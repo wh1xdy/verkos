@@ -1600,3 +1600,42 @@ waits for a child it never had should be told so.
 
 Still open, and still named rather than hidden: `argv` is ignored, and there is
 no way to read from the console, which is what a shell would need.
+
+## D-049 — A shell, which is the point of all of it
+
+`vsh` prints a prompt, reads a line, and if the line names a program, forks,
+lets the child become it, and waits. That is what every shell has done since the
+sixth edition, and everything it needs from stam already existed: read, write,
+fork, execve, wait4, exit.
+
+**That is the evidence, not the shell itself.** A shell is not a feature of a
+kernel; it is a program like any other, and being able to write it as one —
+with no privileges, no special calls, nothing the kernel knows about it — is
+what shows the interface underneath is real rather than a demonstration.
+
+Reading required the console to work in the other direction, and a line
+discipline: characters echoed as they arrive, backspace removing one, the line
+delivered on Return. That belongs in the kernel because it is what a terminal
+driver is for. A program should not have to know that undoing a backspace on
+screen takes three bytes.
+
+**`read` waits by yielding**, because nothing wakes a thread on input. A UART
+interrupt would let a reader genuinely sleep instead of being scheduled only to
+find nothing there; until it exists, a program waiting for input costs a time
+slice each time round. That is written in the code where the loop is, rather
+than left for someone to discover.
+
+One thing came out of using it rather than building it: the kernel's running
+commentary — every segment loaded, every exec — sat between the prompt and the
+answer. It is off as soon as anything reads from the console, on the reasoning
+that somebody reading is somebody sitting there. It stays available, because a
+program that will not load is exactly when the loader's reasoning is wanted.
+
+A shell running a program that itself forks, on a kernel that is a day old:
+
+    verk$ forky
+      [parent] I am process 7 and my variable says 100
+      [child]  I am process 8 and my variable says 222
+
+Still missing, and named: argv, pipes, redirection, and any filesystem that is
+not the initrd.
