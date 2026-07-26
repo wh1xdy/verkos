@@ -12,10 +12,23 @@
 #include "mmu.h"
 #include "gic.h"
 #include "timer.h"
+#include "sched.h"
 
 #define STAM_VERSION "0.1"
 
 static boot_info_t boot;
+
+/* The demonstration. These loops never yield, never sleep and never call into
+ * the kernel — if they all make progress, it is because the timer took the CPU
+ * away from each of them in turn. A cooperative scheduler would show one
+ * counter rising and two at zero. */
+static volatile uint64_t work[3];
+static volatile int stop_work;
+
+static void worker(void *arg) {
+    unsigned long id = (unsigned long)(uintptr_t)arg;
+    while (!stop_work) work[id]++;
+}
 
 /* Report in MiB up to 8 GiB: "1 GiB" for 1.9 GiB of free memory is true but
  * useless, and the rounding hides half a gigabyte. */
@@ -84,6 +97,31 @@ void kmain(void *dtb) {
                 (unsigned long long)timer_ticks());
     }
 
+    if (ticking) {
+        sched_init("boot");
+        thread_create("worker-a", worker, (void *)(uintptr_t)0);
+        thread_create("worker-b", worker, (void *)(uintptr_t)1);
+        thread_create("worker-c", worker, (void *)(uintptr_t)2);
+        kprintf("  threads   %llu, none of which ever yields\n",
+                (unsigned long long)thread_count());
+
+        uint64_t until = timer_ticks() + timer_hz() * 2;
+        while (timer_ticks() < until) __asm__ volatile("wfi");
+        stop_work = 1;
+        while (threads_alive() > 1) thread_yield();
+
+        kprintf("\n  after two seconds of everyone refusing to give way:\n");
+        for (int i = 0; i < thread_count(); i++) {
+            thread_t *t = thread_at(i);
+            kprintf("    %s%s  scheduled %llu times", t->name,
+                    t->id == 0 ? "     " : "  ", (unsigned long long)t->slices);
+            if (t->id > 0)
+                kprintf(", counted to %llu", (unsigned long long)work[t->id - 1]);
+            kprintf("\n");
+        }
+        kprintf("\n  every thread ran: the kernel takes the CPU back.\n");
+    }
+
     /* Prove the fault path works, on request. A handler that has never run is
      * a handler you find out about at the worst moment. */
     if (boot.cmdline) {
@@ -107,11 +145,11 @@ void kmain(void *dtb) {
      * support and where the timer never started — a summary that lies is
      * worse than no summary, because it is believed. */
     if (ticking)
-        kprintf("  milestone 2: hardware found, faults reported, memory mapped, time running.\n");
+        kprintf("  milestone 3: threads, preempted by the timer.\n");
     else
-        kprintf("  milestone 2 partly: memory mapped and faults reported, but this\n"
+        kprintf("  milestone 2 only: memory mapped and faults reported, but this\n"
                 "  machine has no interrupt controller we support, so nothing ticks.\n");
-    kprintf("  no scheduler and no userspace yet.\n");
+    kprintf("  no userspace yet.\n");
     kprintf("\n");
 
     for (;;) __asm__ volatile("wfe");

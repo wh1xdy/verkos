@@ -37,6 +37,15 @@ SECTIONS
     . = ALIGN(0x1000);
   }
   . = ALIGN(0x1000);
+  /* The kernel needs to know where its own image ends. Here that is an offset
+   * from ImageBase 0, not a runtime address — UEFI loads us wherever it likes
+   * and nothing rewrites this. That is safe only because pmm_init asks whether
+   * the image actually falls inside the memory region it was handed, and an
+   * offset of a few tens of kilobytes never falls inside a region that starts
+   * at a gigabyte. HIDDEN so referencing it does not go through the GOT. */
+  HIDDEN(_kernel_end = .);
+
+  . = ALIGN(0x1000);
   .reloc : { *(.reloc) }
 
   /* Dynamic-linking metadata must be kept OUT of .data. We only link -shared to

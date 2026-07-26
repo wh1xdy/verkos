@@ -1138,3 +1138,57 @@ byte order or a block offset would show up only as a kernel that works on some
 machines. `make test` now builds a tree with one and reads it back with the
 other, checking cells, strings, paths, `compatible` lookup and two `reg`
 ranges. 140 → 141 checks.
+
+## D-037 — stam milestone 3: threads the timer takes the CPU from
+
+Round robin, one queue, no priorities. That is not a placeholder for something
+cleverer so much as the honest shape of the problem: every thread here is kernel
+code we wrote, and there is nothing yet to be unfair to. Priorities become
+meaningful when threads belong to different people.
+
+What matters is that the switch happens *from the timer interrupt*, without the
+running thread agreeing. The demonstration is three threads in tight counting
+loops that never yield, never sleep and never call into the kernel. After two
+seconds each had been scheduled 51 times — exactly evenly — and each had counted
+to roughly three hundred million. A cooperative scheduler would show one counter
+rising and two at zero.
+
+Two ordering details that would each have produced a machine that schedules once
+and then stops:
+
+- **EOI before the switch.** Telling the interrupt controller we are finished
+  has to happen before changing threads, or the interrupt stays active while
+  another thread runs and that thread can never be interrupted in turn.
+- **The trampoline unmasks interrupts.** A thread is first resumed from inside
+  the timer interrupt, where the hardware masked them on entry. Without
+  `msr daifclr, #2` the first thread would run with interrupts masked forever.
+
+### The bug worth the whole entry
+
+The scheduler worked immediately on the raw-Image path and faulted on the UEFI
+path, with an instruction abort at `0x193c` — an address suspiciously close to
+zero.
+
+`0x193c` was `thread_trampoline`'s **link-time** address. This kernel is built
+position-independent and **nothing applies relocations to it**, so anything that
+ends up in a GOT entry or a statically initialised pointer holds the address the
+image had when linked, not where UEFI actually loaded it.
+
+Three separate things fell out of that one cause, and each needed its own fix:
+
+1. `static const char *const kind_name[16]` — a table of string pointers is data
+   full of link-time addresses. It is now a `switch`, which materialises each
+   address PC-relative. This is why the exception report printed an *empty
+   description of itself*, which was the first clue.
+2. `-fvisibility=hidden` for the C sources, `.hidden` for the assembly symbols
+   and `HIDDEN()` for the linker-script symbol, so referencing them does not go
+   through the GOT at all.
+3. Even hidden and local, taking `&thread_trampoline` from C still produced a
+   GOT entry. Rather than keep negotiating with the compiler, the address is now
+   computed in assembly with `adrp`/`add` by a two-instruction function. It
+   cannot be wrong.
+
+`make test` now asserts the invariant directly: **stam.efi must need zero
+relocations.** That check is what keeps the other three fixes honest, because
+any future one of them silently regressing looks exactly like this did — a
+kernel that boots one way and not the other.

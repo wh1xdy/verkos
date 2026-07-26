@@ -10,7 +10,7 @@ CFLAGS   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
            -fno-pic -fno-pie -O2 -Wall -Wextra -std=c11 -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o main.o
 
 all: stam.img
 
@@ -45,16 +45,22 @@ clean:
 # and every message the firmware prints is garbage.
 # -Bsymbolic at link time: without it an ADRP against a global in our own
 # assembly is treated as possibly-external and the link fails.
+# -fvisibility=hidden: without it, taking the address of one of our own
+# functions goes through the GOT, whose entries hold link-time addresses and
+# are never relocated because nothing here processes relocations. The kernel
+# then branches to where it used to live. Hidden symbols are addressed
+# PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
-             -fshort-wchar -fpic -fno-jump-tables -O2 -Wall -std=c11 -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c main.c exceptions.c
-EFI_ASM    = vectors.S
+             -fshort-wchar -fpic -fno-jump-tables -fvisibility=hidden \
+             -O2 -Wall -std=c11 -I../vboot
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c main.c exceptions.c
+EFI_ASM    = vectors.S switch.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
-	$(CC) $(EFI_CFLAGS) -c $(EFI_ASM) -o efi-vectors.o
+	@for a in $(EFI_ASM); do $(CC) $(EFI_CFLAGS) -c $$a -o efi-$${a%.S}.o || exit 1; done
 	@for s in $(EFI_SRCS); do $(CC) $(EFI_CFLAGS) -c $$s -o efi-$${s%.c}.o || exit 1; done
 	ld -nostdlib -znocombreloc -shared -Bsymbolic -T stam-efi.lds \
-	    efi-vectors.o $(patsubst %.c,efi-%.o,$(EFI_SRCS)) -o stam-efi.so
+	    $(patsubst %.S,efi-%.o,$(EFI_ASM)) $(patsubst %.c,efi-%.o,$(EFI_SRCS)) -o stam-efi.so
 	$(OBJCOPY) -j .text -j .data -j .reloc --target efi-app-aarch64 \
 	    --subsystem=10 --file-alignment 0x1000 --section-alignment 0x1000 \
 	    stam-efi.so $@

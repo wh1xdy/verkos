@@ -84,6 +84,7 @@
     .section .text
     .align 11                      /* VBAR_EL1 needs 2 KiB alignment */
     .global vector_table
+    .hidden vector_table
 vector_table:
     /* From EL1 with SP_EL0 — we never run this way, so any arrival is a bug. */
     .align 7 ; FATAL 0
@@ -110,6 +111,7 @@ vector_table:
     .align 7 ; FATAL 15
 
     .global exceptions_install
+    .hidden exceptions_install
 exceptions_install:
     adrp    x0, vector_table
     add     x0, x0, :lo12:vector_table

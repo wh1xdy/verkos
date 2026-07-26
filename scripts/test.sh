@@ -625,6 +625,19 @@ if [ -f "pkg/stam/Makefile" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&
             else
                 bad "stam.efi is not a PE image (no MZ)"
             fi
+            # Nothing applies relocations to this image, so it must not need
+            # any. One left behind is a pointer holding a link-time address —
+            # the kernel then jumps to where it used to live, which under UEFI
+            # is unmapped or non-executable. It presents as an instruction
+            # abort at a suspiciously small address.
+            if [ -f pkg/stam/stam-efi.so ]; then
+                nrel=$(readelf -r pkg/stam/stam-efi.so 2>/dev/null | grep -cE '^0000' || true)
+                if [ "${nrel:-0}" -eq 0 ]; then
+                    ok "stam.efi needs no relocations"
+                else
+                    bad "stam.efi has $nrel relocation(s) nothing will apply"
+                fi
+            fi
         else
             bad "stam does not build as a UEFI application"
         fi

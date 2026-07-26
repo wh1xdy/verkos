@@ -14,7 +14,10 @@
 #include "mmu.h"
 #include "console.h"
 
-extern char _kernel_end[];
+/* Hidden, for the same reason the assembly symbols are: a linker-script symbol
+ * referenced from position-independent code is otherwise fetched through the
+ * GOT, and the GOT is not relocated. */
+extern char _kernel_end[] __attribute__((visibility("hidden")));
 
 /* ---- physical pages ---------------------------------------------------- */
 /* A bump allocator. It cannot free, which is exactly right for page tables
@@ -44,6 +47,20 @@ void *alloc_page(void) {
     free_next += PAGE_SIZE;
     pages_taken++;
     for (unsigned i = 0; i < PAGE_SIZE / 8; i++) ((volatile uint64_t *)(uintptr_t)p)[i] = 0;
+    return (void *)(uintptr_t)p;
+}
+
+/* Contiguous by construction — the allocator only ever bumps forward — but
+ * taking them in one call says so, instead of leaving the next reader to work
+ * out whether two alloc_page() calls may be assumed adjacent. */
+void *alloc_pages(unsigned n) {
+    if (!n) return 0;
+    if (free_next + (uint64_t)n * PAGE_SIZE > free_top) return 0;
+    uint64_t p = free_next;
+    free_next += (uint64_t)n * PAGE_SIZE;
+    pages_taken += n;
+    for (uint64_t i = 0; i < (uint64_t)n * PAGE_SIZE / 8; i++)
+        ((volatile uint64_t *)(uintptr_t)p)[i] = 0;
     return (void *)(uintptr_t)p;
 }
 

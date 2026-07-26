@@ -14,6 +14,7 @@
 #include "gic.h"
 #include "console.h"
 #include "fdt.h"
+#include "sched.h"
 
 /* Distributor */
 #define GICD_CTLR         0x000
@@ -108,5 +109,10 @@ void irq_dispatch(void) {
     unsigned id = iar & 0x3ff;
     if (id == 1023) return;                  /* spurious */
     if ((int)id == timer_intid) timer_tick();
+    /* Tell the controller we are done *before* switching threads. Otherwise
+     * the interrupt stays active while another thread runs, and that thread
+     * can never be interrupted in turn — the machine would appear to schedule
+     * exactly once and then stop. */
     wr(gicc, GICC_EOIR, iar);
+    if ((int)id == timer_intid) schedule();
 }

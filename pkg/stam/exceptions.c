@@ -15,13 +15,33 @@ typedef struct {
     uint64_t spsr;     /* processor state at that moment   */
 } regs_t;
 
-static const char *const kind_name[16] = {
-    "synchronous (EL1t)", "IRQ (EL1t)", "FIQ (EL1t)", "SError (EL1t)",
-    "synchronous (kernel)", "IRQ (kernel)", "FIQ (kernel)", "SError (kernel)",
-    "synchronous (user)", "IRQ (user)", "FIQ (user)", "SError (user)",
-    "synchronous (32-bit user)", "IRQ (32-bit user)", "FIQ (32-bit user)",
-    "SError (32-bit user)",
-};
+/* A switch and not an array of pointers, deliberately. An initialised table of
+ * string pointers is data holding link-time addresses, and it needs a runtime
+ * relocation to be correct anywhere else. Nothing applies relocations to this
+ * kernel when UEFI loads it at whatever address it likes, so such a table reads
+ * as garbage — which is how this was found: an exception report that printed an
+ * empty description of itself. A switch materialises each address with a
+ * PC-relative instruction instead, which is right wherever the code lands. */
+static const char *kind_name(unsigned k) {
+    switch (k & 15) {
+    case 0:  return "synchronous (EL1t)";
+    case 1:  return "IRQ (EL1t)";
+    case 2:  return "FIQ (EL1t)";
+    case 3:  return "SError (EL1t)";
+    case 4:  return "synchronous (kernel)";
+    case 5:  return "IRQ (kernel)";
+    case 6:  return "FIQ (kernel)";
+    case 7:  return "SError (kernel)";
+    case 8:  return "synchronous (user)";
+    case 9:  return "IRQ (user)";
+    case 10: return "FIQ (user)";
+    case 11: return "SError (user)";
+    case 12: return "synchronous (32-bit user)";
+    case 13: return "IRQ (32-bit user)";
+    case 14: return "FIQ (32-bit user)";
+    default: return "SError (32-bit user)";
+    }
+}
 
 /* ESR_EL1's exception class — the top six bits — says what kind of fault it
  * was. Naming the common ones turns a hex number into a sentence. */
@@ -60,7 +80,7 @@ void exception_fatal(unsigned long kind, regs_t *r) {
 
     kprintf("\n");
     kprintf("  ---- stam: unhandled exception ----\n");
-    kprintf("  kind      %s\n", kind_name[kind & 15]);
+    kprintf("  kind      %s\n", kind_name((unsigned)kind));
     kprintf("  cause     %s (EC 0x%llx)\n", ec_name(ec), (unsigned long long)ec);
     if (ec == 0x24 || ec == 0x25 || ec == 0x20 || ec == 0x21) {
         const char *why = fault_reason((unsigned)esr);

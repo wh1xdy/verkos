@@ -5,6 +5,7 @@
 
 void     pmm_init(uint64_t ram_base, uint64_t ram_size, uint64_t avoid, uint64_t avoid_size);
 void    *alloc_page(void);
+void    *alloc_pages(unsigned n);
 unsigned pmm_pages_used(void);
 uint64_t pmm_free_bytes(void);
 
