@@ -52,6 +52,13 @@ build_kernel() {
                      --enable CRYPTO_XTS --enable CRYPTO_AES \
                      --enable CRYPTO_SHA256 --enable CRYPTO_SHA512 \
                      --enable CRYPTO_USER_API_SKCIPHER --enable CRYPTO_USER_API_HASH
+    # A live ISO: the kernel must be able to mount the medium it booted from,
+    # and stack a writable layer over it. Both built in, not modules — there is
+    # no module loader in the initramfs, and these are needed before the root
+    # exists. Rock Ridge is not a separate symbol (fs/isofs builds rock.o
+    # unconditionally), and Joliet/zisofs are not needed for an ISO whose only
+    # entries are three uppercase 8.3 names.
+    ./scripts/config --enable ISO9660_FS --enable OVERLAY_FS
     make olddefconfig
 
     make -j"$JOBS"

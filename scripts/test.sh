@@ -27,7 +27,7 @@ for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcp
            pkg/vgzip/vgzip.c pkg/vbzip2/vbzip2.c pkg/vtar/vtar.c pkg/vsed/vsed.c \
            pkg/vawk/vawk.c pkg/vpager/vpager.c pkg/vboot/vsign.c \
            pkg/verkmod/verkmod.c pkg/vlogin/vlogin.c pkg/vmkfs/vmkfs.c \
-           pkg/vinstall/vinstall.c pkg/vhex/vhex.c pkg/vtree/vtree.c \
+           pkg/vinstall/vinstall.c pkg/viso/viso.c pkg/vhex/vhex.c pkg/vtree/vtree.c \
            pkg/vdate/vdate.c pkg/vxargs/vxargs.c pkg/vip/vip.c; do
     name=$(basename "$src" .c)
     extra=""
@@ -355,6 +355,46 @@ if [ -x "$T/vtar" ]; then
     check "vtar rejects random bytes"            "! '$T/vtar' -xf '$T/rand.bin' 2>/dev/null"
     check "vtar rejects a gzip that is not a tar" "! '$T/vtar' -xf '$T/plain.gz' 2>/dev/null"
 else bad "vtar does not compile"; fi
+
+say "viso writes an ISO that boots"
+# The one field where a mistake is silent is the El Torito validation entry's
+# checksum: all sixteen little-endian 16-bit words must sum to zero, and
+# firmware that dislikes it simply declines to boot with no diagnostic. Note
+# that xorriso's -report_el_torito does NOT check this — it reports a corrupted
+# catalogue as if it were fine — so the invariant is asserted directly.
+if [ -x "$T/viso" ] && [ -x "$T/vmkfs" ]; then
+    truncate -s 40M "$T/esp.iso.img" 2>/dev/null || dd if=/dev/zero of="$T/esp.iso.img" bs=1M count=40 status=none
+    "$T/vmkfs" -n VERKESP "$T/esp.iso.img" 2>/dev/null
+    printf 'payload\n' > "$T/payload.img"
+    if "$T/viso" -V VERKLIVE -e "$T/esp.iso.img" -o "$T/t.iso" "$T/esp.iso.img" "$T/payload.img" 2>/dev/null; then
+        check "viso writes something file(1) calls a bootable ISO 9660" \
+              "file '$T/t.iso' | grep -q 'ISO 9660'"
+        # the checksum invariant, and that the check can fail
+        cat > "$T/eltorito.py" <<'PYEOF'
+import sys
+data = open(sys.argv[1], "rb").read()
+cat = data[19*2048:19*2048+64]
+total = sum(cat[i] | (cat[i+1] << 8) for i in range(0, 32, 2)) & 0xffff
+ok = (cat[0] == 0x01 and cat[1] == 0xEF and cat[30] == 0x55 and cat[31] == 0xAA
+      and total == 0 and cat[32] == 0x88 and cat[33] == 0x00)
+sys.exit(0 if ok else 1)
+PYEOF
+        if command -v python3 >/dev/null 2>&1; then
+            check "viso's El Torito entry is valid (UEFI, no emulation, checksum sums to zero)" \
+                  "python3 '$T/eltorito.py' '$T/t.iso'"
+            cp "$T/t.iso" "$T/bad.iso"
+            printf '\000\000' | dd of="$T/bad.iso" bs=1 seek=$((19*2048+28)) conv=notrunc 2>/dev/null
+            check "and that check actually fails on a corrupted catalogue" \
+                  "! python3 '$T/eltorito.py' '$T/bad.iso'"
+        fi
+        if command -v xorriso >/dev/null 2>&1; then
+            check "xorriso recognises the boot record" \
+                  "xorriso -indev '$T/t.iso' -report_el_torito plain 2>&1 | grep -q 'El Torito boot img'"
+        fi
+    else bad "viso could not write an image"; fi
+else
+    printf '  \033[33mskip\033[0m  viso (needs viso and vmkfs)\n'
+fi
 
 say "vmkfs makes a filesystem the world agrees is FAT32"
 # The judge here is deliberately not us: fsck.fat and blkid are the tools that
