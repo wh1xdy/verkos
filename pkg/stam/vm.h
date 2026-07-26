@@ -5,4 +5,5 @@
 int map_user_page(uint64_t va, uint64_t page, int executable);
 uint64_t vm_new_space(void);
 uint64_t vm_copy_space(uint64_t src_l1_kva);
+void     vm_free_space(uint64_t l1_kva);
 #endif

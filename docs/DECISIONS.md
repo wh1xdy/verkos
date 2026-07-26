@@ -1570,3 +1570,33 @@ moment when the process it belongs to is no longer the one installed.
 There is no `wait()`, so `init` spins instead of blocking — the next system call
 to write. `exec` does not reclaim the old address space; nothing frees pages
 yet, which is a real leak. And `argv` is ignored.
+
+## D-048 — wait(), and giving memory back
+
+Two of the three gaps named in D-047 are closed.
+
+**Pages can be returned.** The allocator could only ever hand memory out, which
+was fine while nothing ever finished. Freed pages now go on a list threaded
+through themselves — the first eight bytes of a free page hold the address of
+the next — which costs nothing and needs no separate bookkeeping, and that
+matters when the bookkeeping would itself require pages. A process that exits
+gives back every page of its address space, tables included: 50 pages from one
+`fork`/`exec`/`exit`.
+
+Only the low half is walked. The kernel's mappings are in TTBR1 and are not a
+process's to release. Nothing is shared, because `vm_copy_space` copies outright
+— which will stop being true the day copy-on-write arrives, and `vm_free_space`
+is the function that will have to learn about reference counts.
+
+**A finished process is a zombie until someone looks at it.** It keeps its exit
+status, because a parent may ask, and its kernel stack, because it is standing
+on it. Both are released by whoever collects it. Nobody frees themselves.
+
+`wait4` blocks rather than spins, and the difference is visible from outside: a
+spinning parent burns every slice it is given, a blocked one is not scheduled at
+all until its child is gone. Waiting with no children returns `-ECHILD` instead
+of blocking forever — a distinction worth the extra line, because a program that
+waits for a child it never had should be told so.
+
+Still open, and still named rather than hidden: `argv` is ignored, and there is
+no way to read from the console, which is what a shell would need.

@@ -56,7 +56,31 @@ void pmm_init(uint64_t ram_base, uint64_t ram_size, uint64_t avoid, uint64_t avo
     free_top  = ram_base + ram_size;
 }
 
+/* Pages that have been given back, threaded through themselves: the first
+ * eight bytes of a free page hold the address of the next one. It costs
+ * nothing and needs no separate bookkeeping, which matters when the thing
+ * doing the bookkeeping would itself need pages. */
+static uint64_t free_list;
+static unsigned pages_returned;
+
+void free_page(void *p) {
+    if (!p) return;
+    uint64_t *page = p;
+    *page = free_list;
+    free_list = (uint64_t)(uintptr_t)p;
+    pages_returned++;
+}
+
+unsigned pmm_pages_free_listed(void) { return pages_returned; }
+
 void *alloc_page(void) {
+    if (free_list) {
+        uint64_t *page = (uint64_t *)(uintptr_t)free_list;
+        free_list = *page;
+        pages_returned--;
+        for (unsigned i = 0; i < PAGE_SIZE / 8; i++) page[i] = 0;
+        return page;
+    }
     if (free_next + PAGE_SIZE > free_top) return 0;
     uint64_t p = free_next;
     free_next += PAGE_SIZE;

@@ -161,3 +161,30 @@ uint64_t vm_copy_space(uint64_t src_l1_kva) {
     mmu_set_current_user_table_kva(saved);
     return dst_l1;
 }
+
+/* Give an address space back, page by page, tables included.
+ *
+ * Only the low half is walked: the kernel's mappings live in TTBR1 and are not
+ * this process's to release. Nothing here is shared — vm_copy_space copies
+ * outright rather than sharing — so every page reached is genuinely ours.
+ * That would stop being true the day copy-on-write arrives, and this is the
+ * function that would have to learn about reference counts.
+ */
+void vm_free_space(uint64_t l1_kva) {
+    if (!l1_kva) return;
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_kva;
+    for (unsigned i1 = 0; i1 < 512; i1++) {
+        if ((l1[i1] & 0x3ul) != D_TABLE) continue;
+        uint64_t *l2 = table_at(l1[i1]);
+        for (unsigned i2 = 0; i2 < 512; i2++) {
+            if ((l2[i2] & 0x3ul) != D_TABLE) continue;
+            uint64_t *l3 = table_at(l2[i2]);
+            for (unsigned i3 = 0; i3 < 512; i3++)
+                if ((l3[i3] & 0x3ul) == D_PAGE)
+                    free_page((void *)(uintptr_t)phys_to_kva(l3[i3] & ADDR_MASK));
+            free_page(l3);
+        }
+        free_page(l2);
+    }
+    free_page(l1);
+}

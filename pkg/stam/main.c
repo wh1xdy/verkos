@@ -244,6 +244,8 @@ void kmain_high(void) {
             thread_create("initrd", initrd_program, 0);
             while (threads_alive() > 1) thread_yield();
             kprintf("  it ran and exited. yes.\n");
+            kprintf("  memory returned to the free list: %llu pages\n",
+                    (unsigned long long)pmm_pages_free_listed());
         } else {
             kprintf("  no initrd was handed to us, so there is nothing to run.\n");
         }

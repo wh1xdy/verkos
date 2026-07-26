@@ -13,8 +13,10 @@
  */
 #include "sched.h"
 #include "mmu.h"
+#include "vm.h"
 #include "console.h"
 #include "mmu.h"
+#include "vm.h"
 
 extern void cpu_switch(uint64_t *save_sp_here, uint64_t resume_sp);
 extern uint64_t thread_entry_point(void);
@@ -45,6 +47,8 @@ thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
     t->state = THREAD_RUNNABLE;
     t->slices = 0;
     t->space = 0;
+    t->parent = current ? current->id : -1;
+    t->status = 0;
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -80,6 +84,8 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
     t->state = THREAD_RUNNABLE;
     t->slices = 0;
     t->space = space;
+    t->parent = current ? current->id : -1;
+    t->status = 0;
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -107,6 +113,8 @@ void sched_init(const char *name) {
     t->state = THREAD_RUNNABLE;
     t->slices = 0;
     t->space = 0;
+    t->parent = -1;
+    t->status = 0;
     t->sp = 0;
     t->stack_low = 0;
     current = t;
@@ -140,14 +148,53 @@ void schedule(void) {
 
 void thread_yield(void) { schedule(); }
 
-void thread_exit(void) {
-    current->state = THREAD_FINISHED;
-    for (;;) schedule();     /* never picked again; schedule() moves on */
+/* A process that has finished still holds its exit status and its stack — the
+ * status because a parent may ask for it, the stack because we are standing on
+ * it. Both are released by whoever collects it. Nobody frees themselves. */
+void thread_exit(int status) {
+    current->state = THREAD_ZOMBIE;
+    current->status = status;
+    /* Its address space is nobody's now; the stack is not, yet. */
+    if (current->space) { vm_free_space(current->space); current->space = 0; }
+    /* Wake a parent that is waiting for exactly this. */
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].id == current->parent && threads[i].state == THREAD_BLOCKED)
+            threads[i].state = THREAD_RUNNABLE;
+    for (;;) schedule();
 }
 
+/* Collect a finished child. Blocks if one is still running, returns -1 if
+ * there was never a child to wait for — the distinction matters, because a
+ * program that waits with no children should be told so rather than hang. */
+int thread_wait(int *status_out) {
+    for (;;) {
+        int have_children = 0;
+        for (int i = 0; i < n_threads; i++) {
+            if (threads[i].parent != current->id) continue;
+            if (threads[i].state == THREAD_ZOMBIE) {
+                int id = threads[i].id;
+                if (status_out) *status_out = threads[i].status;
+                if (threads[i].stack_low) {
+                    for (unsigned p = 0; p < STACK_PAGES; p++)
+                        free_page((void *)(uintptr_t)(threads[i].stack_low + p * PAGE_SIZE));
+                    threads[i].stack_low = 0;
+                }
+                threads[i].state = THREAD_FREE;
+                return id;
+            }
+            if (threads[i].state != THREAD_FREE) have_children = 1;
+        }
+        if (!have_children) return -1;
+        current->state = THREAD_BLOCKED;
+        schedule();
+    }
+}
+
+/* Anything not yet collected still counts: a zombie has finished running but
+ * the process is not gone until someone has looked at why it stopped. */
 int threads_alive(void) {
     int n = 0;
     for (int i = 0; i < n_threads; i++)
-        if (threads[i].state == THREAD_RUNNABLE) n++;
+        if (threads[i].state == THREAD_RUNNABLE || threads[i].state == THREAD_BLOCKED) n++;
     return n;
 }

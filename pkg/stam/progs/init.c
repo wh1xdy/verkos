@@ -1,9 +1,9 @@
-/* The first program, and the shape every Unix has used since: fork, then let
- * the child become something else while the parent waits.
+/* The first program, and the shape every Unix has used since: fork, let the
+ * child become something else, and wait for it.
  *
- * There is no wait() yet, so the parent spins instead of blocking. That is the
- * next system call to write, and pretending otherwise would be worse than
- * saying so.
+ * The parent now blocks in wait4 rather than spinning. The difference is
+ * visible from the outside: a spinning parent burns every time slice it is
+ * given, a blocked one is not scheduled at all until its child is gone.
  */
 static long syscall3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
@@ -17,6 +17,7 @@ static long write_(const char *s, unsigned long n) { return syscall3(64, 1, (lon
 static long getpid(void) { return syscall3(172, 0, 0, 0); }
 static long fork_(void)  { return syscall3(220, 0, 0, 0); }
 static long exec_(const char *p) { return syscall3(221, (long)p, 0, 0); }
+static long wait_(int *status)    { return syscall3(260, -1, (long)status, 0); }
 static void exit_(int c) { syscall3(93, c, 0, 0); __builtin_unreachable(); }
 static unsigned long slen(const char *s) { unsigned long n = 0; while (s[n]) n++; return n; }
 static void say(const char *s) { write_(s, slen(s)); }
@@ -40,8 +41,18 @@ void _start(void) {
         exit_(1);
     }
 
-    say("  [init] forked "); say_num(child); say("; waiting for it the crude way\n");
-    for (volatile long n = 0; n < 40000000; n++) { }
-    say("  [init] still here, still process "); say_num(getpid()); say("\n");
+    say("  [init] forked "); say_num(child); say(", now waiting for it\n");
+
+    int status = 0;
+    long done = wait_(&status);
+    say("  [init] process "); say_num(done);
+    say(" finished with status "); say_num((status >> 8) & 0xff); say("\n");
+
+    /* A second wait must say there is nobody left rather than block forever. */
+    long none = wait_(&status);
+    if (none < 0) say("  [init] no children left, and wait said so\n");
+    else          say("  [init] wait invented a child\n");
+
+    say("  [init] still process "); say_num(getpid()); say(", exiting\n");
     exit_(0);
 }

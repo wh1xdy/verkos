@@ -27,6 +27,7 @@ typedef struct {
 
 extern void exception_report(unsigned long kind, regs_t *r);
 
+#define SYS_WAIT4  260
 #define SYS_EXECVE 221
 #define SYS_CLONE  220        /* aarch64 Linux has no fork; clone does both */
 #define SYS_WRITE   64
@@ -127,10 +128,16 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
     case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a, frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
+    case SYS_WAIT4: {
+        int st = 0;
+        int id = thread_wait(&st);
+        if (id < 0) return (uint64_t)-10;                    /* -ECHILD */
+        /* Linux packs the status; a plain exit code sits in the second byte. */
+        if (b) *(int *)(uintptr_t)b = (st & 0xff) << 8;
+        return (uint64_t)id;
+    }
     case SYS_EXIT:
-        kprintf("  [kernel] the program exited with status %llu\n",
-                (unsigned long long)a);
-        thread_exit();                       /* does not return */
+        thread_exit((int)a);                 /* does not return */
         return 0;
     default:
         kprintf("  [kernel] unknown system call %llu — returning -ENOSYS\n",
@@ -153,7 +160,7 @@ void handle_user_sync(regs_t *r) {
      * down by being wrong, only itself. */
     exception_report(8, r);
     kprintf("  [kernel] killing the program; the kernel continues.\n");
-    thread_exit();
+    thread_exit(-1);
 }
 
 /* Drop to EL0 and start running. SPSR of zero means: exception level 0, using

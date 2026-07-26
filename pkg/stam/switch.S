@@ -65,6 +65,7 @@ thread_trampoline:
     msr     daifclr, #2
     mov     x0, x20
     blr     x19
+    mov     x0, #0
     bl      thread_exit
     b       .
 
