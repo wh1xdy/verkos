@@ -289,11 +289,20 @@ if [ -x "$T/vcpio" ]; then
     mkdir -p "$T/cp/dest"
     check "vcpio refuses an entry that climbs out with .." \
           "! ( cd '$T/cp/dest' && '$T/vcpio' -i < '$T/cp/trav.cpio' ) 2>/dev/null"
+    # Archive a file by its absolute path, then change that file. If vcpio
+    # honours the leading / it overwrites the original and the sentinel is
+    # gone; if it strips it, the sentinel survives and a copy appears inside.
+    #
+    # The first version of this check compared modification times with
+    # `find -newer`, and timestamps land in the same second often enough that
+    # it passed or failed at random. A check that is only sometimes right is
+    # worse than none: it teaches you to disregard a red result.
     ( cd "$T/cp" && echo "$T/cp/outside.txt" | "$T/vcpio" -o > "$T/cp/abs.cpio" ) 2>/dev/null
+    echo SENTINEL-NOT-OVERWRITTEN > "$T/cp/outside.txt"
     mkdir -p "$T/cp/dest2"
     ( cd "$T/cp/dest2" && "$T/vcpio" -i < "$T/cp/abs.cpio" ) 2>/dev/null
     check "vcpio strips a leading / instead of writing outside" \
-          "[ -z \"\$(find '$T/cp/dest2' -type f -newer '$T/cp/abs.cpio' -path '*/outside.txt' -prune -o -type f -print 2>/dev/null | head -1)\" ] && find '$T/cp/dest2' -name outside.txt | grep -q ."
+          "grep -q SENTINEL-NOT-OVERWRITTEN '$T/cp/outside.txt' && find '$T/cp/dest2' -name outside.txt | grep -q ."
 fi
 
 say "vtar refuses what it cannot extract"

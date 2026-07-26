@@ -1192,3 +1192,28 @@ Three separate things fell out of that one cause, and each needed its own fix:
 relocations.** That check is what keeps the other three fixes honest, because
 any future one of them silently regressing looks exactly like this did — a
 kernel that boots one way and not the other.
+
+## D-038 — A test that was only sometimes right
+
+Running `make test` three times in a row gave 141, 142 and 140 passes. One
+check was flaky: *"vcpio strips a leading / instead of writing outside"*.
+
+It compared modification times with `find -newer`, and the archive and the
+extracted file land in the same second often enough that the answer flipped at
+random. Nothing about vcpio was wrong.
+
+The rewrite measures the thing that actually matters instead of a proxy for it.
+The file is archived by its absolute path, then its contents are replaced with
+a sentinel. If vcpio honours the leading `/` it overwrites the original and the
+sentinel is gone; if it strips it, the sentinel survives and a copy appears
+inside the extraction directory. No timestamps involved. Eight consecutive runs
+now give 142 and 0.
+
+Worth saying plainly, because it is the same lesson as D-028, D-029 and D-033
+seen from the other side: **a check that is only sometimes right is worse than
+no check.** A test that always fails gets fixed. A test that fails one run in
+three teaches everyone to re-run it, and after that a real regression looks
+exactly like the noise they have learned to dismiss.
+
+It was also found the same way as everything else this session — by running the
+thing repeatedly rather than once, and noticing the number moved.
