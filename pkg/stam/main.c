@@ -10,6 +10,8 @@
 #include "console.h"
 #include "fdt.h"
 #include "mmu.h"
+#include "gic.h"
+#include "timer.h"
 
 #define STAM_VERSION "0.1"
 
@@ -66,6 +68,19 @@ void kmain(void *dtb) {
         kprintf("\n");
     }
 
+    int ticking = 0;
+    if (gic_init(machine_tree()) == 0 && timer_init(machine_tree(), 100) == 0) {
+        ticking = 1;
+        irq_enable();
+        /* Wait for a second's worth of ticks and say so. A timer that is
+         * configured but never fires is the commonest silent failure at this
+         * stage, and it looks exactly like a timer that works. */
+        uint64_t target = timer_hz();
+        while (timer_ticks() < target) __asm__ volatile("wfi");
+        kprintf("  ticking   %llu interrupts taken — the kernel can preempt\n",
+                (unsigned long long)timer_ticks());
+    }
+
     /* Prove the fault path works, on request. A handler that has never run is
      * a handler you find out about at the worst moment. */
     if (boot.cmdline) {
@@ -84,8 +99,16 @@ void kmain(void *dtb) {
     }
 
     kprintf("\n");
-    kprintf("  milestone 2: hardware found, faults reported, virtual memory on.\n");
-    kprintf("  no interrupt controller, no scheduler, no userspace yet.\n");
+    /* Say what actually happened. The first version of this line claimed
+     * "time running" on a machine whose interrupt controller we do not
+     * support and where the timer never started — a summary that lies is
+     * worse than no summary, because it is believed. */
+    if (ticking)
+        kprintf("  milestone 2: hardware found, faults reported, memory mapped, time running.\n");
+    else
+        kprintf("  milestone 2 partly: memory mapped and faults reported, but this\n"
+                "  machine has no interrupt controller we support, so nothing ticks.\n");
+    kprintf("  no scheduler and no userspace yet.\n");
     kprintf("\n");
 
     for (;;) __asm__ volatile("wfe");

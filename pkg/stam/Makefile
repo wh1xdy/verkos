@@ -10,7 +10,7 @@ CFLAGS   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
            -fno-pic -fno-pie -O2 -Wall -Wextra -std=c11 -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o main.o
 
 all: stam.img
 

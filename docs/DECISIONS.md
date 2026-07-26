@@ -982,3 +982,34 @@ Two things were learned by running it rather than by reading it:
 - `exceptions.S` and `exceptions.c` both build `exceptions.o`. make picks one,
   and the link then fails with an undefined symbol that is plainly defined in a
   file you are looking at. The assembly is now `vectors.S`.
+
+## D-033 — stam: interrupts, and a summary that told the truth
+
+The interrupt controller and the timer complete milestone 2. Both are found in
+the device tree, including the part most often hardcoded: **which interrupt
+number the timer is on**. It is 30 on nearly every ARM machine, which is
+precisely what makes assuming it dangerous — on a machine where it is not, the
+kernel boots normally and then never ticks, with nothing to say why. stam reads
+the `arm,armv8-timer` node's `interrupts` property, takes the non-secure
+physical triple, and adds 16 because PPI numbering in a device tree is
+relative.
+
+GICv3 is detected and refused rather than half-supported. A controller
+configured wrongly delivers no interrupts, which is indistinguishable from
+having no timer, and that ambiguity is expensive.
+
+Which produced the finding worth recording. Running on a GICv3 machine, stam
+printed the refusal correctly — and then finished with *"milestone 2: hardware
+found, faults reported, memory mapped, time running"*. Time was not running.
+The timer had never started. The summary was a fixed string, so it said the
+same thing whether or not the work it described had happened.
+
+That is the same defect as the boot menu entry that named a flag nothing
+implemented (D-028), as the four vpk refusals that exited zero (D-029), and as
+the eight tool bugs in D-021: **a report that does not depend on the outcome it
+reports.** Three of them in one day, in three unrelated pieces of code, found
+three different ways — by selecting a menu entry, by reading for it
+deliberately, and by running on a machine we do not support.
+
+It suggests the question is worth asking routinely rather than occasionally:
+*what does this print when the thing it describes did not happen?*

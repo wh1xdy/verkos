@@ -77,8 +77,3 @@ void exception_fatal(unsigned long kind, regs_t *r) {
     kprintf("\n  halted. this is a kernel bug, not a machine fault.\n\n");
     for (;;) __asm__ volatile("wfe");
 }
-
-/* Until the interrupt controller is wired up nothing can raise an IRQ, but
- * the vector table already routes them here. An empty handler now means the
- * table is complete and testable; the timer will fill this in. */
-void irq_dispatch(void) { }
