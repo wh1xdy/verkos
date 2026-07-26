@@ -4341,6 +4341,12 @@ static int a_chmod(int argc, char **argv) {
  * only once across the whole run, matching GNU's hard-link de-duplication. */
 
 static int du_a, du_s, du_h, du_status;
+/* -m and -k pick the unit; -x stops at a filesystem boundary. Without -m,
+ * "du -sm DIR" is rejected outright, which is how an installer measuring the
+ * system it was about to image got nothing back. Without -x, measuring / on a
+ * live system counts /proc, /sys and every mounted medium along with it. */
+static int du_mflag, du_xflag;
+static dev_t du_root_dev;
 static struct du_hl { dev_t dev; ino_t ino; } *du_hls;
 static size_t du_hlcnt, du_hlcap;
 
@@ -4377,6 +4383,8 @@ static void du_emit(long long blk512, const char *path) {
         char b[32];
         ls_humansize(blk512 * 512, b);
         printf("%s\t%s\n", b, path);
+    } else if (du_mflag) {
+        printf("%lld\t%s\n", (blk512 + 2047) / 2048, path);   /* ceil to MiB */
     } else {
         printf("%lld\t%s\n", (blk512 + 1) / 2, path);   /* ceil to 1024-blocks */
     }
@@ -4391,6 +4399,13 @@ static long long du_walk(const char *path, int depth) {
         du_status = 1;
         return 0;
     }
+    /* -x: remember the device of each operand and refuse to cross into another,
+     * so measuring / does not wander into /proc, /sys or a mounted medium. */
+    if (du_xflag) {
+        if (depth == 0) du_root_dev = st.st_dev;
+        else if (st.st_dev != du_root_dev) return 0;
+    }
+
     long long total = (long long) st.st_blocks;   /* this node's own blocks */
 
     if (S_ISDIR(st.st_mode)) {
@@ -4423,6 +4438,7 @@ static long long du_walk(const char *path, int depth) {
 
 static int a_du(int argc, char **argv) {
     du_a = du_s = du_h = du_status = 0;
+    du_mflag = du_xflag = 0; du_root_dev = 0;
     du_hls = NULL; du_hlcnt = du_hlcap = 0;
     int c_flag = 0, endopt = 0;
 
@@ -4438,6 +4454,9 @@ static int a_du(int argc, char **argv) {
                     case 'h': du_h = 1; break;
                     case 'a': du_a = 1; break;
                     case 'c': c_flag = 1; break;
+                    case 'm': du_mflag = 1; break;
+                    case 'k': du_mflag = 0; break;
+                    case 'x': du_xflag = 1; break;
                     default:
                         fprintf(stderr, "du: invalid option -- '%c'\n"
                                         "Try 'du --help' for more information.\n", a[j]);

@@ -46,6 +46,7 @@
 #include <sys/swap.h>
 #include <grp.h>
 #include <termios.h>
+#include <sys/sysmacros.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
 #include <netinet/in.h>
@@ -316,6 +317,81 @@ static int luks_unlock(const char *dev, const char *name) {
         say("wrong passphrase");
     }
     return -1;
+}
+
+/* ---- a root that lives in a file, and a root you cannot write to ---------
+ * Three command-line options, which between them cover an immutable install, a
+ * diskless one, and a live ISO — because all three are the same two mechanisms
+ * in different combinations:
+ *
+ *   rd.image=PATH   the real root is a filesystem image sitting on the device
+ *                   root= names; loop-mount it and use that instead
+ *   rd.toram        copy that image into RAM first, so the medium it came from
+ *                   stops mattering once boot is done
+ *   rd.overlay      stack a tmpfs over whatever the root turned out to be, so
+ *                   the system is writable but nothing survives a reboot
+ */
+#define LOOP_SET_FD       0x4C00
+#define LOOP_CLR_FD       0x4C01
+#define LOOP_SET_STATUS64 0x4C04
+#define LOOP_CTL_GET_FREE 0x4C82
+
+/* Attach <file> to a free loop device and return its path, or NULL. Done with
+ * ioctls rather than by running losetup: the initramfs would otherwise have to
+ * carry another binary purely to hand these three numbers to the kernel. */
+static const char *loop_attach(const char *file, int readonly) {
+    static char dev[64];
+    int ctl = open("/dev/loop-control", O_RDWR);
+    if (ctl < 0) { warn_errno("/dev/loop-control"); return NULL; }
+    int n = ioctl(ctl, LOOP_CTL_GET_FREE);
+    close(ctl);
+    if (n < 0) { warn_errno("no free loop device"); return NULL; }
+    snprintf(dev, sizeof dev, "/dev/loop%d", n);
+
+    /* The node may not exist yet in a bare initramfs. */
+    if (access(dev, F_OK)) mknod(dev, S_IFBLK | 0660, makedev(7, n));
+
+    int ffd = open(file, readonly ? O_RDONLY : O_RDWR);
+    if (ffd < 0) { warn_errno(file); return NULL; }
+    int lfd = open(dev, readonly ? O_RDONLY : O_RDWR);
+    if (lfd < 0) { warn_errno(dev); close(ffd); return NULL; }
+    if (ioctl(lfd, LOOP_SET_FD, ffd) < 0) {
+        warn_errno("LOOP_SET_FD");
+        close(lfd); close(ffd);
+        return NULL;
+    }
+    close(ffd);
+    close(lfd);
+    return dev;
+}
+
+/* Copy a file into a tmpfs so the medium it came from can go away. */
+static int copy_to_ram(const char *src, const char *dst, unsigned long long size_hint) {
+    mkdir("/ram", 0755);
+    char opts[64];
+    /* Give the tmpfs a little headroom over the image; the default of half of
+     * RAM is often smaller than the image on a modest machine. */
+    snprintf(opts, sizeof opts, "size=%lluk", (size_hint / 1024) + 65536);
+    if (mount("tmpfs", "/ram", "tmpfs", 0, opts)) { warn_errno("tmpfs for the root image"); return -1; }
+
+    int in = open(src, O_RDONLY);
+    if (in < 0) { warn_errno(src); return -1; }
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (out < 0) { warn_errno(dst); close(in); return -1; }
+    char buf[1 << 20];
+    ssize_t r;
+    unsigned long long done = 0;
+    while ((r = read(in, buf, sizeof buf)) > 0) {
+        if (write(out, buf, (size_t)r) != r) { warn_errno("writing the root image to RAM"); close(in); close(out); return -1; }
+        done += (unsigned long long)r;
+        if (size_hint && (done % (64ULL << 20)) < (unsigned long long)sizeof buf)
+            fprintf(stderr, "\r  [urverk] copying root to RAM: %llu/%llu MB",
+                    done >> 20, size_hint >> 20);
+    }
+    fputc('\n', stderr);
+    close(in); close(out);
+    if (r < 0) { warn_errno("reading the root image"); return -1; }
+    return 0;
 }
 
 static int probe_dev(const char *dev, char *label, char *uuid) {
@@ -1511,6 +1587,68 @@ static int stage1(void) {
         for (int i = 0; types[i] && !mounted; i++)
             if (mount(root, NEWROOT, types[i], flags, NULL) == 0) mounted = 1;
         if (!mounted) panic("cannot mount the root filesystem");
+    }
+
+    /* ---- the root may be a file on what we just mounted ---- */
+    char image[256] = "";
+    if (cmdline_get("rd.image", image, sizeof image)) {
+        char imgpath[512];
+        snprintf(imgpath, sizeof imgpath, NEWROOT "%s%s", image[0] == '/' ? "" : "/", image);
+        struct stat ist;
+        if (stat(imgpath, &ist)) {
+            say2("no root image at ", image);
+            emergency_shell("the root image named by rd.image is not there");
+        } else {
+            const char *src = imgpath;
+            char ramimg[64] = "/ram/root.img";
+            if (cmdline_flag("rd.toram")) {
+                say("copying the root image into RAM");
+                if (copy_to_ram(imgpath, ramimg, (unsigned long long)ist.st_size) == 0) src = ramimg;
+                else say("could not copy to RAM — using the image where it lies");
+            }
+            const char *ldev = loop_attach(src, 1);
+            if (!ldev) {
+                emergency_shell("the root image could not be attached to a loop device");
+            } else {
+                /* The image becomes the root; what we mounted to reach it stays
+                 * mounted underneath at /media until switch_root moves on. */
+                mkdir("/media", 0755);
+                if (mount(NULL, NEWROOT, NULL, MS_MOVE, NULL) != 0) { /* fall through */ }
+                mkdir(NEWROOT, 0755);
+                if (mount(ldev, NEWROOT, "ext4", MS_RDONLY, NULL) &&
+                    mount(ldev, NEWROOT, "squashfs", MS_RDONLY, NULL)) {
+                    warn_errno("mounting the root image");
+                    emergency_shell("the root image would not mount");
+                } else {
+                    say2("root image mounted from ", src);
+                }
+            }
+        }
+    }
+
+    /* ---- a writable layer that forgets itself ---- */
+    if (cmdline_flag("rd.overlay")) {
+        mkdir("/ovl", 0755);
+        if (mount("tmpfs", "/ovl", "tmpfs", 0, "mode=0755")) {
+            warn_errno("tmpfs for the overlay");
+        } else if (mkdir("/ovl/upper", 0755) && errno != EEXIST) {
+            warn_errno("/ovl/upper");
+        } else if (mkdir("/ovl/work", 0755) && errno != EEXIST) {
+            warn_errno("/ovl/work");
+        } else {
+            mkdir("/ovlroot", 0755);
+            /* lowerdir is what we have mounted as the root so far; the tmpfs
+             * takes every write, so the medium underneath is never touched. */
+            if (mount("overlay", "/ovlroot", "overlay", 0,
+                      "lowerdir=" NEWROOT ",upperdir=/ovl/upper,workdir=/ovl/work")) {
+                warn_errno("overlay");
+                say("continuing without an overlay — the root stays read-only");
+            } else if (mount("/ovlroot", NEWROOT, NULL, MS_MOVE, NULL)) {
+                warn_errno("moving the overlay into place");
+            } else {
+                say("writable overlay in RAM; nothing written will survive a reboot");
+            }
+        }
     }
 
     /* sanity: does the new root actually contain an init? */

@@ -177,6 +177,21 @@ if [ -x "$T/verkbox" ]; then
         if [ "$o" = "$g" ]; then ok "sort -t: -k2 -n matches GNU sort"
         else bad "sort -t: -k2 -n: got '$o', sort gives '$g'"; fi
     fi
+    # An installer measuring the system it is about to image used "du -sm", and
+    # verkbox's du had no -m at all, so it returned nothing. -x matters too:
+    # measuring / on a live system otherwise counts /proc, /sys and every
+    # mounted medium along with it.
+    if command -v du >/dev/null 2>&1; then
+        mkdir -p "$T/dut/sub"
+        dd if=/dev/urandom of="$T/dut/f" bs=1024 count=300 status=none 2>/dev/null
+        dd if=/dev/urandom of="$T/dut/sub/g" bs=1024 count=200 status=none 2>/dev/null
+        for f in -sm -sk -sxm; do
+            o=$("$T/verkbox" du $f "$T/dut" 2>&1 | cut -f1)
+            g=$(du $f "$T/dut" 2>&1 | cut -f1)
+            if [ "$o" = "$g" ]; then ok "du $f matches GNU du"
+            else bad "du $f: got '$o', du gives '$g'"; fi
+        done
+    fi
     check "sort still sorts" \
           "[ \"\$(printf 'c\na\nb\n' | '$T/verkbox' sort | tr -d '\n')\" = abc ]"
 fi

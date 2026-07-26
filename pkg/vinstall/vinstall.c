@@ -43,6 +43,12 @@ static int dry_run, assume_yes, verbose;
 static const char *source = "/";
 static const char *passwd_file;      /* chpasswd-format lines for the new system */
 static int encrypt_root;
+/* Two ways to run a system that forgets itself. --immutable keeps the root on
+ * disk but mounts it read-only under a tmpfs overlay, so only the changes live
+ * in RAM. --ramdisk goes further: there is no root partition at all, the whole
+ * system is an image on the EFI partition, and rd.toram lifts it into RAM so
+ * the disk stops mattering once boot finishes. */
+static int immutable_root, ramdisk_root, toram;
 static const char *luks_file;        /* passphrase for an unattended install */
 #define LUKS_NAME "cryptroot"
 static int lock_root;
@@ -579,12 +585,15 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
     char rootline[192];
     if (encrypted) snprintf(rootline, sizeof rootline, "/dev/mapper/%s", LUKS_NAME);
     else snprintf(rootline, sizeof rootline, "UUID=%s", root_uuid);
+    /* With an overlay the root urverk hands over is the overlay, not the disk;
+     * saying "ro" here documents that the medium underneath is never written. */
+    const char *rootopts = immutable_root ? "ro,noatime" : "defaults,noatime";
     fprintf(f,
         "# Written by vinstall. urverk mounts these at boot.\n"
         "# device                                  mount   type  options              dump fsck\n"
-        "%-41s /       ext4  defaults,noatime     0    1\n"
+        "%-41s /       ext4  %-20s 0    1\n"
         "UUID=%-36s /boot   vfat  defaults,noatime     0    2\n",
-        rootline, esp_uuid);
+        rootline, rootopts, esp_uuid);
     if (home_uuid && *home_uuid)
         fprintf(f, "UUID=%-36s /home   ext4  defaults,noatime     0    2\n", home_uuid);
     if (swap_uuid && *swap_uuid)
@@ -592,10 +601,16 @@ static void write_fstab(const char *root, const char *root_uuid, const char *esp
     fclose(f);
 }
 
+/* Where the EFI partition is mounted. Normally inside the new root, but a
+ * diskless install has no root partition — the ESP is the only filesystem
+ * there is, and the system lives on it as a file. */
+static char esp_dir[512];
+
 static void install_bootloader(const char *root, const char *arch, const char *root_uuid,
-                               int own_disk, const char *luks_uuid) {
+                               int own_disk, const char *luks_uuid, const char *extra_cmdline) {
     char esp[512];
-    snprintf(esp, sizeof esp, "%s/boot", root);
+    if (esp_dir[0]) snprintf(esp, sizeof esp, "%s", esp_dir);
+    else snprintf(esp, sizeof esp, "%s/boot", root);
     run("mkdir -p %s/EFI/BOOT %s/EFI/verkos", esp, esp);
 
     /* vboot itself, under the name the firmware looks for with no NVRAM entry. */
@@ -647,12 +662,16 @@ static void install_bootloader(const char *root, const char *arch, const char *r
      * the initramfs has to find the container, ask for the passphrase and open
      * it first, and only then is there a device to mount. */
     char rootspec[256], luksarg[192] = "";
+    const char *extra = extra_cmdline ? extra_cmdline : "";
     if (luks_uuid && *luks_uuid) {
         snprintf(rootspec, sizeof rootspec, "/dev/mapper/%s", LUKS_NAME);
         snprintf(luksarg, sizeof luksarg, "rd.luks.uuid=%s rd.luks.name=%s ", luks_uuid, LUKS_NAME);
     } else {
         snprintf(rootspec, sizeof rootspec, "UUID=%s", root_uuid);
     }
+    /* Diskless: root= names the EFI partition, and the real system is the
+     * image file sitting on it. */
+    if (ramdisk_root) snprintf(rootspec, sizeof rootspec, "UUID=%s", root_uuid);
     fprintf(f,
         "# Written by vinstall.\n"
         "timeout 5\n"
@@ -661,18 +680,20 @@ static void install_bootloader(const char *root, const char *arch, const char *r
         "entry VerkOS\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk\n"
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk%s\n"
         "\n"
         "entry VerkOS (verbose boot)\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk urverk.debug\n"
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk%s urverk.debug\n"
         "\n"
         "entry VerkOS (rescue shell)\n"
         "  kernel  \\vmlinuz\n"
         "  initrd  \\initramfs.img\n"
-        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk urverk.rescue\n",
-        luksarg, rootspec, console, luksarg, rootspec, console, luksarg, rootspec, console);
+        "  cmdline %sroot=%s rw console=%s init=/sbin/urverk%s urverk.rescue\n",
+        luksarg, rootspec, console, extra,
+        luksarg, rootspec, console, extra,
+        luksarg, rootspec, console, extra);
     fclose(f);
 }
 
@@ -705,6 +726,12 @@ static void usage(void) {
            "  --home-part DEV  --swap-part DEV   optional, formatted\n"
            "  --no-efi-entry   do not add a boot entry to the firmware\n"
            "\n"
+           "  --immutable      root read-only under a RAM overlay; changes are\n"
+           "                   forgotten at reboot, only the changes cost RAM\n"
+           "  --ramdisk        no root partition: the system is an image on the\n"
+           "                   EFI partition, copied into RAM at boot\n"
+           "  --ramdisk-from-disk   as --ramdisk, but read the image in place\n"
+           "                   rather than copying it (far less RAM)\n"
            "  --encrypt        put the root filesystem inside a LUKS2 container\n"
            "  --luks-passphrase-file F   read the passphrase from F (for -y)\n"
            "  -n           dry run: print what would happen, change nothing\n"
@@ -736,6 +763,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--swap-part") && i + 1 < argc) given_swap = argv[++i];
         else if (!strcmp(argv[i], "--no-efi-entry")) no_efi_entry = 1;
         else if (!strcmp(argv[i], "--encrypt")) encrypt_root = 1;
+        else if (!strcmp(argv[i], "--immutable")) immutable_root = 1;
+        else if (!strcmp(argv[i], "--ramdisk")) { ramdisk_root = 1; toram = 1; }
+        else if (!strcmp(argv[i], "--ramdisk-from-disk")) ramdisk_root = 1;
         else if (!strcmp(argv[i], "--luks-passphrase-file") && i + 1 < argc) luks_file = argv[++i];
         else { usage(); return strcmp(argv[i], "-h") && strcmp(argv[i], "--help"); }
     }
@@ -759,6 +789,14 @@ int main(int argc, char **argv) {
         die("no way to set a password: pass --passwd-file FILE, or --lock-root with -u.\n"
             "       Without one of those the installed system keeps the source system's\n"
             "       root password, which for a VerkOS image is the development default.");
+    if (ramdisk_root && immutable_root)
+        die("--ramdisk already forgets everything; --immutable adds nothing");
+    if (ramdisk_root && encrypt_root)
+        die("--ramdisk has no root partition to encrypt.\n"
+            "       The system image would sit unencrypted on the EFI partition,\n"
+            "       which is not what asking for encryption means.");
+    if (ramdisk_root && (swap_mb || home_mb || given_home || given_swap))
+        die("--ramdisk keeps nothing between boots, so swap and /home have nowhere to live");
     if (lock_root && !user)
         die("--lock-root leaves no way in: create an account with -u NAME as well");
 
@@ -846,9 +884,15 @@ int main(int argc, char **argv) {
         FILE *sf = fopen("/run/vinstall.sfdisk", "w");
         if (!sf) die("cannot write the partition script: %s", strerror(errno));
         fprintf(sf, "label: gpt\n");
-        fprintf(sf, "start=1MiB, size=%uMiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n",
-                esp_mb);
-        fprintf(sf, "size=%luMiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"VerkOS\"\n", root_mb);
+        if (ramdisk_root) {
+            /* One partition. There is nothing to put in a second one: the whole
+             * system is a file on this one, and nothing is kept between boots. */
+            fprintf(sf, "start=1MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n");
+        } else {
+            fprintf(sf, "start=1MiB, size=%uMiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n",
+                    esp_mb);
+            fprintf(sf, "size=%luMiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"VerkOS\"\n", root_mb);
+        }
         if (home_mb)
             fprintf(sf, "size=%uMiB, type=933AC7E1-2EB4-4F13-B844-0E14E2AEF915, name=\"home\"\n", home_mb);
         if (swap_mb)
@@ -859,7 +903,7 @@ int main(int argc, char **argv) {
     run("partx -u %s >/dev/null 2>&1 || partprobe %s >/dev/null 2>&1 || true", disk, disk);
     unlink("/run/vinstall.sfdisk");
     wait_for_partition(esp_part);
-    wait_for_partition(root_part);
+    if (!ramdisk_root) wait_for_partition(root_part);
     }
 
     step("creating filesystems");
@@ -905,29 +949,65 @@ int main(int argc, char **argv) {
             die("could not read the LUKS UUID of %s", root_part);
     }
 
-    run("mkfs.ext4 -q -F -L VERKOS %s", fs_dev);
+    /* Diskless: there is no root partition to format. The system image is
+     * created later, on the EFI partition itself. */
+    if (!ramdisk_root) run("mkfs.ext4 -q -F -L VERKOS %s", fs_dev);
     if (home_part[0]) { wait_for_partition(home_part); run("mkfs.ext4 -q -F -L VERKHOME %s", home_part); }
     if (swap_part[0]) { wait_for_partition(swap_part); run("mkswap -L VERKSWAP %s >/dev/null", swap_part); }
 
     char root_uuid[128], esp_uuid[128];
-    get_uuid(fs_dev, root_uuid, sizeof root_uuid);
+    if (!ramdisk_root) get_uuid(fs_dev, root_uuid, sizeof root_uuid);
     get_uuid(esp_part, esp_uuid, sizeof esp_uuid);
     char home_uuid[128] = "", swap_uuid[128] = "";
     if (home_part[0]) get_uuid(home_part, home_uuid, sizeof home_uuid);
     if (swap_part[0]) get_uuid(swap_part, swap_uuid, sizeof swap_uuid);
 
+    if (ramdisk_root) {
+        /* No root partition to mount. Build the system as one image on the EFI
+         * partition instead: mkfs.ext4 -d copies the tree in as it creates the
+         * filesystem, so there is no separate copy step at all. */
+        step("building the system image on the EFI partition");
+        snprintf(esp_dir, sizeof esp_dir, "%s-esp", MNT);
+        run("mkdir -p %s %s", esp_dir, MNT);
+        run("mount %s %s", esp_part, esp_dir);
+
+        const char *sroot = strcmp(source, "/") ? source : "";
+        char sz[64] = "";
+        if (!dry_run) {
+            if (capture(sz, sizeof sz, "du -sxm %s 2>/dev/null | cut -f1", sroot[0] ? sroot : "/") != 0 || !sz[0])
+                die("cannot measure the system to be imaged");
+        }
+        unsigned long content = (unsigned long)atol(sz[0] ? sz : "1024");
+        unsigned long img_mb = content + content / 5 + 128;   /* a fifth of slack */
+        printf("    %lu MB of system, image sized at %lu MB\n", content, img_mb);
+        run("truncate -s %luM %s/rootfs.img", img_mb, esp_dir);
+        run("mkfs.ext4 -q -F -m 0 -L VERKOS -d %s %s/rootfs.img",
+            sroot[0] ? sroot : "/", esp_dir);
+        run("mount -o loop %s/rootfs.img %s", esp_dir, MNT);
+    } else {
     step("mounting the new system on %s", MNT);
     run("mkdir -p %s", MNT);
     run("mount %s %s", fs_dev, MNT);
     run("mkdir -p %s/boot", MNT);
     run("mount %s %s/boot", esp_part, MNT);
     if (home_part[0]) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
+    }
 
-    step("copying the system");
-    copy_system(MNT);
+    if (!ramdisk_root) {
+        step("copying the system");
+        copy_system(MNT);
+    }
 
     step("installing vboot and writing the boot configuration");
-    install_bootloader(MNT, arch, root_uuid, own_disk, luks_uuid);
+    /* An immutable install differs from an ordinary one by exactly one word on
+     * the kernel command line: urverk stacks a tmpfs over the root it just
+     * mounted, and every write lands there instead of on the disk. */
+    char extra[128] = "";
+    if (immutable_root) snprintf(extra, sizeof extra, " rd.overlay");
+    if (ramdisk_root)
+        snprintf(extra, sizeof extra, " rootfstype=vfat rd.image=/rootfs.img rd.overlay%s",
+                 toram ? " rd.toram" : "");
+    install_bootloader(MNT, arch, ramdisk_root ? esp_uuid : root_uuid, own_disk, luks_uuid, extra);
     if (!no_efi_entry && efi_available() && !dry_run) {
         const char *efi_name = !strcmp(arch, "aarch64") ? "BOOTAA64.EFI" : "BOOTX64.EFI";
         if (efi_add_boot_entry(esp_part, efi_name, "VerkOS") == 0)
@@ -938,7 +1018,26 @@ int main(int argc, char **argv) {
     }
 
     step("configuring the installed system");
-    write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid, luks_uuid[0] != 0);
+    if (ramdisk_root) {
+        /* Nothing in this system is on a partition of its own: the root is a
+         * file that urverk loop-mounts, and /boot is where that file lives. */
+        if (!dry_run) {
+            char path[512];
+            snprintf(path, sizeof path, "%s/etc/fstab", MNT);
+            FILE *f = fopen(path, "w");
+            if (f) {
+                fprintf(f,
+                    "# Written by vinstall for a diskless install.\n"
+                    "# The root is an image on the EFI partition, mounted by urverk\n"
+                    "# before this file is read, with a RAM overlay on top. Nothing\n"
+                    "# written here survives a reboot.\n"
+                    "UUID=%-36s /boot   vfat  defaults,noatime     0    2\n", esp_uuid);
+                fclose(f);
+            }
+        }
+    } else {
+        write_fstab(MNT, root_uuid, esp_uuid, home_uuid, swap_uuid, luks_uuid[0] != 0);
+    }
     set_hostname(MNT, hostname);
     if (user) run("chroot %s /usr/bin/useradd -m -s /bin/bash %s", MNT, user);
     step("setting passwords");
@@ -946,11 +1045,25 @@ int main(int argc, char **argv) {
 
     step("unmounting");
     run("sync");
+    if (ramdisk_root) {
+        run("umount %s", MNT);
+        run("umount %s", esp_dir);
+    } else
     run("umount %s/boot", MNT);
-    if (home_part[0]) run("umount %s/home", MNT);
-    run("umount %s", MNT);
+    if (!ramdisk_root) {
+        if (home_part[0]) run("umount %s/home", MNT);
+        run("umount %s", MNT);
+    }
     if (luks_uuid[0]) run("cryptsetup luksClose %s || true", LUKS_NAME);
 
+    if (immutable_root)
+        printf("\n\033[1mThis install is immutable:\033[0m the root is mounted read-only with a\n"
+               "RAM overlay on top. Anything written is gone at the next reboot.\n");
+    if (ramdisk_root)
+        printf("\n\033[1mThis install is diskless:\033[0m the whole system is one image on the EFI\n"
+               "partition%s, with a RAM overlay on top. There is no root partition,\n"
+               "and nothing written survives a reboot.\n",
+               toram ? ", copied into RAM at boot" : ", read from the disk as it runs");
     printf("\n\033[1;32mVerkOS is installed on %s.\033[0m\n", disk);
     printf("Root filesystem UUID %s. Remove the install medium and reboot.\n\n", root_uuid);
     if (user) printf("An account for '%s' is ready to log in.\n\n", user);
