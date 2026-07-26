@@ -1,11 +1,16 @@
 /* stam — the console.
  *
- * Two serial drivers, chosen by what the device tree says is actually there.
- * Two is the smallest number that forces the code to be honest: with one
- * driver you can pretend the register layout is universal, and every board
- * that disagrees costs a rewrite. PL011 is what QEMU's virt machine and most
- * ARM designs use; 8250/16550 is what nearly everything else does, including
- * the x86 world we will eventually meet.
+ * Three serial drivers, chosen by what the device tree says is actually there.
+ * More than one is what forces the code to be honest: with a single driver you
+ * can pretend the register layout is universal, and every board that disagrees
+ * costs a rewrite. PL011 is what QEMU's virt machine and most ARM designs use;
+ * 8250/16550 is what nearly everything else does, including the x86 world; and
+ * GENI is Qualcomm's, which is neither, and is the console on the Arduino
+ * UNO Q and on a great many phones and boards besides.
+ *
+ * UNVERIFIED: the GENI path has never run. It is written from the register
+ * sequence Qualcomm's hardware requires, but no Qualcomm hardware has been
+ * asked to execute it. Everything else in this file has been run on a machine.
  */
 #include "console.h"
 #include "fdt.h"
@@ -22,8 +27,20 @@ extern size_t strlen(const char *);
 #define UART_LSR   0x05
 #define UART_LSR_THRE (1u << 5)
 
+/* Qualcomm GENI. Not a UART with registers so much as a programmable serial
+ * engine told to behave like one: every character is a transfer that must be
+ * announced, waited for, and acknowledged. */
+#define GENI_M_CMD0        0x600
+#define GENI_M_IRQ_STATUS  0x610
+#define GENI_M_IRQ_CLEAR   0x618
+#define GENI_TX_FIFO       0x700
+#define GENI_TX_TRANS_LEN  0x270
+#define GENI_M_CMD_DONE    (1u << 0)
+#define GENI_M_TX_WATERMARK (1u << 30)
+#define GENI_UART_START_TX (1u << 27)     /* opcode 1, shifted into place */
+
 static volatile uint8_t *uart_base;
-static enum { UART_NONE, UART_PL011, UART_8250 } uart_kind;
+static enum { UART_NONE, UART_PL011, UART_8250, UART_GENI } uart_kind;
 static uint32_t uart_shift;      /* reg-shift: registers may be spaced out  */
 static uint32_t uart_width;      /* reg-io-width: 1, 2 or 4 bytes per access */
 
@@ -41,15 +58,39 @@ static void reg_write(uint32_t r, uint32_t v) {
     else                      *(volatile uint8_t *)p  = (uint8_t)v;
 }
 
+/* A bounded wait. On hardware that is not what we think it is, an unbounded
+ * one is a hang with no output — the worst failure this kernel can produce,
+ * and precisely what an untested driver invites. Giving up prints nothing but
+ * lets the machine keep going, so the next thing that goes wrong is visible. */
+static int wait_for(unsigned off, uint32_t mask, int want_set) {
+    for (int spin = 0; spin < 1000000; spin++) {
+        uint32_t v = reg_read(off) & mask;
+        if (want_set ? (v != 0) : (v == 0)) return 1;
+    }
+    return 0;
+}
+
 void kputc(char c) {
     if (uart_kind == UART_NONE) return;
     if (c == '\n') kputc('\r');
     if (uart_kind == UART_PL011) {
-        while (reg_read(PL011_FR) & PL011_FR_TXFF) { }
+        if (!wait_for(PL011_FR, PL011_FR_TXFF, 0)) return;
         reg_write(PL011_DR, (uint8_t)c);
-    } else {
-        while (!(reg_read(UART_LSR) & UART_LSR_THRE)) { }
+    } else if (uart_kind == UART_8250) {
+        if (!wait_for(UART_LSR, UART_LSR_THRE, 1)) return;
         reg_write(UART_THR, (uint8_t)c);
+    } else {
+        /* GENI: announce a one-byte transfer, start it, wait to be invited to
+         * fill the FIFO, write the byte, then wait for the engine to say the
+         * command finished. Each acknowledgement is required; skipping one
+         * leaves the engine busy and the next character never goes out. */
+        reg_write(GENI_TX_TRANS_LEN, 1);
+        reg_write(GENI_M_CMD0, GENI_UART_START_TX);
+        if (!wait_for(GENI_M_IRQ_STATUS, GENI_M_TX_WATERMARK, 1)) return;
+        reg_write(GENI_TX_FIFO, (uint8_t)c);
+        reg_write(GENI_M_IRQ_CLEAR, GENI_M_TX_WATERMARK);
+        if (!wait_for(GENI_M_IRQ_STATUS, GENI_M_CMD_DONE, 1)) return;
+        reg_write(GENI_M_IRQ_CLEAR, GENI_M_CMD_DONE);
     }
 }
 
@@ -110,6 +151,8 @@ int console_init(const fdt_t *f) {
     if (node == FDT_NONE) node = fdt_find_compatible(f, "arm,pl011");
     if (node == FDT_NONE) node = fdt_find_compatible(f, "ns16550a");
     if (node == FDT_NONE) node = fdt_find_compatible(f, "ns16550");
+    if (node == FDT_NONE) node = fdt_find_compatible(f, "qcom,geni-debug-uart");
+    if (node == FDT_NONE) node = fdt_find_compatible(f, "qcom,geni-uart");
     if (node == FDT_NONE) return -1;
 
     uint64_t addr = 0, size = 0;
@@ -122,8 +165,14 @@ int console_init(const fdt_t *f) {
     if (p && len == 4) uart_width = (uint32_t)fdt_cells(p, 1);
 
     uart_base = (volatile uint8_t *)(uintptr_t)addr;
-    uart_kind = fdt_is_compatible(f, node, "arm,pl011") ? UART_PL011 : UART_8250;
-    if (uart_kind == UART_PL011) { uart_shift = 0; uart_width = 4; }
+    if (fdt_is_compatible(f, node, "arm,pl011")) {
+        uart_kind = UART_PL011; uart_shift = 0; uart_width = 4;
+    } else if (fdt_is_compatible(f, node, "qcom,geni-debug-uart") ||
+               fdt_is_compatible(f, node, "qcom,geni-uart")) {
+        uart_kind = UART_GENI;  uart_shift = 0; uart_width = 4;
+    } else {
+        uart_kind = UART_8250;
+    }
 
     /* The firmware has already configured the port it was printing on, so we
      * do not touch the baud rate. Reprogramming it is how you lose the output
@@ -139,7 +188,12 @@ void console_rebase(uint64_t offset) {
 }
 
 const char *console_kind(void) {
-    return uart_kind == UART_PL011 ? "PL011" : uart_kind == UART_8250 ? "8250" : "none";
+    switch (uart_kind) {
+    case UART_PL011: return "PL011";
+    case UART_8250:  return "8250";
+    case UART_GENI:  return "GENI (untested)";
+    default:         return "none";
+    }
 }
 
 uint64_t console_addr(void) { return (uint64_t)(uintptr_t)uart_base; }

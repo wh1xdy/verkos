@@ -727,5 +727,46 @@ else
     bad "the fdt round-trip test does not compile"
 fi
 
+# --- the Android boot image we write must be one we can read ---------------
+say "vbootimg writes an image its reader agrees with"
+if cc -O1 -o "$T/vbootimg" pkg/vbootimg/vbootimg.c 2>/dev/null; then
+    ok "vbootimg compiles"
+    head -c 40000 /dev/urandom > "$T/fakekernel"
+    head -c  9000 /dev/urandom > "$T/fakeramdisk"
+    if "$T/vbootimg" create -o "$T/boot.img" --kernel "$T/fakekernel" \
+           --ramdisk "$T/fakeramdisk" --cmdline "hello=1" >/dev/null 2>&1; then
+        ok "vbootimg writes an image"
+    else
+        bad "vbootimg could not write an image"
+    fi
+    out=$("$T/vbootimg" show "$T/boot.img" 2>&1)
+    case "$out" in *"40000 bytes"*) ok "the kernel size survives the round trip" ;;
+                   *) bad "kernel size wrong: $out" ;; esac
+    case "$out" in *"9000 bytes"*)  ok "the ramdisk size survives the round trip" ;;
+                   *) bad "ramdisk size wrong" ;; esac
+    case "$out" in *"hello=1"*)     ok "the command line survives the round trip" ;;
+                   *) bad "command line lost" ;; esac
+    # The header must be the first thing a bootloader checks, so we must write it.
+    if [ "$(dd if="$T/boot.img" bs=1 count=8 2>/dev/null)" = "ANDROID!" ]; then
+        ok "the image starts with the magic a bootloader looks for"
+    else
+        bad "no ANDROID! magic at the start of the image"
+    fi
+    # A truncated image must be refused, not half-read.
+    head -c 5000 "$T/boot.img" > "$T/short.img"
+    if "$T/vbootimg" show "$T/short.img" >/dev/null 2>&1; then
+        bad "vbootimg accepted an image shorter than its own header claims"
+    else
+        ok "vbootimg refuses a truncated image"
+    fi
+    if "$T/vbootimg" show "$T/fakekernel" >/dev/null 2>&1; then
+        bad "vbootimg accepted something that is not a boot image"
+    else
+        ok "vbootimg refuses a file that is not a boot image"
+    fi
+else
+    bad "vbootimg does not compile"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -1453,3 +1453,43 @@ of the kernel's own questions:
 What remains before stam runs on the Arduino UNO Q is a Qualcomm GENI console
 driver and an Android boot image; the interrupt controller is no longer in the
 way.
+
+## D-045 — Two pieces written for hardware we have not run them on
+
+Everything else in this project has been verified by running it. These two
+cannot be, yet, and it is worth saying so plainly rather than letting them sit
+alongside the tested work as if they were equal.
+
+**A GENI console driver.** Qualcomm's serial port is neither a PL011 nor an
+8250: it is a programmable serial engine told to behave like a UART, so every
+character is a transfer that must be announced, waited for, and acknowledged in
+sequence. Skipping an acknowledgement leaves the engine busy and the next
+character never leaves. It is written from that sequence; no Qualcomm hardware
+has executed it.
+
+Two things were done because it is untested. It is a *third* driver, which is
+what keeps the console code honest — with one driver it is easy to believe the
+register layout is universal. And every wait loop in the console, including the
+two that do work, is now bounded. An untested driver that spins forever is a
+hang with no output at all, which is the most expensive failure this kernel can
+produce; giving up prints nothing but lets the machine carry on, so whatever
+goes wrong next is still visible.
+
+**vbootimg**, which writes and reads the Android boot image format. Qualcomm
+boards do not boot from an EFI system partition — the chain ends at ABL, which
+takes a header followed by a page-aligned kernel and ramdisk. It is the only way
+onto such a board.
+
+`show` exists so the writer can be checked against a reader that does not share
+its assumptions, which is the only self-check available for a format we cannot
+yet hand to the hardware that consumes it. `make test` round-trips sizes and the
+command line, checks the magic, and confirms that a truncated file and a file
+that is not an image are both refused. 142 → 150 checks.
+
+The tool prints, every time it runs, that `fastboot boot` loads an image without
+writing anything and `fastboot flash boot` overwrites the board. That belongs in
+the output rather than in a document, because the moment someone needs to know
+it is the moment they are typing the command.
+
+What remains before stam runs on an Arduino UNO Q is now only the parts that
+require the board itself.
