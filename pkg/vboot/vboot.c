@@ -77,6 +77,8 @@ static EFI_FILE_PROTOCOL *volume_root(EFI_HANDLE image) {
     if (EFI_ERROR(fs->OpenVolume(fs, &root))) return 0;
     return root;
 }
+#include "kernelname.h"
+
 /* read a whole file into pool memory; returns 0 on failure */
 static void *read_file(EFI_FILE_PROTOCOL *root, CHAR16 *path, UINTN *out_size) {
     EFI_FILE_PROTOCOL *f = 0;
@@ -88,8 +90,24 @@ static void *read_file(EFI_FILE_PROTOCOL *root, CHAR16 *path, UINTN *out_size) {
         EFI_ERROR(f->SetPosition(f, 0))) { f->Close(f); return 0; }
     void *buf = 0;
     if (EFI_ERROR(BS->AllocatePool(EfiLoaderData, (UINTN)size + 2, &buf))) { f->Close(f); return 0; }
-    UINTN want = (UINTN)size;
-    if (EFI_ERROR(f->Read(f, &want, buf))) { BS->FreePool(buf); f->Close(f); return 0; }
+    /* Read in a loop. EFI lets a filesystem driver return fewer bytes than
+     * asked for — it sets the count to what it actually gave — and a single
+     * Read that came up short would silently produce a truncated kernel or a
+     * half-read config with no error anywhere. FAT happens to satisfy the
+     * whole request; nothing guarantees another driver will. */
+    UINTN want = 0;
+    while (want < (UINTN)size) {
+        UINTN chunk = (UINTN)size - want;
+        if (EFI_ERROR(f->Read(f, &chunk, (unsigned char *)buf + want))) {
+            BS->FreePool(buf); f->Close(f); return 0;
+        }
+        if (chunk == 0) break;                        /* end of file, earlier than expected */
+        want += chunk;
+    }
+    if (want < (UINTN)size) {
+        print(L"  [!!] short read: ");
+        print_num(want); print(L" of "); print_num((UINTN)size); print(L" bytes\r\n");
+    }
     ((unsigned char *)buf)[want] = 0;                 /* NUL-terminate for the parser */
     f->Close(f);
     if (out_size) *out_size = want;
@@ -238,9 +256,10 @@ static void scan_kernels(EFI_FILE_PROTOCOL *root) {
         EFI_FILE_INFO *fi = (EFI_FILE_INFO *)buf;
         if (fi->Attribute & EFI_FILE_DIRECTORY) continue;
         CHAR16 *nm = fi->FileName;
-        /* anything called vmlinuz... is a kernel */
-        if (nm[0] != L'v' || nm[1] != L'm' || nm[2] != L'l' || nm[3] != L'i' ||
-            nm[4] != L'n' || nm[5] != L'u' || nm[6] != L'z') continue;
+        /* anything called vmlinuz... is a kernel. Compared without case:
+         * an ISO 9660 volume with no Rock Ridge presents VMLINUZ.;1, and a
+         * byte-for-byte lowercase match would find no kernel at all there. */
+        if (!name_is_kernel(nm)) continue;
         if (have_kernel(nm)) continue;
         if (n_entries >= MAX_ENTRIES) break;
         entry_t *e = &entries[n_entries++];

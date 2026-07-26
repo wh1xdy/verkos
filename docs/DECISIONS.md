@@ -653,3 +653,31 @@ what to skip, and `/run` — where the ESP is mounted — is on its list.
 **Verified across two boots each**, which is the only way this can be checked:
 a file written on the first boot is gone on the second, and `/proc/mounts`
 shows the root as `overlay`.
+
+## D-023 — Two things vboot got away with only because it had met one filesystem
+
+Hardening before the live ISO, on the reasoning that a failed ISO boot should
+be attributable to the ISO and not to something vboot had always got wrong.
+
+**A single Read is not a whole file.** `read_file()` sized the file, allocated a
+buffer, and issued one `Read` — then used whatever count came back as the
+length. EFI explicitly permits a filesystem driver to return fewer bytes than
+asked for, so a short read would have produced a truncated kernel or a
+half-parsed config with no error reported anywhere. FAT satisfies the whole
+request, which is why this never showed. It reads in a loop now, and says so if
+the file turns out shorter than its size claimed.
+
+**The filesystem decides the case of a name, not us.** `scan_kernels()`
+compared `vmlinuz` byte for byte in lower case. An ISO 9660 volume without Rock
+Ridge presents `VMLINUZ.;1`, so on such a medium vboot would have found no
+kernel and offered nothing to boot — while reporting no error, because finding
+no kernels is a legitimate outcome.
+
+The comparison now lives in `pkg/vboot/kernelname.h`, separate from any
+firmware, so it can be tested on the build host: ten cases covering lower,
+upper and mixed case, the ISO version suffix, and near-misses that must not
+match. Verified on real hardware terms too — a file called `VMLINUZ.UPP` placed
+on the ESP now appears in the menu, and the system still boots.
+
+Neither defect was reachable from anything VerkOS had booted from so far. That
+is the point: they were waiting for the first medium that behaves differently.

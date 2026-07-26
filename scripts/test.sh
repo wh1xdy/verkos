@@ -485,6 +485,37 @@ for f in scripts/*.sh scripts/lib/*.sh boot/*.sh config/*.sh config/targets/*.sh
 done
 ok "bash -n over every shell script"
 
+say "vboot recognises a kernel whatever case the filesystem uses"
+# vboot compared "vmlinuz" byte for byte in lower case, so on a volume that
+# hands back upper-case names — an ISO 9660 without Rock Ridge gives
+# VMLINUZ.;1 — it would find no kernel and offer no entry to boot.
+cat > "$T/kn.c" <<'KNEOF'
+#include <stdio.h>
+typedef unsigned short CHAR16;
+#include "kernelname.h"
+static CHAR16 *w(const char *a, CHAR16 *b) { int i = 0; for (; a[i]; i++) b[i] = (CHAR16)a[i]; b[i] = 0; return b; }
+int main(void) {
+    CHAR16 b[64];
+    struct { const char *n; int want; } cases[] = {
+        {"vmlinuz", 1}, {"VMLINUZ", 1}, {"VMLINUZ.;1", 1}, {"VmLiNuZ-6.12.9", 1},
+        {"vmlinuz-6.12.9", 1}, {"vmlinu", 0}, {"xvmlinuz", 0}, {"initramfs.img", 0},
+        {"", 0}, {"VMLINU", 0},
+    };
+    int bad = 0;
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++)
+        if (name_is_kernel(w(cases[i].n, b)) != cases[i].want) {
+            printf("%s: got %d\n", cases[i].n, name_is_kernel(w(cases[i].n, b)));
+            bad = 1;
+        }
+    return bad;
+}
+KNEOF
+if $CC -O2 -w -I pkg/vboot -o "$T/kn" "$T/kn.c" 2>/dev/null; then
+    check "vboot matches vmlinuz in any case, and nothing else" "'$T/kn'"
+else
+    printf '  \033[33mskip\033[0m  vboot kernel-name matching (would not compile)\n'
+fi
+
 say "the bootloader builds for both architectures"
 # only where a toolchain for the target exists; a missing cross-compiler is not
 # a test failure, it is a host without that toolchain
