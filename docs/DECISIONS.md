@@ -610,3 +610,46 @@ far from the cause.
   toolchain's own drivers still being present, which is luck rather than design.
 - 46 GB for one package's build directory on a 79 GB volume is not sustainable;
   the build does not clean up after itself.
+
+## D-022 — Two ways to run a system that forgets itself
+
+**Decision:** `vinstall --immutable` keeps the root on disk but mounts it
+read-only under a tmpfs overlay. `vinstall --ramdisk` goes further: there is no
+root partition at all — the system is one ext4 image on the EFI partition,
+loop-mounted at boot with the same overlay on top, and `rd.toram` copies it
+into RAM so the disk stops mattering once boot finishes.
+
+**Why both.** They answer different questions. An immutable install is a
+machine that must come up identical every time but still holds its own data —
+the changes cost tens of megabytes of RAM, not the 958 MB the system occupies.
+A diskless install is a machine where the disk is only a delivery mechanism.
+Offering only the first would not be "running a ramdisk"; offering only the
+second would demand a gigabyte of RAM to get ephemerality.
+
+**One mechanism, three uses.** urverk gained exactly three options, and between
+them they cover both modes *and* the live ISO still to come:
+
+    rd.image=PATH   the real root is a filesystem image on the device root= names
+    rd.toram        copy that image into RAM first
+    rd.overlay      stack a tmpfs over whatever the root turned out to be
+
+An immutable install is `rd.overlay`. A diskless one is `rd.image` +
+`rd.overlay` (+ `rd.toram`). A live ISO will be the same with `root=` naming
+the medium. Loop attachment is done with ioctls rather than by running
+`losetup`, so the initramfs does not have to carry another binary to hand three
+numbers to the kernel.
+
+**Refusals.** `--ramdisk` with `--immutable` (it already forgets everything),
+with `--encrypt` (the image would sit unencrypted on the ESP, which is not what
+asking for encryption means), and with `--swap`/`--home` (nothing is kept).
+
+**`mkfs.ext4 -d` was the obvious way to build the image and is wrong here.** It
+populates a filesystem straight from a directory tree with no intermediate
+copy — but it has no way to exclude anything, and the image has to live on the
+EFI partition, which is mounted *inside* the tree being copied. It copied
+itself into itself until it ran out of blocks. `copy_system()` already knows
+what to skip, and `/run` — where the ESP is mounted — is on its list.
+
+**Verified across two boots each**, which is the only way this can be checked:
+a file written on the first boot is gone on the second, and `/proc/mounts`
+shows the root as `overlay`.

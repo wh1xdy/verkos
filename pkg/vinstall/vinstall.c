@@ -978,11 +978,15 @@ int main(int argc, char **argv) {
                 die("cannot measure the system to be imaged");
         }
         unsigned long content = (unsigned long)atol(sz[0] ? sz : "1024");
-        unsigned long img_mb = content + content / 5 + 128;   /* a fifth of slack */
+        unsigned long img_mb = content + content / 4 + 256;   /* a quarter of slack */
         printf("    %lu MB of system, image sized at %lu MB\n", content, img_mb);
         run("truncate -s %luM %s/rootfs.img", img_mb, esp_dir);
-        run("mkfs.ext4 -q -F -m 0 -L VERKOS -d %s %s/rootfs.img",
-            sroot[0] ? sroot : "/", esp_dir);
+        /* Empty, then filled by copy_system below. "mkfs.ext4 -d" would be
+         * neater but has no way to exclude anything, and the image lives on a
+         * filesystem mounted inside the tree being copied — so it would copy
+         * itself into itself and run out of blocks. copy_system already knows
+         * what to skip, and /run is on its list. */
+        run("mkfs.ext4 -q -F -m 0 -L VERKOS %s/rootfs.img", esp_dir);
         run("mount -o loop %s/rootfs.img %s", esp_dir, MNT);
     } else {
     step("mounting the new system on %s", MNT);
@@ -993,10 +997,8 @@ int main(int argc, char **argv) {
     if (home_part[0]) { run("mkdir -p %s/home", MNT); run("mount %s %s/home", home_part, MNT); }
     }
 
-    if (!ramdisk_root) {
-        step("copying the system");
-        copy_system(MNT);
-    }
+    step("copying the system");
+    copy_system(MNT);
 
     step("installing vboot and writing the boot configuration");
     /* An immutable install differs from an ordinary one by exactly one word on
@@ -1065,7 +1067,11 @@ int main(int argc, char **argv) {
                "and nothing written survives a reboot.\n",
                toram ? ", copied into RAM at boot" : ", read from the disk as it runs");
     printf("\n\033[1;32mVerkOS is installed on %s.\033[0m\n", disk);
-    printf("Root filesystem UUID %s. Remove the install medium and reboot.\n\n", root_uuid);
+    if (ramdisk_root)
+        printf("The system image is %s/rootfs.img on the EFI partition (UUID %s).\n"
+               "Remove the install medium and reboot.\n\n", "", esp_uuid);
+    else
+        printf("Root filesystem UUID %s. Remove the install medium and reboot.\n\n", root_uuid);
     if (user) printf("An account for '%s' is ready to log in.\n\n", user);
     if (lock_root) printf("The root account is locked; use '%s' and su.\n\n", user ? user : "your account");
     return 0;
