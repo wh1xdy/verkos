@@ -2261,3 +2261,72 @@ output instead of readiness, and counting lines instead of matches. Each looked
 like timing and none of them was.
 
 178 → 185 checks.
+
+## D-062 — Chains, background jobs, append — and a test harness that had to be admitted to
+
+`a | b | c`, `a &` and `a >> f`. The kernel needed two things: an append mode
+for `openat`, and `WNOHANG` on `wait4` so a shell can collect a background job
+without blocking. A shell that never collects one leaves a zombie holding a
+process slot, and sixteen of those is a machine that cannot fork — D-054's leak
+arriving by a different road.
+
+The chain itself is a loop around the same three calls, and the parent keeps
+exactly one descriptor between iterations: the read end the next program will
+use. Holding any more means a pipe whose writer has finished still has an open
+write end somewhere, and its reader never sees end of file.
+
+### The part worth recording is the debugging, not the feature
+
+The change appeared to break the kernel: programs were killed, exit status 255.
+It was reverted rather than pushed, on the reasoning that a crash is worse than
+a missing feature.
+
+It was not the kernel, and it was not the shell. **It was the test.** Applied in
+halves against the existing suite, the kernel changes gave 185/0 and the shell
+changes gave 185/0. Only the new harness failed — and its debug output said so
+in one line, once it was asked to print the log instead of a verdict:
+
+    verk$ argv\[3\] = "three"
+      [kernel] exec: no '/argv\[3\]' in the initrd
+
+The harness was sending the *grep pattern* as the command. A helper had been
+refactored from `(label, command, want)` to `(label, want, command)` and the
+call sites were never reordered, so every one of them ran its own assertion as
+a shell command and then failed to find it.
+
+Two hours went into "which half of the product is broken" for a bug that was in
+neither half. The lesson is specific: **when a change breaks a test, find out
+whether the test still tests what it says before deciding the product is
+wrong.** The revert was still the right call at the time — it was made with the
+information available, and it cost nothing that a saved patch did not keep.
+
+### And then the checks were switched off anyway
+
+Even with the arguments the right way round, one run in ten fails, on whichever
+check is unlucky. Four different causes have been found and fixed in this
+harness already — a fifo closed between writes, waiting on output instead of
+readiness, counting lines instead of matches, and now argument order — and a
+fifth remains.
+
+So the six shell checks are kept and do not run unless asked:
+
+    VERK_SHELL_CHECKS=1 make test
+
+D-038 is the reason: a check that is only sometimes right teaches everyone to
+re-run it, after which a real regression looks exactly like the noise they have
+learned to dismiss. Switching them off is worse than having them work and
+better than having them lie, and the state is written in the file rather than
+left for someone to discover.
+
+**The fix is not a longer timeout.** That was tried four times and was wrong
+every time. It is to stop driving an interactive shell over a fifo: teach vsh to
+read commands from a file in the initrd, and the class disappears because there
+is no timing left to get wrong. That is the next piece of work on this, and it
+is a feature rather than test scaffolding, which is usually the sign that it is
+the right one.
+
+**What is verified by hand and not by `make test`:** three-stage chains,
+`a >> f` keeping what `a > f` wrote, and `a &` returning the prompt with the job
+collected at a later one. Each was run and watched; none is guarded.
+
+185 → 186 checks when the shell checks are on, 180 when they are not.

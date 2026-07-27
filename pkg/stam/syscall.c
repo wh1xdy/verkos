@@ -44,6 +44,8 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_OPENAT  56        /* aarch64 has no open(); openat is the call  */
 #define O_WRONLY    1
 #define O_CREAT     0100
+#define O_APPEND    02000
+#define WNOHANG     1
 
 #define EFAULT ((uint64_t)-14)
 
@@ -298,7 +300,10 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
         const char *p = (const char *)(uintptr_t)b;
         for (long k = 0; k <= n; k++) name[k] = p[k];
         file_t *f = 0;
-        int rc = file_open(name, (c & (O_WRONLY | O_CREAT)) != 0, &f);
+        int mode = OPEN_READ;
+        if (c & O_APPEND)                    mode = OPEN_APPEND;
+        else if (c & (O_WRONLY | O_CREAT))   mode = OPEN_WRITE;
+        int rc = file_open(name, mode, &f);
         if (rc < 0) return (uint64_t)(long)rc;
         int fd = fd_alloc(f);
         if (fd < 0) { file_close(f); return (uint64_t)-24; }
@@ -324,7 +329,13 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
          * child collected and its status thrown at an address nobody owns. */
         if (b && !vm_user_ok(b, sizeof(int), 1)) return EFAULT;
         int st = 0;
-        int id = thread_wait(&st);
+        /* WNOHANG is what makes `&` survivable. A shell that never collects a
+         * background job leaves a zombie holding a slot, and sixteen of those
+         * is a machine that cannot fork — which is D-054's leak arriving by a
+         * different road. Returning 0 for "nothing finished yet" is Linux's
+         * answer and the one a shell already knows how to read. */
+        int id = (c & WNOHANG) ? thread_reap(&st) : thread_wait(&st);
+        if (id == 0 && (c & WNOHANG)) return 0;
         if (id < 0) return (uint64_t)-10;                    /* -ECHILD */
         /* Checked again: thread_wait blocks, and the answer to "is this
          * address the caller's" is only true at the moment it is used. */

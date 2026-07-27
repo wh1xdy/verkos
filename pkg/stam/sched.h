@@ -34,6 +34,8 @@ void      schedule(void);
 void      thread_yield(void);
 void      thread_exit(int status);
 int       thread_wait(int *status_out);
+/* Non-blocking: the child's id, 0 if none has finished, -1 if there are none. */
+int       thread_reap(int *status_out);
 #define WAIT_CHILD   1
 #define WAIT_CONSOLE 2
 #define WAIT_PIPE    3

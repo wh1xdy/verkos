@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-061.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-062.
 
 ---
 
@@ -126,8 +126,9 @@ What it does today, each verified by running it:
 - Preemptive round-robin scheduling driven from the timer interrupt, with the
   kernel in the high half (TTBR1) and every process holding its own low half
   (D-037, D-042, D-043).
-- Twelve system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
-  `wait4`, `close`, `dup`, `dup3`, `pipe2`, `openat` — using Linux's aarch64 numbers,
+- Thirteen system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
+  `wait4`, `close`, `dup`, `dup3`, `pipe2`, `openat` — with `WNOHANG` and
+  `O_APPEND` — using Linux's aarch64 numbers,
   because the numbering is the cheapest part of an ABI to agree with (D-039). **Every pointer they are given is
   checked** against the caller's own page tables before it is dereferenced: the
   MMU stops a program reaching kernel memory, but says nothing about the kernel
@@ -141,7 +142,7 @@ What it does today, each verified by running it:
   programs that each believe they are talking to a terminal. End of file is the
   last writer letting go (D-059).
 - **A shell**, `vsh`: prompt, read a line, split it, fork, exec with arguments,
-  wait — and `a | b`, `a > f`, `a < f`. That is the evidence, not the feature — being able to write a shell as
+  wait — and `a | b | c`, `a > f`, `a >> f`, `a < f`, `a &`. That is the evidence, not the feature — being able to write a shell as
   an ordinary program with no privileges and nothing the kernel knows about it
   is what shows the interface underneath is real (D-049, D-054).
 - An interrupt-driven console with a line discipline, and a machine that actually

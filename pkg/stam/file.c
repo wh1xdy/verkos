@@ -90,11 +90,11 @@ static int name_eq(const char *a, const char *b) {
  * stores names without one and people type one. */
 static const char *skip_slash(const char *s) { return s[0] == '/' ? s + 1 : s; }
 
-int file_open(const char *name, int for_writing, file_t **out) {
+int file_open(const char *name, int mode, file_t **out) {
     name = skip_slash(name);
     uint64_t s = irq_save();
 
-    if (for_writing) {
+    if (mode != OPEN_READ) {
         memfile_t *m = 0;
         for (int i = 0; i < NMEM; i++)
             if (memfiles[i].used && name_eq(memfiles[i].name, name)) { m = &memfiles[i]; break; }
@@ -105,11 +105,16 @@ int file_open(const char *name, int for_writing, file_t **out) {
         unsigned k = 0;
         for (; k < NAME_MAX - 1 && name[k]; k++) m->name[k] = name[k];
         m->name[k] = 0;
-        m->len = 0;                     /* opening for writing truncates */
+        /* Truncating is what `>` means and appending is what `>>` means, and
+         * the difference is one line here and the whole difference between
+         * losing yesterday's log and keeping it. */
+        int existed = m->used;
+        if (mode == OPEN_WRITE || !existed) m->len = 0;
         m->used = 1;
         struct file *f = file_alloc(FILE_MEM, 0);
         if (!f) { irq_restore(s); return -24; }
-        f->mem = m; f->pos = 0;
+        f->mem = m;
+        f->pos = (mode == OPEN_APPEND) ? m->len : 0;
         *out = f;
         irq_restore(s);
         return 0;

@@ -47,7 +47,10 @@ void file_set_archive(uint64_t addr, uint64_t size);
  * goes to a small fixed table of named buffers. It is enough for `a > f` and
  * `b < f` to mean what they say, and it is not a filesystem, which is why it
  * is not called one. Returns 0, or a negative errno. */
-int file_open(const char *name, int for_writing, file_t **out);
+#define OPEN_READ    0
+#define OPEN_WRITE   1        /* create or truncate */
+#define OPEN_APPEND  2        /* create, and start at the end */
+int file_open(const char *name, int mode, file_t **out);
 
 file_t *file_ref(file_t *f);   /* one more holder */
 void    file_close(file_t *f); /* one fewer; the last one releases it */

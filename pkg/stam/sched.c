@@ -295,6 +295,50 @@ void thread_wake_console(void) {
 /* Collect a finished child. Blocks if one is still running, returns -1 if
  * there was never a child to wait for — the distinction matters, because a
  * program that waits with no children should be told so rather than hang. */
+/* The slot goes back on the shelf, so clear what the next occupant must not
+ * inherit. `parent` especially: a stale one on a free slot is harmless, but a
+ * stale one that survived into a reused slot would make an unrelated process
+ * look like somebody's child. Called with interrupts masked. */
+static void release_slot(thread_t *t) {
+    if (t->stack_low) {
+        for (unsigned p = 0; p < STACK_PAGES; p++)
+            free_page((void *)(uintptr_t)(t->stack_low + p * PAGE_SIZE));
+        t->stack_low = 0;
+    }
+    t->parent      = -1;
+    t->id          = -1;
+    t->space       = 0;
+    t->status      = 0;
+    t->wait_reason = 0;
+    t->wait_object = 0;
+    t->name        = "free";
+    t->sp          = 0;
+    t->state       = THREAD_FREE;
+}
+
+/* Collect a finished child if there is one, without waiting. Returns its id,
+ * 0 for "children exist but none has finished", or -1 for "no children at
+ * all" — Linux's three answers, because a shell already knows how to read
+ * them. The whole body is one masked section for the same reason thread_wait
+ * is: the scan and the claim must not be split. */
+int thread_reap(int *status_out) {
+    uint64_t f = irq_save();
+    int have_children = 0;
+    for (int i = 0; i < n_threads; i++) {
+        if (threads[i].parent != current->id) continue;
+        if (threads[i].state == THREAD_ZOMBIE) {
+            int id = threads[i].id;
+            if (status_out) *status_out = threads[i].status;
+            release_slot(&threads[i]);
+            irq_restore(f);
+            return id;
+        }
+        if (threads[i].state != THREAD_FREE) have_children = 1;
+    }
+    irq_restore(f);
+    return have_children ? 0 : -1;
+}
+
 int thread_wait(int *status_out) {
     for (;;) {
         int have_children = 0;
@@ -309,24 +353,7 @@ int thread_wait(int *status_out) {
             if (threads[i].state == THREAD_ZOMBIE) {
                 int id = threads[i].id;
                 if (status_out) *status_out = threads[i].status;
-                if (threads[i].stack_low) {
-                    for (unsigned p = 0; p < STACK_PAGES; p++)
-                        free_page((void *)(uintptr_t)(threads[i].stack_low + p * PAGE_SIZE));
-                    threads[i].stack_low = 0;
-                }
-                /* The slot goes back on the shelf, so clear what the next
-                 * occupant must not inherit. `parent` especially: a stale one
-                 * on a free slot is harmless, but a stale one that survived
-                 * into a reused slot would make an unrelated process look like
-                 * somebody's child. */
-                threads[i].parent      = -1;
-                threads[i].id          = -1;
-                threads[i].space       = 0;
-                threads[i].status      = 0;
-                threads[i].wait_reason = 0;
-                threads[i].name        = "free";
-                threads[i].sp          = 0;
-                threads[i].state       = THREAD_FREE;
+                release_slot(&threads[i]);
                 irq_restore(f);
                 return id;
             }

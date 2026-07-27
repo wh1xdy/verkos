@@ -8,7 +8,7 @@
  * the kernel, it is a program like any other, and being able to write it as one
  * is the evidence that the interface beneath it is real.
  *
- * It passes arguments, runs a|b, and redirects with > and <.
+ * It passes arguments, runs a | b | c, redirects with > >> and <,\n * and puts a job in the background with &.
  */
 static long syscall3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
@@ -25,11 +25,17 @@ static long pipe_(int fds[2])           { return syscall3(59, (long)fds, 0, 0); 
 static long dup3_(int old, int newfd)   { return syscall3(24, old, newfd, 0); }
 /* openat(AT_FDCWD, path, flags): -100 is AT_FDCWD, which the kernel ignores
  * because there are no directories. 0 is read-only; O_WRONLY|O_CREAT is 0101. */
-static long open_(const char *p, int write) { return syscall3(56, -100, (long)p, write ? 0101 : 0); }
+/* 0 read, 0101 = O_WRONLY|O_CREAT, 02101 adds O_APPEND. */
+static long open_(const char *p, int mode) {
+    return syscall3(56, -100, (long)p, mode == 0 ? 0 : (mode == 1 ? 0101 : 02101));
+}
 static long getpid(void)          { return syscall3(172, 0, 0, 0); }
 static long fork_(void)           { return syscall3(220, 0, 0, 0); }
 static long exec_(const char *p, char *const *av) { return syscall3(221, (long)p, (long)av, 0); }
 static long wait_(int *st)        { return syscall3(260, -1, (long)st, 0); }
+/* WNOHANG. Background jobs are collected here rather than waited for, because
+ * a shell that never collects them leaves zombies holding process slots. */
+static long reap_(int *st)        { return syscall3(260, -1, (long)st, 1); }
 static void exit_(int c)          { syscall3(93, c, 0, 0); __builtin_unreachable(); }
 
 static unsigned long slen(const char *s) { unsigned long n = 0; while (s[n]) n++; return n; }
@@ -46,7 +52,8 @@ static int same(const char *a, const char *b) {
     return *a == *b;
 }
 
-#define MAX_WORDS 16
+#define MAX_WORDS 24
+#define MAX_SEG    4
 
 /* Split the line in place: every run of spaces becomes a terminator, and each
  * word is pointed at where it already lies. Nothing is copied, so there is no
@@ -69,8 +76,8 @@ static int split(char *line, char *words[], int max) {
 /* Open a name and put it at fd 0 or 1. Runs in the child, after the fork and
  * before the exec, which is the only moment at which the descriptors can be
  * arranged for a program that does not know they were. */
-static int redirect(const char *name, int fd, int write) {
-    long f = open_(name, write);
+static int redirect(const char *name, int fd, int mode) {
+    long f = open_(name, mode);
     if (f < 0) {
         say("  vsh: cannot open ");
         say(name);
@@ -108,6 +115,15 @@ int main_loop(void) {
     say("  Try: hello one two, forky, twice.  Also: help, pid, exit.\n\n");
 
     for (;;) {
+        /* Collect anything that finished in the background. Done at the
+         * prompt because that is where the shell is idle and where a person
+         * can be told, and because the alternative is a slot leak. */
+        for (;;) {
+            int st = 0;
+            long done = reap_(&st);
+            if (done <= 0) break;
+            say("  [done "); say_num(done); say("]\n");
+        }
         say("verk$ ");
         long n = read_(line, sizeof line);
         if (n <= 0) continue;
@@ -123,22 +139,26 @@ int main_loop(void) {
             say("  built in: help, pid, exit\n");
             say("  anything else is looked for in the initrd and run,\n");
             say("  with the rest of the line as its arguments.\n");
-            say("  a | b   runs both, b reading what a writes\n");
-            say("  a > f   sends a's output to f;  a < f  feeds a from f\n");
+            say("  a | b | c   each reads what the one before it writes\n");
+            say("  a > f  a >> f  a < f   redirect, truncating or appending\n");
+            say("  a &    run it in the background\n");
             continue;
         }
 
-        /* Pull > and < out of the words before anything else looks at them, so
-         * the redirection is not mistaken for an argument. Removing them here
-         * rather than in the child means a bad filename is reported by the
-         * shell, at the prompt, instead of by a process that has already
-         * forked and can only exit with a number. */
+        /* Pull the redirections and the trailing & out of the words before
+         * anything else looks at them, so a filename is never mistaken for an
+         * argument. Doing it here rather than in the child means a bad
+         * filename is reported at the prompt instead of by a process that has
+         * already forked and can only exit with a number. */
         char *out_name = 0, *in_name = 0;
+        int out_append = 0, background = 0;
         {
+            if (nw > 0 && same(words[nw - 1], "&")) { background = 1; words[--nw] = 0; }
             int w = 0;
             for (int i = 0; i < nw; i++) {
-                if (same(words[i], ">") && i + 1 < nw)      { out_name = words[++i]; continue; }
-                if (same(words[i], "<") && i + 1 < nw)      { in_name  = words[++i]; continue; }
+                if (same(words[i], ">>") && i + 1 < nw) { out_name = words[++i]; out_append = 1; continue; }
+                if (same(words[i], ">")  && i + 1 < nw) { out_name = words[++i]; out_append = 0; continue; }
+                if (same(words[i], "<")  && i + 1 < nw) { in_name  = words[++i]; continue; }
                 words[w++] = words[i];
             }
             words[w] = 0;
@@ -146,62 +166,72 @@ int main_loop(void) {
             if (nw == 0) { say("  vsh: no command\n"); continue; }
         }
 
-        /* Split at the first | into two argument vectors. One pipe, not a
-         * chain: two programs is what proves the descriptors are real, and
-         * arbitrarily many is a loop around the same three system calls. */
-        char **left = words, **right = 0;
+        /* Split on | into segments. A chain is the same three system calls in
+         * a loop, and writing the loop is what shows the descriptors are
+         * general rather than a special case with two sides. */
+        char **seg[MAX_SEG];
+        int nseg = 0;
+        seg[nseg++] = words;
         for (int i = 0; i < nw; i++)
-            if (same(words[i], "|")) { words[i] = 0; right = &words[i + 1]; break; }
-        if (right && !*right) { say("  vsh: nothing after |\n"); continue; }
-
-        int pfd[2] = { -1, -1 };
-        if (right && pipe_(pfd) < 0) { say("  vsh: cannot make a pipe\n"); continue; }
-
-        long a = fork_();
-        if (a == 0) {
-            /* The left-hand side writes into the pipe instead of the console.
-             * dup3 puts the write end at fd 1, and then both original
-             * descriptors are closed — the program must not inherit a spare
-             * copy of the read end, because a pipe with a reader still open
-             * never reports end of file and the right-hand side never
-             * finishes. */
-            if (right) {
-                dup3_(pfd[1], 1);
-                close_(pfd[0]); close_(pfd[1]);
+            if (same(words[i], "|")) {
+                words[i] = 0;
+                if (nseg == MAX_SEG) { nseg = -1; break; }
+                seg[nseg++] = &words[i + 1];
             }
-            /* Redirection is applied after the pipe, so `a < f | b` reads from
-             * the file and still writes into the pipe, and an explicit `> f`
-             * on the left of a pipe wins over the pipe — which is what every
-             * shell does, and is the last one named taking effect. */
-            if (in_name && redirect(in_name, 0, 0) < 0) exit_(1);
-            if (!right && out_name && redirect(out_name, 1, 1) < 0) exit_(1);
-            run_or_die(path, sizeof path, left);
-        }
-        if (a < 0) {
-            if (right) { close_(pfd[0]); close_(pfd[1]); }
-            say("  vsh: cannot fork\n"); continue;
+        if (nseg < 0) { say("  vsh: too many pipes\n"); continue; }
+        {
+            int empty = 0;
+            for (int i = 0; i < nseg; i++) if (!*seg[i]) empty = 1;
+            if (empty) { say("  vsh: empty command in the pipeline\n"); continue; }
         }
 
-        long b = -1;
-        if (right) {
-            b = fork_();
-            if (b == 0) {
-                dup3_(pfd[0], 0);
-                close_(pfd[0]); close_(pfd[1]);
-                if (out_name && redirect(out_name, 1, 1) < 0) exit_(1);
-                run_or_die(path, sizeof path, right);
+        /* One pipe at a time, and the parent keeps exactly one descriptor
+         * between iterations: the read end the next program will use. Holding
+         * any more means a pipe whose writer has finished still has an open
+         * write end somewhere, and its reader never sees end of file. */
+        int prev_read = -1, failed = 0;
+        long last = -1;
+        for (int i = 0; i < nseg; i++) {
+            int pfd[2] = { -1, -1 };
+            if (i + 1 < nseg && pipe_(pfd) < 0) { say("  vsh: cannot make a pipe\n"); failed = 1; break; }
+
+            long pid = fork_();
+            if (pid == 0) {
+                if (prev_read >= 0) { dup3_(prev_read, 0); close_(prev_read); }
+                else if (in_name && redirect(in_name, 0, 0) < 0) exit_(1);
+
+                if (i + 1 < nseg) { dup3_(pfd[1], 1); close_(pfd[0]); close_(pfd[1]); }
+                else if (out_name && redirect(out_name, 1, out_append ? 2 : 1) < 0) exit_(1);
+
+                run_or_die(path, sizeof path, seg[i]);
             }
+            if (prev_read >= 0) close_(prev_read);
+            if (pid < 0) {
+                say("  vsh: cannot fork\n");
+                if (i + 1 < nseg) { close_(pfd[0]); close_(pfd[1]); }
+                failed = 1;
+                break;
+            }
+            if (i + 1 < nseg) { close_(pfd[1]); prev_read = pfd[0]; }
+            else prev_read = -1;
+            last = pid;
         }
-        /* And the shell closes its own ends, for the same reason: while it
-         * holds the write end, the reader is still waiting for it. */
-        if (right) { close_(pfd[0]); close_(pfd[1]); }
-        if (right && b < 0) { say("  vsh: cannot fork\n"); }
+        if (prev_read >= 0) close_(prev_read);
+        if (failed) continue;
+
+        if (background) {
+            /* Not waited for. Collected later, at a prompt, because a zombie
+             * holds a process slot and sixteen of those is a machine that
+             * cannot fork. */
+            say("  ["); say_num(last); say("]\n");
+            continue;
+        }
 
         int status = 0;
-        wait_(&status);
-        if (right && b >= 0) wait_(&status);      /* the right-hand code wins */
+        for (int i = 0; i < nseg; i++) wait_(&status);   /* the last one's code wins */
         int code = (status >> 8) & 0xff;
         if (code) { say("  ["); say_num(code); say("]\n"); }
+
     }
 }
 
