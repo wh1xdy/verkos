@@ -2676,3 +2676,58 @@ Everything else in D-068 stands unchanged: the firmware read the partition
 table vpart wrote, loaded vboot out of the filesystem vmkfs wrote, and vboot
 read back all 46 MB of the kernel. Those hold in both configurations, because
 they happen before the tree matters.
+
+## D-069 — Why Linux went silent: four things the synthetic tree never had
+
+D-068 established that Linux boots when the firmware publishes a device tree
+and says nothing at all when vboot synthesises one. This is which nodes are
+missing, established by listing every `fg_node`/`fg_prop` call in `vboot.c` and
+comparing it against the tree QEMU's `virt` machine publishes for the same
+hardware.
+
+**1. There is no `phandle` anywhere, and therefore no `interrupt-parent`.**
+`grep -c 'phandle\|interrupt-parent\|clock' pkg/vboot/vboot.c` returns zero.
+QEMU gives its GIC `phandle = 32771` and points the machine at it. Without one,
+Linux cannot resolve *any* `interrupts` property it reads — including the
+architected timer's, which it needs before it can do anything at all. This is
+the fatal one, and it is fatal early enough to explain a machine that prints
+nothing.
+
+**2. The serial has no clock.** QEMU's PL011 carries
+`clock-names = "uartclk","apb_pclk"` and `clocks` pointing at a fixed-clock
+node. Linux's `amba-pl011` driver will not probe a PL011 without one. vboot's
+serial node has exactly two properties: `compatible` and `reg`.
+
+**3. The serial has no `interrupts`,** which the same driver also requires.
+
+**4. `compatible` is `arm,pl011` alone**, where QEMU writes
+`"arm,pl011","arm,primecell"`. The second is what makes the AMBA bus claim the
+device in the first place.
+
+Also missing but survivable: `enable-method = "psci"` on the CPUs and a `/psci`
+node, without which secondary cores never start. Linux would come up on one CPU
+and say so — which is a different failure from saying nothing.
+
+### Why this was invisible
+
+Every one of the four is something **stam does not need**. stam reads the
+timer's interrupt number straight out of the `interrupts` property and never
+resolves a phandle, because it has exactly one interrupt controller and knows
+where it is. Its console is a register write; a PL011 clock is a fact about a
+driver model it does not have. So the tree was built to the question *what does
+our kernel need to find its hardware*, it answered that question completely,
+and the answer was tested by a kernel that asks a fraction of what Linux asks.
+
+D-035 said the tree was "deliberately thin: what cannot be discovered without
+firmware help, and nothing more". That was the right principle and the wrong
+scope — for stam. For Linux, a phandle is not decoration.
+
+**Not fixed here.** Writing it means giving the GIC a phandle, emitting an
+`interrupt-parent`, adding a fixed-clock node and wiring the PL011 to it, and
+reading the console's interrupt out of SPCR — which the ACPI reader does not
+currently take. That is a contained piece of work with a decisive test already
+built: boot the same disk under plain AAVMF and see whether a prompt appears.
+
+It is worth stating what this does *not* affect. `vpart`, `vmkfs` and the boot
+chain up to the kernel handover were proved in both configurations (D-068),
+because all of that happens before the tree matters.
