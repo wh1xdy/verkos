@@ -2834,3 +2834,47 @@ its own, and one node short of a system.
 211 checks, unchanged. Nothing here is guarded, because nothing in `make test`
 boots a distro under firmware — the same gap D-055 closed for stam and D-070
 already named.
+
+## D-072 — Stop handing Linux a worse description than it already had
+
+The PCI bridge was going to be the next node. It cannot be: PCI resources live
+in ACPI's DSDT as AML, so emitting `ranges` and `interrupt-map` would mean an
+AML interpreter inside a bootloader. Hardcoding QEMU's windows was the other
+option, and D-031's first sentence rules it out — *nothing in it is hardcoded*
+is the reason the kernel runs on more than one machine.
+
+Which made the question worth asking properly: **why is Linux being given a
+device tree at all?**
+
+vboot synthesises one because **stam** cannot read ACPI (D-035). Linux can, and
+on arm64 does it well. But Linux prefers a device tree whenever one is present
+— so installing ours makes it ignore a complete description of the machine in
+favour of an incomplete one, and then go looking for a disk on a bus the
+incomplete one never mentions. Every gap chased since D-069 was a consequence
+of supplying the tree, not a reason to improve it.
+
+So `synthdtb` is a configuration keyword and it is **off by default**. That
+default is the decision. A kernel that cannot read ACPI turns it on; stam is
+the only one.
+
+**The result, under plain AAVMF, with no `acpi=off` and no tree from the
+firmware:** the machine boots to `root@verkos:~#`. 492 programs, both CPUs, the
+disk found, the whole userland. That is what an ACPI-only ARM server does now,
+and it is what D-068 said would boot into silence.
+
+### What the detour was worth
+
+Four wrong diagnoses and two real bugs, all of them still fixed and all of them
+still correct: the timer that fired at no processor (D-071), four identical
+interrupt triples where four different ones belong, a missing phandle and
+interrupt-parent, a PL011 with no clock and no interrupt (D-070). The tree is
+much better than it was, and stam is the kernel that benefits.
+
+The lesson is narrower than "we were wrong four times". Each fix was argued
+from a real difference against a working tree, and each was needed. What none
+of them questioned was the premise — that the tree should be there. The
+evidence for the premise was that vboot had always installed one, which is not
+evidence.
+
+211 checks, unchanged. Nothing here is guarded, and after five rounds of this
+that is the most uncomfortable line in the entry.

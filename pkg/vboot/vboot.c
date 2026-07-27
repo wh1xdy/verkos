@@ -47,6 +47,7 @@ static int      n_entries, cfg_default, cfg_timeout = 5;
 static void print(CHAR16 *s) { ST->ConOut->OutputString(ST->ConOut, s); }
 
 static int vb_cfg_dumpdtb;
+static int vb_cfg_synthdtb;
 
 static void vb_print_ascii(const char *s) {
     CHAR16 w[128]; int i = 0;
@@ -267,6 +268,10 @@ static void parse_config(unsigned char *buf) {
             copy_line(p + off, cur->cmdline, CMDLINE_MAX);
         } else if ((off = keyword(p, "timeout"))) {
             cfg_timeout = (int)parse_num(p + off);
+        } else if ((off = keyword(p, "synthdtb"))) {
+            /* Build a device tree out of ACPI and install it. Off by default,
+             * and that default is the decision (D-072). */
+            vb_cfg_synthdtb = 1; (void)off;
         } else if ((off = keyword(p, "dumpdtb"))) {
             /* Print the device tree we build, node by node, before handing it
              * over. Everything else in this file reports what vboot believes
@@ -948,13 +953,26 @@ static EFI_STATUS boot_entry(EFI_HANDLE image, EFI_FILE_PROTOCOL *root, entry_t 
     print(L"\r\n  vboot: "); print(e->title); print(L"\r\n");
     print(L"  [..] loading "); print(e->kernel); print(L"\r\n");
 
-    /* A kernel started here may be ours, which expects a device tree. If the
-     * firmware did not publish one, build it — this is the whole reason vboot
-     * exists on a machine whose firmware could have loaded the kernel itself. */
-    switch (vb_install_dtb()) {
-    case 1:  print(L"  [ok] device tree built and installed (firmware had none)\r\n"); break;
-    case 0:  print(L"  [ok] firmware provides a device tree\r\n"); break;
-    default: print(L"  [!!] could not build a device tree\r\n"); break;
+    /* A kernel started here may be ours, which expects a device tree and
+     * cannot read ACPI. On a machine whose firmware describes itself with
+     * ACPI, building one is the whole reason vboot exists — for stam.
+     *
+     * For Linux it is the opposite. Linux reads ACPI perfectly well on arm64,
+     * and prefers a device tree whenever one is present: installing ours makes
+     * it ignore a complete description of the machine in favour of an
+     * incomplete one. Everything it then cannot find — the PCI bus, and so the
+     * disk — is something ACPI would have told it. And the missing half cannot
+     * be supplied: PCI resources live in the DSDT as AML, so emitting that
+     * node would mean an AML interpreter inside a bootloader.
+     *
+     * So the tree is built only when asked for, and that default is the
+     * decision (D-072). `synthdtb` in an entry turns it on. */
+    if (vb_cfg_synthdtb) {
+        switch (vb_install_dtb()) {
+        case 1:  print(L"  [ok] device tree built and installed (firmware had none)\r\n"); break;
+        case 0:  print(L"  [ok] firmware provides a device tree\r\n"); break;
+        default: print(L"  [!!] could not build a device tree\r\n"); break;
+        }
     }
 
     UINTN ksize = 0;
