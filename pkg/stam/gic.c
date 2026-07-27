@@ -12,6 +12,7 @@
  * identical to having no timer at all.
  */
 #include "gic.h"
+#include "smp.h"
 #include "console.h"
 #include "sched.h"
 #include "fdt.h"
@@ -29,7 +30,9 @@
 #define GICC_EOIR         0x010
 
 static volatile uint8_t *gicd, *gicc;   /* v2: distributor, CPU interface   */
-static volatile uint8_t *gicr;          /* v3: this CPU's redistributor     */
+static int timer_intid = -1, console_intid = -1;
+static volatile uint8_t *gicr;          /* v3: the boot CPU's redistributor */
+static uint64_t gicr_base;              /* v3: the first frame, for the walk */
 static int gic_present;
 static int gic_v3;
 
@@ -71,6 +74,7 @@ static int gic_init_v3(const fdt_t *f, int node) {
     if (reg_index(f, node, 0, &dist) || reg_index(f, node, 1, &redist)) return -1;
     gicd = (volatile uint8_t *)(uintptr_t)phys_to_kva(dist);
     gicr = (volatile uint8_t *)(uintptr_t)phys_to_kva(redist);
+    gicr_base = phys_to_kva(redist);
 
     /* Wake the redistributor: clear ProcessorSleep, then wait until it says
      * its children are awake. Skipping the wait is a race that usually works. */
@@ -127,6 +131,64 @@ int gic_init(const fdt_t *f) {
     return 0;
 }
 
+/* This core's redistributor frame, in a v3.
+ *
+ * The frames are laid out one after another, 128 KiB each — RD_base and
+ * SGI_base, 64 KiB apiece — and which belongs to which processor is in
+ * GICR_TYPER's top 32 bits, as an affinity value. Not by index: the order is
+ * the firmware's to choose, and a kernel that assumed frame N belonged to CPU N
+ * would work on QEMU and be wrong on a machine that numbered them differently.
+ * TYPER bit 4 marks the last frame, which is where the walk stops. */
+static volatile uint8_t *gicr_for_me(void) {
+    uint64_t me = cpu_mpidr();
+    /* MPIDR to the affinity form TYPER uses: Aff3 moves down beside Aff2..0. */
+    uint32_t want = (uint32_t)((me & 0xffffffull) | ((me >> 32) & 0xffull) << 24);
+    for (volatile uint8_t *f = (volatile uint8_t *)(uintptr_t)gicr_base; ; f += 0x20000) {
+        uint64_t typer = *(volatile uint64_t *)(uintptr_t)(f + 0x0008);
+        if ((uint32_t)(typer >> 32) == want) return f;
+        if (typer & (1ull << 4)) return 0;          /* that was the last one */
+    }
+}
+
+/* The half of the controller that belongs to one processor rather than to the
+ * machine. gic_init does the distributor, which is shared and set up once; this
+ * is what every core has to do for itself, and a core that skips it takes no
+ * interrupts and says nothing about why. */
+void gic_cpu_init(void) {
+    if (!gic_present) return;
+    if (gic_v3) {
+        volatile uint8_t *r = gicr_for_me();
+        if (!r) { kprintf("  gic       no redistributor for this cpu\n"); return; }
+        uint32_t waker = rd(r, 0x0014);
+        wr(r, 0x0014, waker & ~(1u << 1));
+        for (int spin = 0; spin < 1000000; spin++)
+            if (!(rd(r, 0x0014) & (1u << 2))) break;
+        SYSREG_WRITE(ICC_SRE_EL1, SYSREG_READ(ICC_SRE_EL1) | 1);
+        SYSREG_WRITE(ICC_PMR_EL1, 0xf0);
+        SYSREG_WRITE(ICC_IGRPEN1_EL1, 1);
+        /* The timer's PPI, in this core's own SGI frame. Interrupts below 32
+         * are per-processor and enabling one on the boot core enables nothing
+         * anywhere else. */
+        volatile uint8_t *sgi = r + 0x10000;
+        unsigned t = timer_intid >= 0 ? (unsigned)timer_intid : 30;
+        if (t < 32) {
+            wr(sgi, 0x0080, rd(sgi, 0x0080) | (1u << t));      /* group 1 */
+            *(volatile uint8_t *)(sgi + 0x0400 + t) = 0xa0;
+            wr(sgi, 0x0100, 1u << t);
+        }
+        return;
+    }
+    wr(gicc, GICC_PMR, 0xf0);
+    wr(gicc, GICC_CTLR, 1);
+    /* In a v2 the first 32 interrupt numbers are banked: this write reaches
+     * this core's copy of the enable register, not the one the primary set. */
+    unsigned t = timer_intid ? (unsigned)timer_intid : 30;
+    if (t < 32) {
+        *(volatile uint8_t *)(gicd + GICD_IPRIORITYR + t) = 0xa0;
+        wr(gicd, GICD_ISENABLER + (t / 32) * 4, 1u << (t % 32));
+    }
+}
+
 void gic_enable_irq(unsigned intid) {
     if (!gic_present) return;
     /* Priority first, then enable: enabling an interrupt whose priority is
@@ -168,7 +230,6 @@ int gic_timer_irq(const fdt_t *f) {
  * done — in that order, or the interrupt arrives again immediately. */
 extern void timer_tick(void);
 extern void console_interrupt(void);
-static int timer_intid = -1, console_intid = -1;
 void gic_set_timer_irq(int id)   { timer_intid = id; }
 void gic_set_console_irq(int id) { console_intid = id; }
 
@@ -184,7 +245,15 @@ void irq_dispatch(void *frame) {
     unsigned id = iar & 0xffffff;
     if (id >= 1020) return;                  /* spurious */
     if ((int)id == timer_intid) timer_tick();
-    else if ((int)id == console_intid) { console_interrupt(); thread_wake_console(); }
+    else if ((int)id == console_intid) {
+        console_interrupt();
+        /* The lock, because a reader on another processor may be between
+         * "nothing to read" and "I am blocked" right now, and that is the whole
+         * window this is about. */
+        uint64_t f = sched_lock_irq();
+        thread_wake_console();
+        sched_unlock_irq(f);
+    }
     /* Tell the controller we are done *before* switching threads. Otherwise
      * the interrupt stays active while another thread runs, and that thread
      * can never be interrupted in turn — the machine would appear to schedule

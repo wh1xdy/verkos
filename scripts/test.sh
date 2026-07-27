@@ -1061,9 +1061,9 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     -smp 2 -display none -serial "file:$SM" -no-reboot \
                     -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
                     </dev/null >/dev/null 2>&1 & echo $! > "$T/qpid" )
-                for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
                     sleep 1
-                    grep -aq 'cpus      2 online' "$SM" 2>/dev/null && break
+                    grep -aq 'the work was spread over' "$SM" 2>/dev/null && break
                     grep -aq 'never arrived' "$SM" 2>/dev/null && break
                 done
                 kill "$(cat "$T/qpid")" 2>/dev/null
@@ -1075,6 +1075,17 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 # the core knows which one it is.
                 check "the second processor reports its own identity" \
                       "grep -aq 'cpu 1      online, mpidr' $SM"
+                # Online is not the same as working. This counts the processors
+                # that actually ran each thread — a bit set by the scheduler on
+                # the core that took it, so the number cannot be larger than the
+                # truth, and it says "1 processor" on a one-core machine rather
+                # than falling silent.
+                check "the threads run on both processors" \
+                      "grep -aq 'the work was spread over 2 processors' $SM"
+                # Each core's own tick count. One shared counter would say the
+                # machine was ticking while a core took nothing at all.
+                check "the second processor takes its own timer interrupts" \
+                      "grep -aqE 'cpu 1 took [1-9][0-9]* timer interrupts' $SM"
 
                 # --- the shell, from a script -------------------------------
                 # No fifo, no sleeps between commands, no interactive session to

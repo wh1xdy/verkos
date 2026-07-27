@@ -3214,3 +3214,92 @@ effect, which is worth naming in the header rather than leaving to be
 discovered.
 
 `make test`: 231 checks, was 228.
+
+## D-078 — the other processors do the work
+
+**2026-07-28.** D-076 started them and parked them, and said why: `current` was
+one variable for the whole machine and the kernel's locking was interrupt
+masking, which locks nothing against another core. Both are now false.
+
+```
+    boot       scheduled 76 times, last on cpu 0
+    worker-a    scheduled 62 times, last on cpu 0
+    worker-b    scheduled 49 times, last on cpu 1
+    worker-c    scheduled 45 times, last on cpu 3
+  the work was spread over 4 processors.
+    cpu 0 took 151 timer interrupts
+    cpu 1 took  50 timer interrupts
+    cpu 2 took  51 timer interrupts
+    cpu 3 took  50 timer interrupts
+```
+
+### What changed
+
+**`current` is per-processor**, in a `cpu_t` that `TPIDR_EL1` points at — a
+register the hardware banks per core, so `this_cpu()` is one instruction on a
+path that runs at every scheduling decision.
+
+**A real spinlock**, `ldaxr`/`stxr` because ARMv8.0 has no LSE atomics, released
+with `stlr` so that what was written inside the section is visible before the
+lock is. No owner field and no recursion count: a lock that can be taken twice
+stops reporting the thing it exists to report.
+
+**One lock, not three.** The scheduler, the pipes and the console block on each
+other's state — a reader must hold something from before "is there a character?"
+until after "I am blocked", and that something is the same thing the waker takes.
+Separate locks would be acquired in more than one order by paths that already
+exist, and a lock ordering nobody can state is a deadlock that has not happened
+yet. The page allocator gets its own, and it is a leaf: it may be taken while the
+scheduler lock is held and never the reverse, which is the whole of the rule.
+
+**`THREAD_RUNNING`, distinct from `THREAD_RUNNABLE`**, for as long as a
+processor is on a thread. Two cores finding one runnable thread and both taking
+it is not a race that gives a wrong answer; it is two processors on one kernel
+stack, and there are no further answers.
+
+**The lock is handed across `cpu_switch`.** Whoever is switched to releases it.
+A thread that has never run does not resume at the line after the switch — it
+starts in a trampoline — so both trampolines call `sched_first_run` first.
+
+**An idle thread per processor**, so `schedule()` always has something to switch
+to and there is no special case for "this core is running nothing". By the same
+call on every core: the boot core is not the one that happens to work.
+
+### Four wrong answers before it ran
+
+**The secondary's vectors pointed at an address that no longer existed.**
+`smpentry.S` installs VBAR before turning the MMU on, which it must — an
+exception before that has nowhere to go. But it computes the address PC-relative
+while executing in the low half, and `secondary_main`'s first act is to drop the
+low half. The core then ran correctly until its first interrupt and vanished,
+with no fault reported because reporting one needs the table it could not reach.
+QEMU's monitor showed it: `PC=0x40081200` on CPU 1 while CPU 0 carried on. The
+fix is to install them again, at the address they have now.
+
+**`thread_wait` called `schedule()` while holding the lock**, which acquires it.
+A processor waiting for itself. Split into `schedule_locked`, which assumes both
+the lock and the mask and returns with both.
+
+**Objects built against two different `thread_t`s.** `sched.h` grew two fields;
+`sched.o` was rebuilt and `console.o` was not, because the Makefile had no header
+dependencies. It presented as a scheduler reporting two slices where there had
+been fifty and a processor index of 101 — not a number any code here can
+produce. Every object now depends on every header: coarse, and a rebuild costs
+seconds.
+
+**`kprintf`'s `%u` read sixty-four bits regardless.** It parsed `l` and `ll` and
+threw them away, so an ordinary `unsigned` argument read a register whose top
+half the calling convention leaves unspecified. Usually zero, which is why it
+survived until a count of 2 printed as 4294967396. The formatter honours the
+length now, which fixes every call site at once.
+
+### The measurement was wrong before the thing was
+
+"The work was spread over N processors" first counted distinct values of
+`last_cpu`, and reported **1** on a two-core machine whenever the same core
+happened to run each thread last — a measurement that reports the final instant
+and calls it the interval. It is a bitmask now, set by the scheduler on the core
+that takes the thread, so it cannot say more than is true and it says "1
+processor" on a one-core machine rather than falling silent.
+
+`make test`: 233 checks, was 231, three consecutive runs.

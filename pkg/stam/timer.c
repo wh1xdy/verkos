@@ -10,6 +10,7 @@
 #include "timer.h"
 #include "gic.h"
 #include "console.h"
+#include "smp.h"
 
 static uint64_t interval;      /* counter units between ticks */
 static volatile uint64_t ticks;
@@ -22,8 +23,25 @@ static void arm(uint64_t n) {
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(n));
 }
 
-void timer_tick(void) { ticks++; arm(interval); }
+void timer_tick(void) {
+    /* Counted per processor. One shared counter would say the machine is
+     * ticking while three of its four cores took nothing at all, which is the
+     * report that does not depend on what it reports. */
+    this_cpu()->ticks++;
+    ticks++;
+    arm(interval);
+}
 uint64_t timer_ticks(void) { return ticks; }
+uint64_t timer_cpu_ticks(void) { return this_cpu()->ticks; }
+
+/* The timer is a register in each core, and so is its enable bit. The primary
+ * does this inside timer_init; every other processor does it for itself once
+ * its interrupt controller is awake. */
+void timer_cpu_start(void) {
+    if (!interval) return;
+    arm(interval);
+    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(1ul));
+}
 unsigned timer_hz(void) { return hz; }
 
 int timer_init(const fdt_t *f, unsigned want_hz) {

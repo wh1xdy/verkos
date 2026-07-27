@@ -15,6 +15,12 @@
 #include "console.h"
 #include "lock.h"
 
+/* The page allocator's own lock. It is a leaf — nothing here calls the
+ * scheduler — so it may be taken while the scheduler lock is held and never the
+ * other way round, which is the whole of the ordering rule and the reason it
+ * can be stated in one sentence. */
+static spinlock_t pmm_lock = SPINLOCK_INIT;
+
 /* Hidden, for the same reason the assembly symbols are: a linker-script symbol
  * referenced from position-independent code is otherwise fetched through the
  * GOT, and the GOT is not relocated. */
@@ -96,9 +102,9 @@ static long refs_index(uint64_t pa) {
 void page_ref(uint64_t pa) {
     long i = refs_index(pa);
     if (i < 0) return;
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&pmm_lock);
     if (refs[i] < 255) refs[i]++;
-    irq_restore(f);
+    spin_unlock_irq(&pmm_lock, f);
 }
 
 /* Holders remaining *after* letting go — zero meaning the page is nobody's and
@@ -117,10 +123,10 @@ void page_ref(uint64_t pa) {
 int page_unref(uint64_t pa) {
     long i = refs_index(pa);
     if (i < 0) return 0;
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&pmm_lock);
     int left = 0;
     if (refs[i] > 0) { refs[i]--; left = refs[i] + 1; }
-    irq_restore(f);
+    spin_unlock_irq(&pmm_lock, f);
     return left;
 }
 
@@ -132,12 +138,12 @@ int page_count(uint64_t pa) {
 
 void free_page(void *p) {
     if (!p) return;
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&pmm_lock);
     uint64_t *page = p;
     *page = free_list;
     free_list = (uint64_t)(uintptr_t)p;
     pages_returned++;
-    irq_restore(f);
+    spin_unlock_irq(&pmm_lock, f);
 }
 
 unsigned pmm_pages_free_listed(void) { return pages_returned; }
@@ -149,20 +155,20 @@ unsigned pmm_pages_free_listed(void) { return pages_returned; }
  * it. The zeroing is inside the section too: the page is not this caller's
  * until the head has moved past it. */
 void *alloc_page(void) {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&pmm_lock);
     if (free_list) {
         uint64_t *page = (uint64_t *)(uintptr_t)free_list;
         free_list = *page;
         pages_returned--;
-        irq_restore(f);
+        spin_unlock_irq(&pmm_lock, f);
         for (unsigned i = 0; i < PAGE_SIZE / 8; i++) page[i] = 0;
         return page;
     }
-    if (free_next + PAGE_SIZE > free_top) { irq_restore(f); return 0; }
+    if (free_next + PAGE_SIZE > free_top) { spin_unlock_irq(&pmm_lock, f); return 0; }
     uint64_t p = free_next;
     free_next += PAGE_SIZE;
     pages_taken++;
-    irq_restore(f);
+    spin_unlock_irq(&pmm_lock, f);
     volatile uint64_t *z = usable(p);
     for (unsigned i = 0; i < PAGE_SIZE / 8; i++) z[i] = 0;
     return (void *)z;
@@ -173,12 +179,12 @@ void *alloc_page(void) {
  * out whether two alloc_page() calls may be assumed adjacent. */
 void *alloc_pages(unsigned n) {
     if (!n) return 0;
-    uint64_t f = irq_save();
-    if (free_next + (uint64_t)n * PAGE_SIZE > free_top) { irq_restore(f); return 0; }
+    uint64_t f = spin_lock_irq(&pmm_lock);
+    if (free_next + (uint64_t)n * PAGE_SIZE > free_top) { spin_unlock_irq(&pmm_lock, f); return 0; }
     uint64_t p = free_next;
     free_next += (uint64_t)n * PAGE_SIZE;
     pages_taken += n;
-    irq_restore(f);
+    spin_unlock_irq(&pmm_lock, f);
     volatile uint64_t *z = usable(p);
     for (uint64_t i = 0; i < (uint64_t)n * PAGE_SIZE / 8; i++) z[i] = 0;
     return (void *)z;

@@ -15,6 +15,10 @@
 #include "console.h"
 #include "mmu.h"
 #include "lock.h"
+#include "gic.h"
+#include "timer.h"
+#include "sched.h"
+extern void exceptions_install(void);   /* vectors.S */
 
 uint64_t cpu_mpidr(void) {
     uint64_t v;
@@ -35,6 +39,19 @@ unsigned cpu_index(void) {
 }
 
 unsigned smp_cpus_online(void) { return online; }
+
+static cpu_t cpus[MAX_CPUS];
+cpu_t *cpu_slot(unsigned i) { return i < MAX_CPUS ? &cpus[i] : &cpus[0]; }
+
+/* Claim a slot and point TPIDR_EL1 at it. Called once per processor, by that
+ * processor, before anything reads `current`. The primary does it too: one
+ * path, so the boot core cannot quietly be the special case that works. */
+void cpu_claim_self(unsigned idx) {
+    cpu_t *c = cpu_slot(idx);
+    c->index  = idx;
+    c->online = 1;
+    cpu_set_self(c);
+}
 
 /* Every cpu@N under /cpus, in tree order, by the affinity in its "reg". The
  * order is what makes "cpu 1" mean the same thing here and there. */
@@ -95,7 +112,30 @@ void secondary_main(void) {
     /* Running high now; the low half has done its job. Drop it here rather than
      * leaving it, so a stale physical pointer faults on this core too. */
     mmu_set_user_table(mmu_user_table());
+
+    /* And its own vectors, again, at the address they have now.
+     *
+     * smpentry.S installs them before turning the MMU on, which it must — an
+     * exception between here and there has nowhere to go. But it computes the
+     * address PC-relative while running in the low half, so VBAR_EL1 ends up
+     * holding the low alias, and the line above has just stopped that alias
+     * existing. The core then runs correctly until its first interrupt and
+     * vanishes into an address that is not mapped, with no fault reported
+     * because reporting one needs the table it cannot reach. QEMU's monitor
+     * showed it as a PC of 0x40081200 while the boot core carried on. */
+    exceptions_install();
     unsigned me = cpu_index();
+    cpu_claim_self(me);
+
+    /* Its own vectors are already installed (smpentry.S), but the interrupt
+     * controller and the timer are per-processor and were configured on the
+     * primary only: the distributor is shared, the CPU interface is not, and
+     * the timer is a register in this core. Without both this processor takes
+     * no interrupts at all, which looks exactly like a scheduler that will not
+     * give it any work. */
+    gic_cpu_init();
+    timer_cpu_start();
+
     /* The first thing a new processor does is say so, because the alternative
      * — a CPU that came up and is quietly doing nothing — is indistinguishable
      * from one that never started. */
@@ -103,12 +143,9 @@ void secondary_main(void) {
     uint64_t f = irq_save();
     online++;
     irq_restore(f);
-    /* Parked. It has no run queue to take from yet: `current` is one variable
-     * for the whole machine and the scheduler assumes it. Making that per-CPU
-     * is the next step and a larger one, and a processor that spins in wfi is
-     * an honest place to stop — it is online, it is idle, and it is not
-     * pretending to share the work. */
-    for (;;) __asm__ volatile("wfi");
+
+    sched_cpu_init("idle");     /* adopt this stack as this core's idler */
+    sched_idle_loop();          /* take work, or wait for some           */
 }
 
 int smp_start_others(const fdt_t *f) {

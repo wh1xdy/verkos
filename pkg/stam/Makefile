@@ -43,7 +43,15 @@ OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_
 
 all: stam.img
 
-%.o: %.c
+# Every object depends on every header. Coarse on purpose: this kernel has
+# fourteen of them and a rebuild costs seconds, while the alternative is what
+# happened on 2026-07-28 — thread_t grew two fields, sched.o was rebuilt and
+# console.o was not, and the two disagreed about where `slices` lived. It
+# presented as a scheduler reporting two slices where there had been fifty and
+# a processor index of 101, which is not a number any code here can produce.
+HDRS = $(wildcard *.h)
+
+%.o: %.c $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 %.o: %.S
 	$(CC) $(CFLAGS) -c -o $@ $<

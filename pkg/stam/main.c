@@ -201,6 +201,11 @@ void kmain_high(void) {
             "            program's to use\n",
             (unsigned long long)KVA_OFFSET);
 
+    /* Before anything reads this_cpu() — the timer tick does, on its first
+     * interrupt. The boot core claims slot 0 by the same call every other
+     * processor uses. */
+    cpu_claim_self(0);
+
     int ticking = 0;
     if (gic_init(machine_tree()) == 0 && timer_init(machine_tree(), 100) == 0) {
         ticking = 1;
@@ -210,16 +215,18 @@ void kmain_high(void) {
          * stage, and it looks exactly like a timer that works. */
         uint64_t target = timer_hz();
         while (timer_ticks() < target) __asm__ volatile("wfi");
-        {
-        int others = smp_start_others(machine_tree());
-        if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
-    }
-    kprintf("  ticking   %llu interrupts taken — the kernel can preempt\n",
+        kprintf("  ticking   %llu interrupts taken — the kernel can preempt\n",
                 (unsigned long long)timer_ticks());
     }
 
     if (ticking) {
         sched_init("boot");
+        sched_cpu_idle("idle-0");
+        /* After the scheduler exists, not before: a secondary's first act is to
+         * adopt its own thread, and there is no table to adopt into until this
+         * core has made one. */
+        int others = smp_start_others(machine_tree());
+        if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
         thread_create("worker-a", worker, (void *)(uintptr_t)0);
         thread_create("worker-b", worker, (void *)(uintptr_t)1);
         thread_create("worker-c", worker, (void *)(uintptr_t)2);
@@ -245,15 +252,29 @@ void kmain_high(void) {
         while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
 
         kprintf("  after two seconds of everyone refusing to give way:\n");
+        int seen[MAX_CPUS] = {0}, used = 0;
         for (int i = 0; i < thread_count(); i++) {
             thread_t *t = thread_at(i);
-            kprintf("    %s%s  scheduled %llu times", t->name,
-                    t->id == 0 ? "     " : "  ", (unsigned long long)t->slices);
-            if (t->id > 0)
-                kprintf(", counted to %llu", (unsigned long long)work[t->id - 1]);
+            /* A processor's idler is not work and would say a core was busy
+             * doing nothing. */
+            if (t->home >= 0) continue;
+            kprintf("    %s%s  scheduled %llu times, last on cpu %d", t->name,
+                    t->id == 0 ? "     " : "  ", (unsigned long long)t->slices,
+                    t->last_cpu);
             kprintf("\n");
+            for (int c = 0; c < MAX_CPUS; c++)
+                if ((t->ran_on & (1u << c)) && !seen[c]) { seen[c] = 1; used++; }
         }
+        kprintf("  they counted to %llu, %llu and %llu\n",
+                (unsigned long long)work[0], (unsigned long long)work[1],
+                (unsigned long long)work[2]);
         kprintf("  every thread ran, evenly. yes.\n");
+        /* Counted from where the threads actually ran, so it says one on a
+         * machine with one processor and cannot say more than is true. */
+        kprintf("  the work was spread over %d processor%s.\n", used, used == 1 ? "" : "s");
+        for (unsigned c = 0; c < smp_cpus_online() && c < MAX_CPUS; c++)
+            kprintf("    cpu %u took %llu timer interrupts\n", c,
+                    (unsigned long long)cpu_slot(c)->ticks);
 
         kprintf("\n  --- 2. can something run outside the kernel? ---\n");
         thread_create("program", first_program, 0);

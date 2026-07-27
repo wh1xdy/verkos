@@ -228,24 +228,24 @@ long console_read_line(char *out, uint64_t len) {
          * marked blocked. A character arriving in that gap would otherwise find
          * nobody waiting for it, wake nobody, and leave the reader asleep with
          * its wakeup already spent — a prompt that ignores the key you pressed. */
-        uint64_t f = irq_save();
+        uint64_t f = sched_lock_irq();
         int c = kgetc();
         if (c < 0) {
             if (interrupt_driven) {
                 thread_block_on_console();      /* returns with the mask held */
-                irq_restore(f);
+                sched_unlock_irq(f);
                 /* Woken by a signal rather than by a character: return, so the
                  * syscall path can act on it. A reader that went back to sleep
                  * here would be a process that cannot be interrupted while it
                  * is waiting, which is most of the time. */
                 if (thread_signalled()) return -4;           /* -EINTR */
             } else {
-                irq_restore(f);
+                sched_unlock_irq(f);
                 thread_yield();
             }
             continue;
         }
-        irq_restore(f);
+        sched_unlock_irq(f);
         if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return (long)n; }
         if (c == 0x7f || c == 8) {           /* backspace */
             if (n) { n--; kputs("\b \b"); }
@@ -309,14 +309,25 @@ void kprintf(const char *fmt, ...) {
         fmt++;
         int pad = 0;
         while (*fmt >= '0' && *fmt <= '9') { pad = pad * 10 + (*fmt - '0'); fmt++; }
-        if (*fmt == 'l') { fmt++; if (*fmt == 'l') fmt++; }
+        /* The length matters. This used to skip `l` and `ll` and then read
+         * sixty-four bits regardless, so every %u given an ordinary unsigned
+         * read a register whose top half the calling convention leaves
+         * unspecified — usually zero, which is why it went unnoticed until a
+         * count of 2 printed as 4294967396. */
+        int wide = 0;
+        if (*fmt == 'l') { fmt++; wide = 1; if (*fmt == 'l') { fmt++; wide = 2; } }
         switch (*fmt) {
         case 's': { const char *s = __builtin_va_arg(ap, const char *); kputs(s ? s : "(null)"); break; }
         case 'c':   kputc((char)__builtin_va_arg(ap, int)); break;
-        case 'd': { long long v = __builtin_va_arg(ap, long long);
+        case 'd': { long long v = wide ? __builtin_va_arg(ap, long long)
+                                       : (long long)__builtin_va_arg(ap, int);
                     if (v < 0) { kputc('-'); v = -v; } kputu((uint64_t)v, 10, pad); break; }
-        case 'u':   kputu(__builtin_va_arg(ap, unsigned long long), 10, pad); break;
-        case 'x':   kputu(__builtin_va_arg(ap, unsigned long long), 16, pad); break;
+        case 'u':   kputu(wide ? __builtin_va_arg(ap, unsigned long long)
+                               : (unsigned long long)__builtin_va_arg(ap, unsigned int),
+                          10, pad); break;
+        case 'x':   kputu(wide ? __builtin_va_arg(ap, unsigned long long)
+                               : (unsigned long long)__builtin_va_arg(ap, unsigned int),
+                          16, pad); break;
         case 'p':   kputs("0x"); kputu((uint64_t)(uintptr_t)__builtin_va_arg(ap, void *), 16, 16); break;
         case '%':   kputc('%'); break;
         default:    kputc('%'); kputc(*fmt); break;

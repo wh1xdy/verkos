@@ -16,17 +16,50 @@
 #include "vm.h"
 #include "console.h"
 #include "lock.h"
+#include "smp.h"
 
 extern void cpu_switch(uint64_t *save_sp_here, uint64_t resume_sp);
 extern uint64_t thread_entry_point(void);
 
-#define MAX_THREADS 16
+/* Sixteen for processes, plus one idle thread per processor. The idlers are a
+ * cost of the machine having several cores, not of the workload having several
+ * processes, and taking them out of the same sixteen made a four-core boot run
+ * out of slots where a one-core boot did not — reported as "vsh: cannot fork",
+ * which is true and says nothing about why. */
+#define MAX_THREADS (16 + MAX_CPUS)
 #define STACK_PAGES 2
 
 static thread_t threads[MAX_THREADS];
 static int n_threads;            /* how many slots have ever been used        */
 static int next_id;              /* process ids: monotonic, never reused      */
-static thread_t *current;
+/* One processor's idea of what it is running. It was a single variable for the
+ * whole machine, which is precisely the assumption that kept the secondaries
+ * parked in wfi (D-076); TPIDR_EL1 is banked per core and holds the rest. */
+#define current (this_cpu()->cur)
+
+/* Everything below reads and writes the slot table, and now more than one
+ * processor does. Interrupt masking was the whole of the protection and it
+ * protects nothing against another core (D-057, and the paragraph in lock.h
+ * that said so). */
+static spinlock_t sched_lock = SPINLOCK_INIT;
+
+/* Released by whoever the scheduler switched *to*: the lock is handed across
+ * cpu_switch, and a thread that has never run resumes in a trampoline rather
+ * than at the line after it. Called from switch.S and vectors.S. */
+void sched_first_run(void) { spin_unlock(&sched_lock); }
+
+/* The lock, for the two files that share this state rather than merely reading
+ * it: console.c must hold it from before "is there a character?" until after
+ * "I am blocked", and file.c the same for a pipe. That is the lost-wakeup
+ * window, and on one CPU masking closed it because the only other party was
+ * this core's own handler. It is not on two.
+ *
+ * One lock and not three. The scheduler, the pipes and the console block on
+ * each other's state, so separate locks would be taken in more than one order
+ * by paths that already exist — and a lock ordering nobody can state is a
+ * deadlock that has not happened yet. */
+uint64_t sched_lock_irq(void)          { return spin_lock_irq(&sched_lock); }
+void     sched_unlock_irq(uint64_t f)  { spin_unlock_irq(&sched_lock, f); }
 static int started;
 
 thread_t *thread_current(void) { return current; }
@@ -88,6 +121,9 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->pgid        = current ? current->pgid : 0;
     t->pending     = 0;
     t->blocked     = 0;
+    t->home        = -1;         /* any processor may run it */
+    t->last_cpu    = -1;         /* nothing has run it yet     */
+    t->ran_on      = 0;
     for (int i = 0; i < NSIG; i++) t->sigact[i].handler = t->sigact[i].restorer =
                                    t->sigact[i].mask = 0;
     t->stack_low   = 0;
@@ -175,7 +211,12 @@ void sched_init(const char *name) {
     slot_init(t, name, 0);
     t->parent = -1;              /* nobody started this one; the machine did */
     current = t;
-    t->state = THREAD_RUNNABLE;
+    /* The boot thread is not this core's idle thread: it goes on to do the
+     * kernel's work and may block. A core with nothing to run needs something
+     * that never blocks, and sched_cpu_idle gives the boot core one too — one
+     * path for every processor, so the boot core cannot quietly be the special
+     * case that happens to work. */
+    t->state = THREAD_RUNNING;
     started = 1;
 }
 
@@ -184,9 +225,15 @@ void sched_init(const char *name) {
  * number. They are not any more, so the position comes from the pointer. */
 static thread_t *next_runnable(thread_t *after) {
     int start = after ? (int)(after - threads) : 0;
+    unsigned me = this_cpu()->index;
     for (int i = 1; i <= n_threads; i++) {
         thread_t *t = &threads[(start + i) % n_threads];
-        if (t->state == THREAD_RUNNABLE) return t;
+        if (t->state != THREAD_RUNNABLE) continue;   /* THREAD_RUNNING is on a CPU */
+        /* An idle thread is one processor's own and never anybody else's: it
+         * exists to be what that core runs when there is nothing, and a core
+         * that adopted another's would be standing on a stack in use. */
+        if (t->home >= 0 && (unsigned)t->home != me) continue;
+        return t;
     }
     return 0;
 }
@@ -201,12 +248,40 @@ static thread_t *next_runnable(thread_t *after) {
  * something schedules it again. A thread running for the first time never
  * reaches that line — it starts in the trampoline, which unmasks interrupts
  * itself, and always has (D-037). */
-void schedule(void) {
-    if (!started || n_threads < 2) return;
-    uint64_t f = irq_save();
+/* The switch itself, with the lock already held and interrupts already masked,
+ * returning with both still held.
+ *
+ * Split out because thread_wait and the two block-on-something paths reach here
+ * from inside a section they opened themselves. Calling the locking schedule()
+ * from there is a processor waiting for a lock it is already holding, which is
+ * not a race — it is the machine stopping, and it stopped exactly once before
+ * this comment was written. */
+static void schedule_locked(void) {
     thread_t *prev = current;
     thread_t *next = next_runnable(prev);
-    if (!next || next == prev) { irq_restore(f); return; }
+
+    if (!next) {
+        /* Nothing else wants a processor. Carry on if this thread still can;
+         * otherwise fall back to this core's idle thread, which always can. */
+        if (prev->state == THREAD_RUNNING) return;
+        next = this_cpu()->idle;
+        if (!next || next == prev) return;
+    }
+    if (next == prev) return;
+
+    /* RUNNING, not RUNNABLE, for exactly as long as a processor is on it. Two
+     * cores reading the same table and both finding one runnable thread would
+     * otherwise both take it, and two processors executing one kernel stack is
+     * not a race that produces a wrong answer — it is one that produces no
+     * further answers. */
+    if (prev->state == THREAD_RUNNING) prev->state = THREAD_RUNNABLE;
+    next->state = THREAD_RUNNING;
+    /* Where it has been, not only where it is. "Spread over N processors"
+     * counted from last_cpu says one whenever the same core happened to run a
+     * thread last, however far the work had travelled — a measurement that
+     * reports the final instant and calls it the interval. */
+    next->last_cpu = (int)this_cpu()->index;
+    next->ran_on  |= 1u << (this_cpu()->index & 31);
     current = next;
     next->slices++;
     /* The low half belongs to whoever is about to run. Kernel-only threads
@@ -214,9 +289,63 @@ void schedule(void) {
     if (next->space && next->space != prev->space) mmu_switch_user(next->space);
     cpu_switch(&prev->sp, next->sp);
     /* Execution resumes here when something schedules `prev` again — possibly
-     * a long time later, and on a different thread's behalf. `f` is this
-     * thread's own saved DAIF, read off this thread's own stack. */
-    irq_restore(f);
+     * a long time later, and now possibly on a different processor. The lock is
+     * held on our behalf by whoever chose us, so it is still held here, which
+     * is what lets the callers below carry on inside their own sections. */
+}
+
+void schedule(void) {
+    if (!started) return;
+    uint64_t f = spin_lock_irq(&sched_lock);
+    schedule_locked();
+    spin_unlock_irq(&sched_lock, f);
+}
+
+/* What a processor with nothing to do is.
+ *
+ * It is a thread rather than a bare wfi loop so that schedule() has something
+ * to switch away from and back to, with no special case for "this core is not
+ * running anything". wfi and not a spin: an idle core that spins is a core
+ * holding the memory system away from the ones with work (D-050 measured what
+ * the difference looks like from outside).
+ */
+void sched_idle_loop(void) {
+    for (;;) {
+        __asm__ volatile("wfi");
+        schedule();
+    }
+}
+
+/* Adopt the execution a secondary is already on, the way sched_init does for
+ * the boot core, and make it that core's idle thread. Its stack is the one PSCI
+ * started it on, which is why this adopts rather than creates. */
+void sched_cpu_init(const char *name) {
+    uint64_t f = spin_lock_irq(&sched_lock);
+    thread_t *t = alloc_slot();
+    if (!t) { spin_unlock_irq(&sched_lock, f); return; }
+    slot_init(t, name, 0);
+    t->parent = -1;
+    t->home   = (int)this_cpu()->index;
+    t->state  = THREAD_RUNNING;
+    current   = t;
+    this_cpu()->idle = t;
+    spin_unlock_irq(&sched_lock, f);
+}
+
+static void idle_entry(void *unused) { (void)unused; sched_idle_loop(); }
+
+/* The boot core needs an idler too. It has a thread already — the one the
+ * machine started, which sched_init adopted — but that one goes on to do the
+ * kernel's work and may block, and a core whose only thread is blocked has
+ * nothing to switch to. One path for every processor: the boot core is not the
+ * special case that happens to work. */
+void sched_cpu_idle(const char *name) {
+    thread_t *t = thread_create(name, idle_entry, 0);
+    if (!t) return;
+    uint64_t f = spin_lock_irq(&sched_lock);
+    t->home = (int)this_cpu()->index;
+    this_cpu()->idle = t;
+    spin_unlock_irq(&sched_lock, f);
 }
 
 void thread_yield(void) { schedule(); }
@@ -229,12 +358,12 @@ void thread_exit(int status) {
      * pages, and holding interrupts off for that long is a timer tick missed
      * and a console character dropped. Nothing else can reach this address
      * space — the process is a zombie before the first page goes back. */
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&sched_lock);
     current->state = THREAD_ZOMBIE;
     current->status = status;
     uint64_t space = current->space;
     current->space = 0;
-    irq_restore(f);
+    spin_unlock_irq(&sched_lock, f);
 
     /* Letting go of the descriptors is what tells the other end of a pipe that
      * this process is finished — a reader waiting on a command that has exited
@@ -248,12 +377,12 @@ void thread_exit(int status) {
 
     /* Waking the parent is a search-then-write over slots the console
      * interrupt also writes. */
-    f = irq_save();
+    f = spin_lock_irq(&sched_lock);
     for (int i = 0; i < n_threads; i++)
         if (threads[i].id == current->parent && threads[i].state == THREAD_BLOCKED &&
             threads[i].wait_reason == WAIT_CHILD)
             threads[i].state = THREAD_RUNNABLE;
-    irq_restore(f);
+    spin_unlock_irq(&sched_lock, f);
 
     for (;;) schedule();
 }
@@ -274,7 +403,7 @@ void thread_exit(int status) {
 void thread_block_on_console(void) {
     current->wait_reason = WAIT_CONSOLE;
     current->state = THREAD_BLOCKED;
-    schedule();
+    schedule_locked();
 }
 
 /* Wait for a pipe to change. Both ends block here for opposite reasons — a
@@ -288,7 +417,7 @@ void thread_block_on_pipe(const void *object) {
     current->wait_reason = WAIT_PIPE;
     current->wait_object = object;
     current->state = THREAD_BLOCKED;
-    schedule();
+    schedule_locked();
 }
 
 void thread_wake_pipe(const void *object) {
@@ -305,7 +434,7 @@ void thread_wake_pipe(const void *object) {
  * blocked process has to be made runnable or it will never reach the point
  * where it can act on what it was sent. */
 int thread_signal(int pid, int sig) {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&sched_lock);
     int reached = 0;
     for (int i = 0; i < n_threads; i++) {
         thread_t *t = &threads[i];
@@ -315,7 +444,7 @@ int thread_signal(int pid, int sig) {
         if (t->state == THREAD_BLOCKED) t->state = THREAD_RUNNABLE;
         reached++;
     }
-    irq_restore(f);
+    spin_unlock_irq(&sched_lock, f);
     return reached;
 }
 
@@ -330,7 +459,7 @@ int thread_signalled(void) {
 }
 
 int thread_setpgid(int pid, int pgid) {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&sched_lock);
     int rc = -1;
     for (int i = 0; i < n_threads; i++)
         if (threads[i].state != THREAD_FREE &&
@@ -339,7 +468,7 @@ int thread_setpgid(int pid, int pgid) {
             rc = threads[i].pgid;
             break;
         }
-    irq_restore(f);
+    spin_unlock_irq(&sched_lock, f);
     return rc;
 }
 
@@ -352,9 +481,10 @@ int thread_pgid_of(int pid) {
 
 /* Called from the interrupt, so it does the least it can: mark them runnable
  * and let the ordinary scheduler decide when. */
+/* Call with the scheduler lock held. It used to need nothing, being in
+ * interrupt context with interrupts masked; that was an argument about this
+ * core's handler and says nothing about the other three. */
 void thread_wake_console(void) {
-    /* Already in interrupt context with interrupts masked, so this needs no
-     * section of its own — but it is the reason every other one exists. */
     for (int i = 0; i < n_threads; i++)
         if (threads[i].state == THREAD_BLOCKED && threads[i].wait_reason == WAIT_CONSOLE)
             threads[i].state = THREAD_RUNNABLE;
@@ -390,7 +520,7 @@ static void release_slot(thread_t *t) {
  * them. The whole body is one masked section for the same reason thread_wait
  * is: the scan and the claim must not be split. */
 int thread_reap(int *status_out) {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock_irq(&sched_lock);
     int have_children = 0;
     for (int i = 0; i < n_threads; i++) {
         if (threads[i].parent != current->id) continue;
@@ -398,12 +528,12 @@ int thread_reap(int *status_out) {
             int id = threads[i].id;
             if (status_out) *status_out = threads[i].status;
             release_slot(&threads[i]);
-            irq_restore(f);
+            spin_unlock_irq(&sched_lock, f);
             return id;
         }
         if (threads[i].state != THREAD_FREE) have_children = 1;
     }
-    irq_restore(f);
+    spin_unlock_irq(&sched_lock, f);
     return have_children ? 0 : -1;
 }
 
@@ -415,26 +545,26 @@ int thread_wait(int *status_out) {
          * console interrupt landing mid-scan writes the states being read, and
          * the free_page calls below hand pages to an allocator this may be
          * interrupted inside of. */
-        uint64_t f = irq_save();
+        uint64_t f = spin_lock_irq(&sched_lock);
         for (int i = 0; i < n_threads; i++) {
             if (threads[i].parent != current->id) continue;
             if (threads[i].state == THREAD_ZOMBIE) {
                 int id = threads[i].id;
                 if (status_out) *status_out = threads[i].status;
                 release_slot(&threads[i]);
-                irq_restore(f);
+                spin_unlock_irq(&sched_lock, f);
                 return id;
             }
             if (threads[i].state != THREAD_FREE) have_children = 1;
         }
-        if (!have_children) { irq_restore(f); return -1; }
+        if (!have_children) { spin_unlock_irq(&sched_lock, f); return -1; }
         /* Same shape as the console wait: marked blocked with the mask still
          * held, so a child exiting in the gap cannot wake a thread that has not
          * yet said it is asleep. */
         current->wait_reason = WAIT_CHILD;
         current->state = THREAD_BLOCKED;
-        schedule();
-        irq_restore(f);
+        schedule_locked();
+        spin_unlock_irq(&sched_lock, f);
     }
 }
 

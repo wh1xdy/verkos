@@ -23,3 +23,9 @@ pkg/stam/*.img
 pkg/stam/progs/*.o
 pkg/stam/progs/*.elf
 pkg/stam/progs/*.cpio
+# Staging directories the initrd rules build with rm -rf and repopulate. The
+# sources are pkg/stam/progs/*.c and progs/rc; these were tracked copies of
+# what the build had produced at some past moment.
+pkg/stam/progs/root/
+pkg/stam/progs/sroot/
+pkg/stam/progs/scriptroot/

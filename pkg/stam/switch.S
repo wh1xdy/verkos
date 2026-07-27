@@ -58,6 +58,10 @@ thread_entry_point:
 /* Where a thread that has never run before begins. thread_create arranged for
  * cpu_switch to `ret` here, with the function in x19 and its argument in x20. */
 thread_trampoline:
+    /* The scheduler lock, held for us by whichever processor chose us. Same
+     * reason as ret_to_user: a thread that has never run does not resume at
+     * the line after cpu_switch, so it does not reach the unlock there. */
+    bl      sched_first_run
     /* A new thread is first resumed from inside the timer interrupt, where the
      * hardware masked interrupts on entry. Without this it would run with them
      * masked forever — it would never be preempted, and the machine would look

@@ -148,6 +148,12 @@ user_sync_common:
     .global ret_to_user
     .hidden ret_to_user
 ret_to_user:
+    /* A forked child begins here rather than inside schedule(), so it never
+     * reaches the unlock on the far side of cpu_switch. The processor that
+     * switched to it is holding the scheduler lock on its behalf; releasing it
+     * is this thread's job, and skipping it is a machine that stops the first
+     * time anything else tries to schedule. */
+    bl      sched_first_run
     RESTORE_ALL
     eret
 

@@ -168,18 +168,19 @@ What it does today, each verified by running it:
   `sigreturn` may *not* restore is the processor state — SPSR says which
   exception level to resume at and it sits on a page the program can write
   (D-077).
-- **The other processors start.** PSCI `CPU_ON`, with the conduit read from the
-  device tree and each core named by its own `reg` affinity value; with `-smp 4`
-  all four come up. What the secondary cannot work out for itself is read off
-  the running primary rather than recomputed, so there is one description of the
-  page tables and not two (D-076).
+- **SMP.** The other processors start — PSCI `CPU_ON`, with the conduit read
+  from the device tree and each core named by its own `reg` affinity value — and
+  then they *work*: `current` is per-processor in a `cpu_t` that `TPIDR_EL1`
+  points at, the run queue is behind a real spinlock, and a thread is
+  `THREAD_RUNNING` for exactly as long as a core is on it. With `-smp 4` the
+  demonstration reports the work spread over four processors and each core's own
+  timer interrupt count, both counted from where the threads actually ran
+  (D-076, D-078).
 
-Named rather than hidden: the secondary processors **park**. They are online and
-idle, and they take no work: `current` is one variable for the whole machine, and
-everything shared with an interrupt handler is protected by masking that
-interrupt — which is sufficient on one CPU and locks nothing at all against
-another (D-057). The sections are marked, so making the scheduler per-CPU is
-finding them rather than finding the races. No filesystem beyond the initrd. No FP/SIMD
+Named rather than hidden: **one lock** covers the scheduler, the pipes and the
+console, because those three block on each other's state and separate locks
+would be taken in more than one order by paths that already exist. It is correct
+and it is coarse. No filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for

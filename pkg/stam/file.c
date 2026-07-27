@@ -92,7 +92,7 @@ static const char *skip_slash(const char *s) { return s[0] == '/' ? s + 1 : s; }
 
 int file_open(const char *name, int mode, file_t **out) {
     name = skip_slash(name);
-    uint64_t s = irq_save();
+    uint64_t s = sched_lock_irq();
 
     if (mode != OPEN_READ) {
         memfile_t *m = 0;
@@ -101,7 +101,7 @@ int file_open(const char *name, int mode, file_t **out) {
         if (!m)
             for (int i = 0; i < NMEM; i++)
                 if (!memfiles[i].used) { m = &memfiles[i]; break; }
-        if (!m) { irq_restore(s); return -24; }              /* -EMFILE */
+        if (!m) { sched_unlock_irq(s); return -24; }              /* -EMFILE */
         unsigned k = 0;
         for (; k < NAME_MAX - 1 && name[k]; k++) m->name[k] = name[k];
         m->name[k] = 0;
@@ -112,11 +112,11 @@ int file_open(const char *name, int mode, file_t **out) {
         if (mode == OPEN_WRITE || !existed) m->len = 0;
         m->used = 1;
         struct file *f = file_alloc(FILE_MEM, 0);
-        if (!f) { irq_restore(s); return -24; }
+        if (!f) { sched_unlock_irq(s); return -24; }
         f->mem = m;
         f->pos = (mode == OPEN_APPEND) ? m->len : 0;
         *out = f;
-        irq_restore(s);
+        sched_unlock_irq(s);
         return 0;
     }
 
@@ -126,43 +126,43 @@ int file_open(const char *name, int mode, file_t **out) {
     for (int i = 0; i < NMEM; i++)
         if (memfiles[i].used && name_eq(memfiles[i].name, name)) {
             struct file *f = file_alloc(FILE_MEM, 0);
-            if (!f) { irq_restore(s); return -24; }
+            if (!f) { sched_unlock_irq(s); return -24; }
             f->mem = &memfiles[i]; f->pos = 0;
             *out = f;
-            irq_restore(s);
+            sched_unlock_irq(s);
             return 0;
         }
 
     uint64_t at = 0, len = 0;
     if (!archive_size || cpio_find(archive_addr, archive_size, name, &at, &len) != 0) {
-        irq_restore(s);
+        sched_unlock_irq(s);
         return -2;                                            /* -ENOENT */
     }
     struct file *f = file_alloc(FILE_INITRD, 0);
-    if (!f) { irq_restore(s); return -24; }
+    if (!f) { sched_unlock_irq(s); return -24; }
     f->ro = (const uint8_t *)(uintptr_t)at;
     f->ro_len = len;
     f->pos = 0;
     *out = f;
-    irq_restore(s);
+    sched_unlock_irq(s);
     return 0;
 }
 
 file_t *file_console(void) {
-    uint64_t f = irq_save();
+    uint64_t f = sched_lock_irq();
     if (!console_file) console_file = file_alloc(FILE_CONSOLE, 0);
     else console_file->refs++;
     struct file *r = console_file;
-    irq_restore(f);
+    sched_unlock_irq(f);
     return r;
 }
 
 int file_pipe(file_t **read_end, file_t **write_end) {
-    uint64_t f = irq_save();
+    uint64_t f = sched_lock_irq();
     pipe_t *p = 0;
     for (int i = 0; i < NPIPE; i++)
         if (!pipes[i].used) { p = &pipes[i]; break; }
-    if (!p) { irq_restore(f); return -1; }
+    if (!p) { sched_unlock_irq(f); return -1; }
 
     p->used = 1; p->head = p->tail = 0; p->readers = 1; p->writers = 1;
     struct file *r = file_alloc(FILE_PIPE_R, p);
@@ -171,19 +171,19 @@ int file_pipe(file_t **read_end, file_t **write_end) {
         /* Undo everything, in the order that leaves nothing half-open. */
         if (r) { r->kind = FILE_FREE; r->refs = 0; }
         p->used = 0;
-        irq_restore(f);
+        sched_unlock_irq(f);
         return -1;
     }
     *read_end = r; *write_end = w;
-    irq_restore(f);
+    sched_unlock_irq(f);
     return 0;
 }
 
 file_t *file_ref(file_t *f) {
     if (!f) return 0;
-    uint64_t s = irq_save();
+    uint64_t s = sched_lock_irq();
     f->refs++;
-    irq_restore(s);
+    sched_unlock_irq(s);
     return f;
 }
 
@@ -194,8 +194,8 @@ file_t *file_ref(file_t *f) {
  * has already finished. */
 void file_close(file_t *f) {
     if (!f) return;
-    uint64_t s = irq_save();
-    if (--f->refs > 0) { irq_restore(s); return; }
+    uint64_t s = sched_lock_irq();
+    if (--f->refs > 0) { sched_unlock_irq(s); return; }
 
     pipe_t *p = f->pipe;
     int kind = f->kind;
@@ -209,7 +209,7 @@ void file_close(file_t *f) {
         if (p->readers <= 0 && p->writers <= 0) p->used = 0;
         thread_wake_pipe(p);
     }
-    irq_restore(s);
+    sched_unlock_irq(s);
 }
 
 static unsigned pipe_bytes(const pipe_t *p) {
@@ -228,21 +228,21 @@ long file_read(file_t *f, char *buf, uint64_t len) {
     if (f->kind == FILE_INITRD || f->kind == FILE_MEM) {
         const char *src = f->kind == FILE_MEM ? f->mem->data : (const char *)f->ro;
         uint64_t total  = f->kind == FILE_MEM ? f->mem->len  : f->ro_len;
-        uint64_t s2 = irq_save();
+        uint64_t s2 = sched_lock_irq();
         uint64_t n = 0;
         while (n < len && f->pos < total) buf[n++] = src[f->pos++];
-        irq_restore(s2);
+        sched_unlock_irq(s2);
         return (long)n;
     }
 
     pipe_t *p = f->pipe;
-    uint64_t s = irq_save();
+    uint64_t s = sched_lock_irq();
     /* Masked across the test and the block, for the reason in
      * thread_block_on_console: a writer filling the pipe in the gap would
      * otherwise wake nobody and this reader would sleep on data that is
      * already there. */
     while (pipe_bytes(p) == 0) {
-        if (p->writers <= 0) { irq_restore(s); return 0; }  /* end of file */
+        if (p->writers <= 0) { sched_unlock_irq(s); return 0; }  /* end of file */
         thread_block_on_pipe(p);
     }
     uint64_t n = 0;
@@ -251,7 +251,7 @@ long file_read(file_t *f, char *buf, uint64_t len) {
         p->tail = (p->tail + 1) % PIPE_SIZE;
     }
     thread_wake_pipe(p);            /* room for a writer that was waiting */
-    irq_restore(s);
+    sched_unlock_irq(s);
     return (long)n;
 }
 
@@ -266,26 +266,26 @@ long file_write(file_t *f, const char *buf, uint64_t len) {
     if (f->kind == FILE_MEM) {
         /* A short write when the buffer fills, which is what a program should
          * be told rather than having the excess silently dropped. */
-        uint64_t s2 = irq_save();
+        uint64_t s2 = sched_lock_irq();
         uint64_t n = 0;
         while (n < len && f->pos < MEM_SIZE) { f->mem->data[f->pos++] = buf[n++]; }
         if (f->pos > f->mem->len) f->mem->len = f->pos;
-        irq_restore(s2);
+        sched_unlock_irq(s2);
         if (n == 0 && len) { return -28; }   /* -ENOSPC */
         return (long)n;
     }
     pipe_t *p = f->pipe;
-    uint64_t s = irq_save();
+    uint64_t s = sched_lock_irq();
     uint64_t n = 0;
     while (n < len) {
         /* Nobody left to read it. Linux raises SIGPIPE as well; there are no
          * signals here, so the error is the whole of the answer. */
-        if (p->readers <= 0) { irq_restore(s); return n ? (long)n : -32; } /* -EPIPE */
+        if (p->readers <= 0) { sched_unlock_irq(s); return n ? (long)n : -32; } /* -EPIPE */
         if (pipe_bytes(p) == PIPE_SIZE - 1) { thread_block_on_pipe(p); continue; }
         p->buf[p->head] = buf[n++];
         p->head = (p->head + 1) % PIPE_SIZE;
     }
     thread_wake_pipe(p);
-    irq_restore(s);
+    sched_unlock_irq(s);
     return (long)n;
 }
