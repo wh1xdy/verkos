@@ -3389,3 +3389,63 @@ steps. The honest fix is a cached position in `fat_file_t`, and it is not needed
 yet.
 
 `make test`: 236 checks, was 233, three consecutive runs.
+
+## D-080 — the whole disk is ours, and the kernel reads it
+
+**2026-07-28.** D-079 gave `stam` a filesystem, on a device formatted as one
+filesystem end to end. That is not what a bootable disk looks like. It now reads
+the partition table too:
+
+```
+  disk      virtio-blk v1, 131072 sectors (64 MiB)
+  gpt       EFI system partition 1: 98304 sectors at LBA 2048
+  fat       FAT32 "VERKESP", 1 sectors per cluster, 96750 clusters
+  boot      read the loader's own vboot.conf off this disk: 121 bytes, 2 entries
+```
+
+Every tool in that sequence belongs to this project and none of them shares a
+line with the next:
+
+| | |
+|---|---|
+| `vpart` | wrote the GPT — protective MBR, both headers, both entry arrays, CRCs (D-066) |
+| `vmkfs` | formatted the EFI system partition and put the files in it (D-065) |
+| `vboot` | is the loader in it, and parses `vboot.conf` to start the kernel |
+| `stam` | reads the table, mounts the partition, and reads that same file back |
+
+The last line is the one that matters. The bootloader parses `vboot.conf` to
+decide what to start; the kernel it started reads the same file off the same
+medium and counts the entries in it. Not a fixed message — a count taken from
+the bytes read, so a kernel that read nothing cannot print it.
+
+### What is checked and what is not
+
+The GPT signature and the entry size, because those say the structure is a table
+at all. **Not the CRCs.** `vpart` computes them and `sfdisk` verifies them in
+`make test`, so a header reaching this code has been checked by something that
+is not us; recomputing here would be a third implementation of the same
+polynomial, and a disagreement between three copies is harder to place than one
+between two.
+
+The ESP is found by its type GUID, which is stored with its first three fields
+little-endian and its last two not — a rule with no reason behind it, and the one
+a reader who types the GUID out left to right gets wrong. `vpart` writes the same
+bytes; this is the other end of D-066's note.
+
+An unpartitioned image still mounts. `gpt_find_esp` says which of "no table" and
+"a table with no ESP" it found, and the reader falls back to sector 0.
+
+### Where the circle is not closed
+
+**Not through the firmware.** `make test` boots stam through vboot under AAVMF,
+and on that path vboot builds a device tree out of ACPI (D-072) which contains
+the console, the interrupt controller, the timer and the PCI bridge — and no
+virtio-mmio nodes, because nothing told it about them. So on the firmware path
+stam finds no disk. The reading above happens on the `-kernel` path, where
+QEMU's own tree describes the transports.
+
+Closing that gap means either teaching vboot to publish what it found, or
+teaching stam to enumerate PCI. Both are real work and neither is done, and
+saying so is better than a diagram with a line that is not there.
+
+`make test`: 238 checks, was 236, three consecutive runs.

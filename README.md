@@ -177,13 +177,14 @@ What it does today, each verified by running it:
   timer interrupt count, both counted from where the threads actually ran
   (D-076, D-078).
 
-- **A disk.** virtio-blk over MMIO, found in the device tree, and a **FAT32
-  reader** on top of it — the filesystem `vmkfs` writes. So the shell can run a
-  program that is in no initrd, and `upper < /note.txt` reads a file off the
-  medium. An image one of our tools wrote, read by another that shares no line
-  of code with it: each checks the other against the on-disk format rather than
-  against a shared assumption about it (D-079). Read-only, and read whole rather
-  than mapped.
+- **A disk, and the whole of it is ours.** virtio-blk over MMIO found in the
+  device tree, the **GPT `vpart` wrote**, and the **FAT32 `vmkfs` formatted**
+  inside its EFI system partition. The shell runs a program that is in no
+  initrd, and the kernel reads back the very `vboot.conf` the loader parsed to
+  start it — counting its entries, so a kernel that read nothing cannot say so
+  (D-079, D-080). Four tools, no shared line between any two, each checking the
+  others against the on-disk format rather than against a shared assumption
+  about it. Read-only, and read whole rather than mapped.
 
 Named rather than hidden: **one lock** covers the scheduler, the pipes and the
 console, because those three block on each other's state and separate locks

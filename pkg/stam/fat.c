@@ -18,6 +18,7 @@
  */
 #include "fat.h"
 #include "virtio.h"
+#include "gpt.h"
 #include "console.h"
 
 #include <stdint.h>
@@ -29,6 +30,10 @@ static uint32_t fat_start;
 static uint32_t root_clus;
 static uint32_t total_clus;
 static int      mounted;
+/* Where the filesystem starts on the device. Zero when the whole disk is one
+ * filesystem, and the partition's first LBA otherwise: every read below adds
+ * it, and nothing else in this file knows a partition table exists. */
+static uint64_t part_lba;
 
 /* One sector of scratch, and one of directory. Static because the kernel has no
  * heap and because every path through here is under one lock anyway. */
@@ -41,9 +46,21 @@ static uint32_t rd32(const uint8_t *p) {
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Every sector this reader asks for, relative to the filesystem. */
+static int rd_sec(uint64_t s, void *out) { return virtio_blk_read(part_lba + s, out); }
+
 int fat_mount(void) {
     if (!virtio_blk_present()) return -1;
-    if (virtio_blk_read(0, secbuf) != 0) return -1;
+
+    /* A partitioned disk first. `make boot` produces one, with the filesystem
+     * inside the EFI system partition rather than at sector 0, so a reader that
+     * only understood a whole-device filesystem could not read the medium the
+     * kernel was booted from — which is the one that matters. An unpartitioned
+     * image still works: gpt_find_esp says so and this falls back. */
+    uint64_t start = 0, count = 0;
+    part_lba = (gpt_find_esp(&start, &count) == 0) ? start : 0;
+
+    if (rd_sec(0, secbuf) != 0) return -1;
 
     /* The signature first. Without it every field below is a number read out of
      * whatever the disk happens to hold, and the mount would "succeed" on an
@@ -103,7 +120,7 @@ static uint64_t clus_sector(uint32_t c) {
 static uint32_t fat_next(uint32_t c) {
     if (c < 2 || c >= total_clus) return 0;
     uint64_t off = (uint64_t)c * 4;
-    if (virtio_blk_read(fat_start + off / 512, secbuf) != 0) return 0;
+    if (rd_sec(fat_start + off / 512, secbuf) != 0) return 0;
     uint32_t v = rd32(secbuf + (off % 512)) & 0x0fffffff;
     /* 0x0ffffff8 and above is the end of the chain; anything below 2 is a
      * corrupt entry and is treated as the end rather than followed. */
@@ -150,7 +167,7 @@ static int dir_find(uint32_t dir, const char *name, fat_file_t *out) {
 
     for (uint32_t c = dir; c; c = fat_next(c)) {
         for (uint32_t s = 0; s < sec_per_clus; s++) {
-            if (virtio_blk_read(clus_sector(c) + s, dirbuf) != 0) return -1;
+            if (rd_sec(clus_sector(c) + s, dirbuf) != 0) return -1;
             for (int i = 0; i < 512; i += 32) {
                 const uint8_t *e = dirbuf + i;
                 if (e[0] == 0x00) return -1;         /* nothing further exists */
@@ -241,7 +258,7 @@ long fat_read(const fat_file_t *f, uint64_t off, void *buf, uint64_t len) {
     while (done < len && c) {
         uint32_t s = (uint32_t)(within / 512);
         uint32_t in_sec = (uint32_t)(within % 512);
-        if (virtio_blk_read(clus_sector(c) + s, secbuf) != 0) return done ? (long)done : -1;
+        if (rd_sec(clus_sector(c) + s, secbuf) != 0) return done ? (long)done : -1;
         uint64_t take = 512 - in_sec;
         if (take > len - done) take = len - done;
         for (uint64_t i = 0; i < take; i++) dst[done + i] = secbuf[in_sec + i];

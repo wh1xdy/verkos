@@ -227,7 +227,26 @@ void kmain_high(void) {
         /* After the scheduler exists, not before: a secondary's first act is to
          * adopt its own thread, and there is no table to adopt into until this
          * core has made one. */
-        if (virtio_blk_init(machine_tree()) == 0) fat_mount();
+        if (virtio_blk_init(machine_tree()) == 0 && fat_mount() == 0) {
+            /* Read the loader's own configuration, off the medium the loader
+             * read it from. That is the whole point of the exercise: vpart
+             * wrote the table, vmkfs formatted and filled the partition, vboot
+             * parsed this file and started this kernel, and this kernel can now
+             * read it back. Counting the entries rather than printing a fixed
+             * line, because a fixed line says the same thing whether or not
+             * anything was read. */
+            fat_file_t cfg;
+            if (fat_open("/vboot.conf", &cfg) == 0 && !cfg.is_dir) {
+                char buf[512];
+                long n = fat_read(&cfg, 0, buf, sizeof buf);
+                int entries = 0;
+                for (long i = 0; i + 5 < n; i++)
+                    if ((i == 0 || buf[i-1] == '\n') && buf[i] == 'e' && buf[i+1] == 'n' &&
+                        buf[i+2] == 't' && buf[i+3] == 'r' && buf[i+4] == 'y') entries++;
+                kprintf("  boot      read the loader's own vboot.conf off this disk: "
+                        "%u bytes, %d entries\n", cfg.size, entries);
+            }
+        }
         int others = smp_start_others(machine_tree());
         if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
         thread_create("worker-a", worker, (void *)(uintptr_t)0);
