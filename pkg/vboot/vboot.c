@@ -17,7 +17,11 @@
  */
 #include "efi.h"
 #include "ed25519.h"
-#include "vboot-key.h"
+/* Angle brackets, not quotes: a quoted include is resolved from this file's own
+ * directory first, which would make the checked-in all-zero key impossible to
+ * override. With -I the build can point at a generated header instead, and the
+ * repository keeps a key nobody holds the private half of. */
+#include <vboot-key.h>
 
 #define CONFIG_PATH   L"\\vboot.conf"
 #define MAX_ENTRIES   8

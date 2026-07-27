@@ -6,6 +6,7 @@
  *   vsign keygen  KEYFILE PUBFILE     make a key pair (KEYFILE stays secret)
  *   vsign sign    KEYFILE FILE        write FILE.sig next to FILE
  *   vsign verify  PUBFILE FILE        check FILE against FILE.sig
+ *   vsign pubof   KEYFILE PUBFILE     derive the public key from the private one
  *   vsign pubhdr  PUBFILE             print the public key as a C array for vboot
  *
  * A signature is 64 raw bytes; the .sig file holds exactly that.
@@ -58,7 +59,8 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr,
             "usage: vsign keygen KEYFILE PUBFILE | sign KEYFILE FILE\n"
-            "             | verify PUBFILE FILE  | pubhdr PUBFILE\n");
+            "             | verify PUBFILE FILE  | pubhdr PUBFILE\n"
+            "             | pubof  KEYFILE PUBFILE\n");
         return 1;
     }
     const char *cmd = argv[1];
@@ -101,6 +103,22 @@ int main(int argc, char **argv) {
         int rc = ed25519_verify(sig, msg, mlen, pub);
         printf("%s: %s\n", argv[3], rc == 0 ? "signature OK" : "SIGNATURE INVALID");
         return rc == 0 ? 0 : 2;
+    }
+    /* The public half is derived from the private one rather than kept beside
+     * it. A build that reads a stored .pub can be handed one that does not
+     * match the key it signs with, and the result verifies against nothing —
+     * a boot chain that looks signed and refuses every kernel, or worse,
+     * trusts a key nobody is holding. Derived, they cannot disagree. */
+    if (!strcmp(cmd, "pubof") && argc == 4) {
+        size_t klen = 0;
+        unsigned char *seed = slurp(argv[2], &klen);
+        if (!seed) return 1;
+        if (klen < 32) { fprintf(stderr, "vsign: %s is not a 32-byte key\n", argv[2]); return 1; }
+        ed_u8 pub[32];
+        ed25519_pubkey(pub, seed);
+        if (spit(argv[3], pub, 32, 0644)) return 1;
+        printf("wrote %s, derived from %s\n", argv[3], argv[2]);
+        return 0;
     }
     if (!strcmp(cmd, "pubhdr") && argc == 3) {
         size_t plen = 0;

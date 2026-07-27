@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-060.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-061.
 
 ---
 
@@ -32,7 +32,7 @@ Not a plan — these are directories in `pkg/`, built today; all but `stam`,
 | | Replaces | What it is |
 |---|---|---|
 | **`stam`** | Linux | Our own aarch64 kernel. Boots two ways, runs a shell (D-030…D-050) |
-| **`vboot`** | GRUB | A UEFI bootloader in plain C, no gnu-efi. Verifies what it boots with Ed25519 — when a key is configured; the shipped key is all zeroes, so a default build boots unchecked (D-010, D-011) |
+| **`vboot`** | GRUB | A UEFI bootloader in plain C, no gnu-efi. Verifies what it boots with Ed25519, once given a key — `VERK_SIGN_KEY=… make boot` signs the kernel and initramfs and builds vboot against the matching public half. The shipped key is all zeroes, so a default build boots unchecked (D-010, D-011, D-061) |
 | **`urverk`** | systemd | One static binary that is both the initramfs `/init` and PID 1 (D-009) |
 | **`vlogin`** | shadow | `login`, `su`, `passwd`, `useradd`… shadow is not built or even fetched (D-013, D-051) |
 | **`verkmod`** | kmod | `insmod`, `rmmod`, `lsmod`, `modinfo`, `modprobe`, `depmod` (D-012) |

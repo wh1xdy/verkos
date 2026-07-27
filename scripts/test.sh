@@ -66,6 +66,53 @@ if [ -x "$T/vsign" ]; then
     if "$T/vsign" verify "$T/k.pub" "$T/payload" >/dev/null 2>&1; then
         bad "a tampered payload is rejected"
     else ok "a tampered payload is rejected"; fi
+    # The public half is derived, not stored beside the key. A build that reads
+    # a stored .pub can be handed one that does not match, and then the boot
+    # chain either refuses every kernel or trusts a key nobody holds.
+    "$T/vsign" pubof "$T/k.key" "$T/k2.pub" >/dev/null 2>&1
+    check "the public key derived from the private one is the same key" \
+          "cmp -s $T/k.pub $T/k2.pub"
+    # And the header that goes into vboot has to hold that key rather than the
+    # zeroes it ships with, or verification is compiled out and everything
+    # above this passes while nothing is checked.
+    "$T/vsign" pubhdr "$T/k.pub" > "$T/vboot-key.h" 2>/dev/null
+    check "the generated key header is not the all-zero default" \
+          "grep -q '0x' $T/vboot-key.h && ! grep -q '\\[32\\] = { 0 }' $T/vboot-key.h"
+    # vboot decides whether to check at all by looking at that array, so a build
+    # with a real key must not take the unsigned path.
+    check "vboot skips verification only when the key is all zeroes" \
+          "grep -q 'if (!key_configured()) return 0' pkg/vboot/vboot.c"
+    # The key header must be overridable, or signing means editing a file that
+    # is committed — which is how a private key ends up in a public repository.
+    check "vboot's key header can be overridden at build time" \
+          "grep -q 'VBOOT_KEY_DIR' pkg/vboot/build.sh && grep -q '#include <vboot-key.h>' pkg/vboot/vboot.c"
+    check "stage 70 signs the kernel and the initramfs when given a key" \
+          "grep -q 'VERK_SIGN_KEY' scripts/70-boot-image.sh && grep -q 'sign_payloads' scripts/70-boot-image.sh"
+    # Everything above says what the build was asked to do. This says what came
+    # out: build vboot against a generated header and look for the key bytes in
+    # the binary. A build that silently kept the checked-in zeroes passes every
+    # structural check and verifies nothing.
+    if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        mkdir -p "$T/keydir"
+        "$T/vsign" pubhdr "$T/k.pub" > "$T/keydir/vboot-key.h" 2>/dev/null
+        if VBOOT_KEY_DIR="$T/keydir" CC=aarch64-linux-gnu-gcc \
+           OBJCOPY=aarch64-linux-gnu-objcopy LD=aarch64-linux-gnu-ld \
+           bash pkg/vboot/build.sh "$T/vbkey" aarch64 >"$T/vbkey.log" 2>&1; then
+            # The 32 key bytes, as they would sit in .rodata.
+            od -An -tx1 -v "$T/k.pub" | tr -d " \n" > "$T/keyhex"
+            od -An -tx1 -v "$T/vbkey/BOOTAA64.EFI" | tr -d " \n" > "$T/binhex"
+            check "a vboot built with a key actually contains that key" \
+                  "grep -qf $T/keyhex $T/binhex"
+            # And the default build must not, or the check above proves nothing.
+            if bash pkg/vboot/build.sh "$T/vbzero" aarch64 >/dev/null 2>&1; then
+                od -An -tx1 -v "$T/vbzero/BOOTAA64.EFI" | tr -d " \n" > "$T/zerohex"
+                check "the default build does not contain that key" \
+                      "! grep -qf $T/keyhex $T/zerohex"
+            fi
+        else
+            bad "vboot does not build against a generated key header"
+        fi
+    fi
 fi
 
 say "vcpio (symlinks used to come out empty and break /bin/sh)"
@@ -822,12 +869,19 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # while the shell is still busy — which is what made this
                     # flaky twice. Counting prompts is the shell telling us it
                     # is ready, which is the only thing worth waiting for.
+                    # Occurrences, not lines. grep -c counts lines that match,
+                    # and a program's output shares a line with the prompt often
+                    # enough that the count stops rising while the shell is
+                    # perfectly ready — after which the next command goes in
+                    # early and the last check in the sequence fails. That is
+                    # the third distinct reason this test has been flaky.
+                    prompts() { grep -ao 'verk\$' "$SD/out.log" 2>/dev/null | wc -l | tr -d ' '; }
                     send_and_wait() {
-                        want=$(( $(grep -ac 'verk\$' "$SD/out.log" 2>/dev/null || echo 0) + 1 ))
+                        want=$(( $(prompts) + 1 ))
                         printf '%s\n' "$1" >&9
                         for _ in $(seq 1 45); do
                             sleep 1
-                            [ "$(grep -ac 'verk\$' "$SD/out.log" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
+                            [ "$(prompts)" -ge "$want" ] && return 0
                         done
                         return 1
                     }

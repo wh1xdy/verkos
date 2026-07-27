@@ -136,7 +136,50 @@ add_rescue_shell() {
     return 0
 }
 
+# Signing is opt-in, because the key cannot live in a public repository and a
+# bootloader that trusts a key everyone has is worse than one that trusts none:
+# the second is honestly unverified, the first only looks verified.
+#
+#     vsign keygen verkos.key verkos.pub
+#     VERK_SIGN_KEY=$PWD/verkos.key make boot ARCH=aarch64
+#
+# The public half is generated into the build directory and vboot is compiled
+# against it, so the checked-in all-zero header is never edited and a clone
+# still builds an unsigned bootloader that boots.
+sign_setup() {
+    SIGN_PUB=""
+    [ -n "${VERK_SIGN_KEY:-}" ] || return 0
+    [ -f "$VERK_SIGN_KEY" ] || die "VERK_SIGN_KEY=$VERK_SIGN_KEY does not exist"
+
+    mkdir -p "$BUILD_DIR/sign"
+    VSIGN="$BUILD_DIR/sign/vsign"
+    cc -O2 -w -o "$VSIGN" "$VERK_ROOT/pkg/vboot/vsign.c" \
+        -I"$VERK_ROOT/pkg/vboot" || die "vsign did not build"
+
+    SIGN_PUB="$BUILD_DIR/sign/verkos.pub"
+    "$VSIGN" pubof "$VERK_SIGN_KEY" "$SIGN_PUB" >/dev/null 2>&1 || \
+        die "could not derive the public key from $VERK_SIGN_KEY"
+    "$VSIGN" pubhdr "$SIGN_PUB" > "$BUILD_DIR/sign/vboot-key.h" || \
+        die "could not write the public key header"
+    export VBOOT_KEY_DIR="$BUILD_DIR/sign"
+    ok "signing with $(basename "$VERK_SIGN_KEY")"
+}
+
+# Sign what vboot will be asked to verify. Both, not just the kernel: an
+# initramfs is where the root is found and the passphrase is read, so an
+# unverified one is an unverified system however well the kernel is checked.
+sign_payloads() {
+    [ -n "${VERK_SIGN_KEY:-}" ] || return 0
+    for f in "$1" "$2"; do
+        "$VSIGN" sign "$VERK_SIGN_KEY" "$f" >/dev/null || die "could not sign $f"
+        "$VSIGN" verify "$SIGN_PUB" "$f" >/dev/null || \
+            die "signed $f and then could not verify it"
+    done
+    ok "signed the kernel and the initramfs, and verified both"
+}
+
 build_vboot() {
+    sign_setup
     bash "$VERK_ROOT/pkg/vboot/build.sh" "$BUILD_DIR/vboot" "$ARCH" >/dev/null \
         || die "vboot build failed"
     [ -f "$BUILD_DIR/vboot/$EFI_NAME" ] || die "vboot produced no $EFI_NAME"
@@ -180,6 +223,7 @@ build_boot_disk() {
     mkfs.vfat -F 32 -n VERKESP "$esp" >/dev/null
     mmd -i "$esp" ::/EFI ::/EFI/BOOT
     mcopy -i "$esp" "$BUILD_DIR/vboot/$EFI_NAME" "::/EFI/BOOT/$EFI_NAME"
+    sign_payloads "$kernel" "$initramfs"
     mcopy -i "$esp" "$kernel"    ::/vmlinuz
     mcopy -i "$esp" "$initramfs" ::/initramfs.img
     mcopy -i "$esp" "$cfg"       ::/vboot.conf

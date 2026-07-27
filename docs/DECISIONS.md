@@ -2194,3 +2194,70 @@ failing check was not recorded — so it is written down here rather than assume
 away.
 
 176 → 178 checks.
+
+## D-061 — The bootloader gets a key it can actually refuse with
+
+D-011 wrote the verification and left it off: `VBOOT_PUBKEY` is thirty-two
+zeroes, `verify_payload` returns 0 before reading a signature when no key is
+configured, and nothing in the build ever ran `vsign`. So the property D-011
+claims — that vboot refuses a kernel it cannot verify — was true of the code
+and false of every build. The README says so now; this makes it available.
+
+**Signing is opt-in, and the key stays out of the repository.**
+
+    vsign keygen verkos.key verkos.pub
+    VERK_SIGN_KEY=$PWD/verkos.key make boot ARCH=aarch64
+
+A committed key would be worse than none: an unsigned build is honestly
+unverified, while a build trusting a key everyone has only *looks* verified.
+So stage 70 derives the public half, generates the header into the build
+directory, compiles vboot against that, and signs the kernel and the initramfs.
+The checked-in all-zero header is never edited and a clone still builds a
+bootloader that boots.
+
+Two details that are decisions rather than mechanics:
+
+**The public key is derived from the private one, never read from a file
+beside it.** A build handed a `.pub` that does not match the key it signs with
+produces a boot chain that refuses every kernel — or, if the mismatch runs the
+other way, one that trusts a key nobody is holding. Derived, they cannot
+disagree. `vsign pubof` exists for that and nothing else.
+
+**`vboot.c` includes `<vboot-key.h>` rather than `"vboot-key.h"`.** A quoted
+include is resolved from the including file's own directory first, so the
+committed header could not be overridden by `-I` and signing would have meant
+editing a tracked file. That is how a private key ends up in a public
+repository.
+
+**The initramfs is signed too, not only the kernel.** It is where the root is
+found and where the passphrase for an encrypted one is read, so an unverified
+initramfs is an unverified system however carefully the kernel is checked.
+
+### What is checked, and what is not
+
+`make test` gains seven checks, and the two that matter are the ones that look
+at what came out rather than what was asked for: **a vboot built against a
+generated header contains those thirty-two bytes, and the default build does
+not.** A build that silently kept the zeroes passes every structural check
+while verifying nothing — which is exactly the state this entry is fixing.
+
+**Not checked: a machine refusing to boot a tampered kernel.** The signature
+mathematics is covered against the RFC 8032 vectors and a flipped byte, and
+the key is known to reach the binary, but no firmware has been asked to start
+a signed system and then refused a modified one. That needs a full distro
+build, and it is the honest next step for this feature rather than something
+to claim now.
+
+### The shell test, flaky a third time
+
+`a < f` failed one run in ten. The prompt counter used `grep -c`, which counts
+matching *lines* — and a program's output shares a line with the prompt often
+enough that the count stopped rising while the shell was perfectly ready, after
+which the next command went in early and the last check in the sequence failed.
+Counting occurrences with `grep -o` fixed it: ten consecutive runs at 185/0.
+
+Three separate causes now, in one test: a fifo closed between writes, waiting on
+output instead of readiness, and counting lines instead of matches. Each looked
+like timing and none of them was.
+
+178 → 185 checks.

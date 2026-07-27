@@ -53,7 +53,8 @@ LD=${LD:-ld}
 
 # 1. compile + link a position-independent freestanding EFI app
 "$CC" -ffreestanding -fno-stack-protector -fshort-wchar $ARCHFLAGS \
-    -fpic -fno-jump-tables -Wall -I"$HERE" -c "$HERE/vboot.c" -o "$OUT/vboot.o"
+    -fpic -fno-jump-tables -Wall -I"${VBOOT_KEY_DIR:-$HERE}" -I"$HERE" \
+    -c "$HERE/vboot.c" -o "$OUT/vboot.o"
 "$LD" -nostdlib -znocombreloc -shared -Bsymbolic -T "$HERE/vboot.lds" \
     "$OUT/vboot.o" -o "$OUT/vboot.so"
 
