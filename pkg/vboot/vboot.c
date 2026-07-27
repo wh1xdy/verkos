@@ -568,18 +568,42 @@ static int vb_gtdt_timer_ppi(unsigned *ppi) {
  * That is the only reason we look at ACPI at all here: on a machine described
  * purely by ACPI there is no other way to find the console, and a kernel with
  * no console is a kernel that cannot tell you why it stopped. */
-static int vb_spcr(UINT64 *base, const char **compat) {
+static int vb_spcr(UINT64 *base, const char **compat, unsigned *gsi) {
     unsigned char *tab = vb_acpi_table("SPCR");
     if (!tab) return 0;
     unsigned iface = tab[36];
     unsigned space = tab[40];              /* 0 = memory-mapped, 1 = port I/O */
     UINT64 addr = vb_le64(tab + 44);
+    /* The console's interrupt, which SPCR carries and we never read. Linux
+     * will not probe a PL011 without one; stam polls, so its absence was
+     * invisible for as long as stam was the only kernel this tree started
+     * (D-069). It is a global interrupt id, and a device tree wants it
+     * relative to the start of the shared range, which begins at 32. */
+    if (gsi) *gsi = (unsigned)tab[54] | ((unsigned)tab[55] << 8) |
+                    ((unsigned)tab[56] << 16) | ((unsigned)tab[57] << 24);
     /* Port I/O cannot be expressed as a device-tree "reg", and pretending
      * otherwise would give the kernel an address it would happily write to.
      * x86 will need its console described another way. */
     if (space != 0 || !addr) return 0;
     *base = addr;
     *compat = (iface == 3) ? "arm,pl011" : "ns16550a";
+    return 1;
+}
+
+/* Whether PSCI is available and whether it is reached through hvc or smc.
+ * ACPI's FADT says both, in ArmBootArch at offset 129: bit 0 is
+ * PSCI_COMPLIANT, bit 1 is PSCI_USE_HVC. Guessing would be worse than not
+ * emitting the node at all — a wrong conduit is a secondary CPU that never
+ * comes up, reported as nothing. */
+static int vb_psci(int *use_hvc) {
+    unsigned char *fadt = vb_acpi_table("FACP");
+    if (!fadt) return 0;
+    unsigned len = (unsigned)fadt[4] | ((unsigned)fadt[5] << 8) |
+                   ((unsigned)fadt[6] << 16) | ((unsigned)fadt[7] << 24);
+    if (len < 131) return 0;                       /* older FADT: no ArmBootArch */
+    unsigned flags = (unsigned)fadt[129] | ((unsigned)fadt[130] << 8);
+    if (!(flags & 1)) return 0;                    /* not PSCI compliant */
+    if (use_hvc) *use_hvc = (flags & 2) ? 1 : 0;
     return 1;
 }
 
@@ -613,11 +637,20 @@ static int vb_ram_extent(UINT64 *lo, UINT64 *hi) {
 static int vb_install_dtb(void) {
     if (vb_find_cfg(&dtb_guid)) return 0;
 
+/* Phandles are ours to choose, since nothing else writes into this tree.
+ * Small constants rather than a counter: there are two, and a number that can
+ * be read in the source is worth more here than a mechanism. */
+#define VB_PH_GIC   1
+#define VB_PH_CLK   2
+
     UINT64 lo = 0, hi = 0;
     if (!vb_ram_extent(&lo, &hi)) return -1;
 
-    UINT64 uart = 0; const char *uart_compat = 0;
-    int have_uart = vb_spcr(&uart, &uart_compat);
+    UINT64 uart = 0; const char *uart_compat = 0; unsigned uart_gsi = 0;
+    int have_uart = vb_spcr(&uart, &uart_compat, &uart_gsi);
+    int is_pl011 = have_uart && uart_compat[4] == 'p';   /* "arm,pl011" */
+    int psci_hvc = 0;
+    int psci_ok = vb_psci(&psci_hvc);
 
     fdtgen_t g;
     fg_init(&g, dtb_area, sizeof dtb_area);
@@ -626,6 +659,13 @@ static int vb_install_dtb(void) {
         fg_prop_u32(&g, "#size-cells", 2);
         fg_prop_str(&g, "model", "VerkOS machine described by vboot");
         fg_prop_str(&g, "compatible", "verkos,synthetic");
+        /* Every `interrupts` property in this tree is resolved through here.
+         * Without it Linux cannot make sense of a single one — the timer's
+         * included — and a kernel with no timer never reaches the point of
+         * saying so. stam never needed it: it has one interrupt controller and
+         * knows where it is, so it reads interrupt numbers literally and never
+         * follows a phandle (D-069). */
+        fg_prop_u32(&g, "interrupt-parent", VB_PH_GIC);
 
         fg_node(&g, "chosen");
             void *rsdp = vb_find_cfg(&acpi20_guid);
@@ -648,6 +688,31 @@ static int vb_install_dtb(void) {
             fg_prop_reg(&g, (unsigned long long)lo, (unsigned long long)(hi - lo));
         fg_end_node(&g);
 
+        /* How a secondary core is started. The conduit comes from the FADT
+         * rather than from a guess: hvc and smc are both plausible and only
+         * one of them works, and the wrong one fails by doing nothing. */
+        if (psci_ok) {
+            fg_node(&g, "psci");
+                fg_prop_str(&g, "compatible", "arm,psci-0.2");
+                fg_prop_str(&g, "method", psci_hvc ? "hvc" : "smc");
+            fg_end_node(&g);
+        }
+
+        /* A clock for the serial port. Linux's PL011 driver will not probe
+         * without one, which is why a machine described by this tree came up
+         * with no console at all (D-069). The rate is nominal: the firmware
+         * has already configured the port and nothing reprograms the divisor,
+         * so what matters is that the property exists and resolves. */
+        if (is_pl011) {
+            fg_node(&g, "apb-pclk");
+                fg_prop_str(&g, "compatible", "fixed-clock");
+                fg_prop_u32(&g, "#clock-cells", 0);
+                fg_prop_u32(&g, "clock-frequency", 24000000);
+                fg_prop_str(&g, "clock-output-names", "clk24mhz");
+                fg_prop_u32(&g, "phandle", VB_PH_CLK);
+            fg_end_node(&g);
+        }
+
         /* Processors and the interrupt controller, out of ACPI's MADT. */
         UINT64 gicd = 0, gicc = 0, gicr = 0; unsigned ncpu = 0, gicver = 0;
         int have_madt = vb_madt(&gicd, &gicc, &ncpu, &gicver, &gicr);
@@ -668,6 +733,10 @@ static int vb_install_dtb(void) {
                         fg_prop_str(&g, "device_type", "cpu");
                         fg_prop_str(&g, "compatible", "arm,armv8");
                         fg_prop_u32(&g, "reg", c);
+                        /* Without this a secondary core is described and never
+                         * started, which reads as a machine that is simply
+                         * slower than it should be. */
+                        if (psci_ok) fg_prop_str(&g, "enable-method", "psci");
                     fg_end_node(&g);
                 }
             fg_end_node(&g);
@@ -693,6 +762,7 @@ static int vb_install_dtb(void) {
                 fg_prop_str(&g, "compatible", v3_ok ? "arm,gic-v3" : "arm,cortex-a15-gic");
                 fg_prop_u32(&g, "#interrupt-cells", 3);
                 fg_prop(&g, "interrupt-controller", 0, 0);
+                fg_prop_u32(&g, "phandle", VB_PH_GIC);
                 /* v2: distributor then CPU interface. v3: distributor then
                  * redistributor — the CPU interface is not memory-mapped. */
                 { unsigned char b[32];
@@ -730,8 +800,33 @@ static int vb_install_dtb(void) {
             while (hn--) nodename[n++] = hex[hn];
             nodename[n] = 0;
             fg_node(&g, nodename);
-                fg_prop_str(&g, "compatible", uart_compat);
+                if (is_pl011) {
+                    /* Two strings, and the second is the one that matters:
+                     * "arm,primecell" is what makes the AMBA bus claim the
+                     * device in the first place. */
+                    static const char pl011c[] = "arm,pl011\0arm,primecell";
+                    fg_prop(&g, "compatible", pl011c, sizeof pl011c - 1);
+                } else {
+                    fg_prop_str(&g, "compatible", uart_compat);
+                }
                 fg_prop_reg(&g, (unsigned long long)uart, 0x1000ull);
+                if (is_pl011) {
+                    unsigned char cb[8];
+                    fg_be32(cb, VB_PH_CLK); fg_be32(cb + 4, VB_PH_CLK);
+                    fg_prop(&g, "clocks", cb, 8);
+                    static const char cn[] = "uartclk\0apb_pclk";
+                    fg_prop(&g, "clock-names", cn, sizeof cn - 1);
+                }
+                /* A shared peripheral interrupt is <0 (gsi - 32) 4>: type 0 is
+                 * SPI, the numbering starts at 32, and 4 is level-triggered
+                 * active high. Below 32 the id is per-processor and does not
+                 * belong to a serial port, so it is not described rather than
+                 * described wrongly. */
+                if (uart_gsi >= 32) {
+                    unsigned char ib[12];
+                    fg_be32(ib, 0); fg_be32(ib + 4, uart_gsi - 32); fg_be32(ib + 8, 4);
+                    fg_prop(&g, "interrupts", ib, 12);
+                }
             fg_end_node(&g);
         }
     fg_end_node(&g);

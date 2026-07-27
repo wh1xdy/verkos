@@ -2731,3 +2731,47 @@ built: boot the same disk under plain AAVMF and see whether a prompt appears.
 It is worth stating what this does *not* affect. `vpart`, `vmkfs` and the boot
 chain up to the kernel handover were proved in both configurations (D-068),
 because all of that happens before the tree matters.
+
+## D-070 — The four gaps were real, and none of them was the cause
+
+D-069's diagnosis was acted on. vboot's synthetic tree now carries what it was
+missing: a `phandle` on the interrupt controller and an `interrupt-parent` at
+the root, a `fixed-clock` node wired to the PL011 through `clocks` and
+`clock-names`, the `arm,primecell` compatible that makes the AMBA bus claim the
+device, the console's interrupt read out of SPCR's global-system-interrupt
+field, and `enable-method = "psci"` with a `/psci` node whose conduit comes
+from the FADT rather than from a guess — `hvc` and `smc` are both plausible and
+the wrong one fails by doing nothing.
+
+Every one of those was genuinely absent and is genuinely needed. None of them
+was the reason Linux went quiet.
+
+**The kernel is not running at all.** Booted with
+`earlycon=pl011,0x9000000` on the command line — which writes to the port
+directly and consults no device tree whatsoever — the log still ends at
+`EFI stub: Exiting boot services...`, to the same byte. A console that needs no
+tree produced nothing, so the failure is before the console, not in it.
+
+That reframes the problem and is worth more than the fix it invalidates. The
+question was "why can Linux not find its console"; it is now "why does Linux
+stop executing between the EFI stub's last message and its own first one". The
+candidates are what the kernel touches in that window and nothing else: the
+memory node, the handover state, or an FDT the stub cannot extend.
+
+**Deliberately kept anyway.** The five additions are correct against the
+binding documents and against the tree QEMU publishes for the same machine, and
+a tree that is right for reasons unrelated to today's bug is still right. They
+are also now the *only* remaining differences worth ruling out, which is
+cheaper than having to add them later while diagnosing something else.
+
+**What this cost, and what it bought.** Roughly an hour, a fix that did not
+fix, and a much better question. The alternative — believing the diagnosis
+because it was well-argued and the evidence lined up — would have produced a
+tree that looks complete and a machine that still says nothing, which is
+exactly the class of defect this log exists to catch. The check that settled it
+took one command line: give the kernel a console that cannot fail and see
+whether it speaks.
+
+`make test` is 211/0, unchanged: none of this is covered by a check, because
+nothing in the suite boots a distro under firmware. That is the honest gap, and
+it is the same one D-055 closed for stam and nobody has closed for Linux.
