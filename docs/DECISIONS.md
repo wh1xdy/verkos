@@ -1889,3 +1889,33 @@ of input longer than a few characters is lost** — typed slowly the shell reads
 a whole line, but a line delivered all at once arrives as its first three
 characters. The ring buffer is 256 bytes and not the cause; the PL011 receive
 FIFO is the first place to look.
+
+## D-055 — Something finally boots stam
+
+D-053 ended by naming the gap it had just fallen into: nothing here starts the
+kernel, so a kernel that stops booting looks exactly like one that works.
+`make test` now boots stam under QEMU with its initrd and reads what it printed.
+
+The six assertions are chosen so that each depends on work having happened
+rather than on the kernel having reached a line of code: the scheduler's own
+verdict after two seconds of threads refusing to yield, a program's report of
+its own arguments, the pages a finished process gave back, the final milestone.
+A fixed banner would say the same thing either way, which is D-033's lesson.
+
+**Validated by breaking the kernel on purpose.** With a store to an unmapped
+address injected at the top of `kmain_high`, four of the six go red and two stay
+green — and the two that stay green are exactly the ones describing work that
+completed before the injected fault. That is the check reporting where the
+kernel died, not merely that it did.
+
+**It does not catch D-053, and the comment in the test says so.** Whether an
+unaligned access with the MMU off actually faults is the emulator's choice:
+QEMU 7.2 in the build container runs the offending kernel to completion, QEMU
+11.0 on the developer's machine kills it in `fdt_init`. The disassembly check
+from D-053 is what catches that one, on every host. This one catches the faults
+every QEMU agrees are faults. Writing that down mattered more than the check
+did — a test believed to cover something it does not is worse than a gap
+everyone knows about.
+
+166 → 172 checks. CI has no qemu-system-aarch64 and skips the six, which is
+also worth knowing: the boot is proved where the kernel is built, not on push.

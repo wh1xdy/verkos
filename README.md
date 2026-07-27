@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-054.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-055.
 
 ---
 
@@ -150,11 +150,11 @@ does not (D-054). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-And one that is about the tests rather than the kernel: **nothing here boots
-stam.** `make test` builds it and checks its shape — Image magic, vector
-ordering, relocation count, no unaligned access before the MMU — but never
-starts it. That is how the kernel came to stop booting entirely, for a reason
-no source change caused, with every check still green (D-053).
+`make test` now boots it: six checks start the kernel under QEMU and read what
+it printed — the scheduler's own verdict, a program's report of its arguments,
+the pages a finished process gave back. Each was validated by breaking the
+kernel on purpose and watching the right ones go red (D-055). CI has no
+aarch64 QEMU and skips them, so the boot is proved where the kernel is built.
 
 **stam is not in any image.** It is built by `pkg/stam/Makefile` and shape-checked
 by `make test`; no numbered build stage ships it. The distribution still boots

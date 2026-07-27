@@ -725,6 +725,62 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
         else
             bad "stam does not build as a UEFI application"
         fi
+
+        # --- and then actually start it -------------------------------------
+        # Everything above checks the kernel's shape. None of it noticed when
+        # the kernel stopped booting entirely (D-053), so this starts it and
+        # reads what it printed. The strings asserted on are deliberately ones
+        # that only exist if the work behind them happened — the scheduler's
+        # own count, a program's report of its arguments, the final milestone
+        # line. A kernel that faults early prints a prefix and none of these.
+        #
+        # It does NOT catch D-053, and it is worth saying so here rather than
+        # letting the next person assume it does. That defect was an unaligned
+        # access with the MMU off, and whether it faults is the emulator's
+        # choice: QEMU 7.2 in the build container runs the offending kernel to
+        # completion, QEMU 11.0 on the developer's machine kills it in
+        # fdt_init. The check above — no unaligned 64-bit access in the
+        # disassembly — is the one that catches that, on every host. This one
+        # catches the faults every QEMU agrees are faults.
+        if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+            if ( cd pkg/stam && make CROSS="$STAM_CROSS" progs >/dev/null 2>&1 ) &&
+               [ -f pkg/stam/stam.img ] && [ -f pkg/stam/progs/initrd.cpio ]; then
+                BL=$T/stam-boot.log
+                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                    -display none -serial "file:$BL" -no-reboot \
+                    -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
+                    </dev/null >/dev/null 2>&1 & echo $! > "$T/qpid" )
+                # Long enough for the scheduler demonstration, which spends two
+                # seconds proving threads are preempted.
+                for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+                         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35; do
+                    sleep 1
+                    grep -aq 'milestone 4' "$BL" 2>/dev/null && break
+                done
+                kill "$(cat "$T/qpid")" 2>/dev/null
+                wait "$(cat "$T/qpid")" 2>/dev/null
+
+                check "stam boots and says which machine it found" \
+                      "grep -aq 'stam 0.1 — the VerkOS kernel' $BL"
+                check "stam reaches userspace and reports the console it found" \
+                      "grep -aqE 'console +(PL011|8250|GENI)' $BL"
+                # The timer really preempted: a fixed string would say this
+                # whether or not any thread ran (D-033).
+                check "stam preempts threads that never yield" \
+                      "grep -aq 'every thread ran, evenly. yes.' $BL"
+                # argv survived the address-space switch (D-054).
+                check "a program stam started can read its own arguments" \
+                      "grep -aq 'argv ends with NULL, as it must' $BL"
+                check "stam runs a program, collects it, and gets its pages back" \
+                      "grep -aq 'memory returned to the free list' $BL"
+                check "stam finishes its own demonstration" \
+                      "grep -aq 'milestone 4' $BL"
+            else
+                bad "stam's initrd does not build, so the kernel cannot be booted"
+            fi
+        else
+            printf '  \033[33mskip\033[0m  booting stam (no qemu-system-aarch64)\n'
+        fi
         ( cd pkg/stam && make CROSS="$STAM_CROSS" clean clean-efi >/dev/null 2>&1 )
     else
         bad "stam does not compile"
