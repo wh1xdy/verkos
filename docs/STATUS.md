@@ -18,7 +18,7 @@ reading code.
 
 | | |
 |---|---|
-| **Boot chain** | UEFI → vboot (ours) → kernel → initramfs → urverk → services → login, on aarch64 |
+| **Boot chain** | UEFI → vboot (ours) → kernel → initramfs → urverk → services → login, on aarch64 — **when the firmware publishes a device tree**. With ACPI-only firmware vboot's synthetic tree is enough for stam and not for Linux, which boots into silence (D-068) |
 | **Encrypted root** | `vinstall --encrypt` makes a LUKS2 container; the partition reports `crypto_LUKS`/`aes-xts-plain64` and refuses to mount; urverk finds it by UUID, prompts, opens it, boots with root on `/dev/mapper/cryptroot` |
 | **Dual boot** | `--root-part`/`--esp-part` install beside another system; its bootloader keeps its checksum, its config survives, and the firmware loads ours from a `Boot####` variable we wrote into efivarfs (confirmed in the firmware's own BdsDxe log) |
 | **Immutable install** | `--immutable`: root read-only under a tmpfs overlay. A file written on the first boot is gone on the second |

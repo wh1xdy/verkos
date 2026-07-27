@@ -2639,3 +2639,40 @@ passed earlier are thorough about structure and indifferent to intent: fsck
 will tell you a directory chain is well-formed and not that a reader stops at
 the first `0x00` in it (D-065). Firmware is the opposite — it says nothing
 about structure and everything about whether the machine starts.
+
+### D-068, continued: the login prompt, and the condition on it
+
+The boot does reach a shell — `root@verkos:~#`, 492 programs, the whole
+userland — but only when **the firmware provides a device tree**. That is the
+finding, and it was found by chasing a prompt that would not appear.
+
+Under plain AAVMF, which describes the machine with ACPI and publishes no tree,
+the log ends at `EFI stub: Exiting boot services...` every time, to the byte.
+vboot says `device tree built and installed (firmware had none)`, hands Linux
+the tree it synthesised, and **Linux goes silent** — no console, no panic,
+nothing. Started with `-machine virt,acpi=off`, so that the firmware publishes
+a real tree, vboot says `firmware provides a device tree` and the same disk
+boots to a prompt.
+
+So the synthetic tree of D-035 and D-036 is sufficient for **stam** and not for
+**Linux**. That is not surprising in hindsight — it was built to the question
+*what does our kernel need to find its hardware*, and Linux asks a great deal
+more — but it was not known, and the way it fails is the expensive kind: a
+machine that starts, takes the kernel, and says nothing ever again.
+
+It also qualifies a claim. `docs/STATUS.md` records the boot chain as verified,
+and it is — but with a firmware that hands over a tree. A real ARM server with
+ACPI-only firmware would boot VerkOS into silence today, and nothing in the
+tree said so until now.
+
+**Not diagnosed:** which node Linux is missing. The obvious candidates are the
+`chosen/stdout-path` the console binds through, and the CPU and interrupt
+nodes D-035 listed as absent and D-036 filled in from MADT — filled in well
+enough for stam, which asks for one CPU and one timer. Finding out means
+dumping the tree vboot installs and comparing it against the one QEMU
+publishes, which is a contained piece of work and the obvious next step.
+
+Everything else in D-068 stands unchanged: the firmware read the partition
+table vpart wrote, loaded vboot out of the filesystem vmkfs wrote, and vboot
+read back all 46 MB of the kernel. Those hold in both configurations, because
+they happen before the tree matters.
