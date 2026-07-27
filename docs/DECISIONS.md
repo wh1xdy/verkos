@@ -2496,3 +2496,55 @@ was called with `-F 32`, since it is not called at all. 189 → 199.
 Still bought, and deliberately: `parted` for the GPT, and ext4 (D-014). The
 partitioner is the obvious next one to take, because `vinstall` already writes
 a GPT — that code exists and would only need lifting out.
+
+## D-066 — The partition table, and the last third-party tool leaves the boot disk
+
+`parted` said where the EFI system partition *is*, which is the first question
+firmware asks and the last one VerkOS was still outsourcing. `vpart` writes it
+now: a protective MBR, a header at LBA 1 and its mirror at the last sector, and
+128 entries after each.
+
+**`vinstall` did not already own this.** The plan assumed it did — it writes a
+GPT, so surely the code was there to lift out. It is not: `vinstall` generates
+an `sfdisk` script and runs util-linux. Checking before building saved writing
+the wrong thing; the assumption survived until somebody grepped for it.
+
+Three details that are decisions rather than mechanics:
+
+**The two headers are not copies.** They differ in `MyLBA`, `AlternateLBA` and
+where their entry array lives, and each one's CRC is computed with its own CRC
+field zeroed — so the checksums differ too. Copying the primary's checksum into
+the backup produces a disk that passes every check until the primary is
+damaged, which is the single moment the backup is read.
+
+**A type GUID is mixed-endian**: the first three fields little-endian, the last
+two as written. Getting it wrong produces a partition the firmware does not
+recognise as an ESP, with no error anywhere — it simply finds nothing to boot.
+
+**It is not a partition editor.** It writes a table from nothing; it does not
+read one, resize one, or move anything. Adding a partition beside somebody
+else's data is a much higher bar (D-015) and a different program.
+
+### Judged against parted, and against the case that matters
+
+`sfdisk --verify` reports no errors. The geometry is byte-for-byte what
+`parted` produces for the same disk — same first sector, same last, same type
+GUID — which is the useful comparison, because parted is what this replaces.
+
+And the backup is tested by destroying the primary: `make test` zeroes LBA 1
+and requires the partition to still be found. A backup that merely exists
+proves nothing, and this is the one structure whose whole purpose is to be read
+when the other is gone.
+
+### What is left
+
+Nothing, on the boot disk. `make boot` now goes from an empty file to something
+a machine starts from using only code in this repository: `vpart` for the
+table, `vmkfs` for the filesystem and its contents, `vboot` for the loader,
+`vcpio` and `vgzip` for the initramfs.
+
+Still bought elsewhere, and still deliberately: `mkfs.ext4` and `e2fsck` for
+the root filesystem (D-014), `sfdisk` inside `vinstall` — which now has an
+obvious replacement — and `xorriso` as a test-only judge of what `viso` writes.
+
+199 → 207 checks.

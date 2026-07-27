@@ -745,6 +745,43 @@ else
     bad "vmkfs does not compile"
 fi
 
+say "vpart writes the partition table (no parted)"
+if $CC -O2 -w -o "$T/vpart" pkg/vpart/vpart.c 2>/dev/null; then
+    ok "vpart compiles"
+    dd if=/dev/zero of="$T/disk.img" bs=1M count=64 status=none 2>/dev/null
+    "$T/vpart" "$T/disk.img" --esp 32 >/dev/null 2>&1
+    # A protective MBR, so a tool that reads only MBRs sees an occupied disk
+    # rather than an empty one it might offer to partition.
+    check "the protective MBR is type 0xEE with a boot signature" \
+          "[ \"$(dd if=$T/disk.img bs=1 skip=450 count=1 2>/dev/null | od -An -tx1 | tr -d ' ')\" = ee ] && \
+           [ \"$(dd if=$T/disk.img bs=1 skip=510 count=2 2>/dev/null | od -An -tx1 | tr -d ' ')\" = 55aa ]"
+    check "the primary header says EFI PART" \
+          "[ \"$(dd if=$T/disk.img bs=512 skip=1 count=1 2>/dev/null | head -c8)\" = 'EFI PART' ]"
+    # The judge is deliberately not us.
+    if command -v sfdisk >/dev/null 2>&1; then
+        check "sfdisk verifies the table without errors" \
+              "sfdisk --verify $T/disk.img 2>&1 | grep -q 'No errors detected'"
+        check "sfdisk sees exactly one EFI System partition" \
+              "[ \"$(sfdisk -l $T/disk.img 2>/dev/null | grep -c 'EFI System')\" = 1 ]"
+        # And the backup, which is the half that is never read until the one
+        # moment it matters. Zero the primary header and the table must still
+        # be there — a backup that merely exists proves nothing.
+        cp "$T/disk.img" "$T/damaged.img"
+        dd if=/dev/zero of="$T/damaged.img" bs=512 seek=1 count=1 conv=notrunc status=none 2>/dev/null
+        check "the table survives losing the primary header" \
+              "sfdisk -l $T/damaged.img 2>/dev/null | grep -q 'EFI System'"
+    else
+        printf '  \033[33mskip\033[0m  sfdisk (not installed)\n'
+    fi
+    check "vpart refuses a disk too small for a GPT" \
+          "dd if=/dev/zero of=$T/tiny.img bs=512 count=100 status=none 2>/dev/null; \
+           ! $T/vpart $T/tiny.img --esp 1 >/dev/null 2>&1"
+    check "stage 70 partitions with vpart and never calls parted" \
+          "grep -q vpart scripts/70-boot-image.sh && ! grep -q '^[^#]*parted' scripts/70-boot-image.sh"
+else
+    bad "vpart does not compile"
+fi
+
 say "the EFI system partition is FAT32, and now by construction"
 # Left to choose, dosfstools picked the FAT type from the cluster count and
 # chose FAT16 at both sizes VerkOS builds, for a year, while every comment and

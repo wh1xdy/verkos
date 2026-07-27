@@ -207,7 +207,6 @@ EOF
 }
 
 build_boot_disk() {
-    need_tool parted parted
     local esp="$BUILD_DIR/esp.img" img="$OUT_DIR/verkos-boot-${ARCH}.img"
     local kernel="$OUT_DIR/vmlinuz" initramfs="$OUT_DIR/initramfs.img"
     [ -f "$kernel" ] || die "no kernel at $kernel — run stage 50 first"
@@ -236,12 +235,14 @@ build_boot_disk() {
     [ -f "$kernel.sig" ]    && "$VMKFS" --copy "$esp" "$kernel.sig"    /vmlinuz.sig
     [ -f "$initramfs.sig" ] && "$VMKFS" --copy "$esp" "$initramfs.sig" /initramfs.img.sig
 
-    # GPT with a single ESP; the firmware needs the partition table to find it
+    # GPT with a single ESP; the firmware needs the partition table to find it.
+    # Ours, now: vpart writes the protective MBR, both headers and both copies
+    # of the entry array, so nothing third-party remains between a bare file
+    # and a disk a machine will start from.
+    cc -O2 -o "$tools/vpart" "$VERK_ROOT/pkg/vpart/vpart.c" || die "could not build vpart for the host"
     local total=$((ESP_MB + 4))
     dd if=/dev/zero of="$img" bs=1M count="$total" status=none
-    parted -s "$img" mklabel gpt
-    parted -s "$img" mkpart ESP fat32 1MiB "$((ESP_MB + 1))MiB"
-    parted -s "$img" set 1 esp on
+    "$tools/vpart" "$img" --esp "$ESP_MB"
     dd if="$esp" of="$img" bs=1M seek=1 conv=notrunc status=none
     ok "boot disk → $img ($(du -h "$img" | cut -f1))"
 }

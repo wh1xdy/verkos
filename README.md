@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-065.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-066.
 
 ---
 
@@ -39,11 +39,17 @@ Not a plan — these are directories in `pkg/`, built today; all but `stam`,
 | **`vinstall`** | — | The installer, in five modes (D-015, D-018, D-019, D-020, D-022) |
 | **`vmkfs`** | dosfstools + mtools | A FAT32 formatter *and* file writer — it fills the ESP the machine boots from, so neither is called any more (D-014, D-065). ext4 is still bought from e2fsprogs, deliberately |
 | **`viso`** | xorriso | The ISO 9660 writer, with El Torito and a hybrid MBR (D-024, D-026) |
+| **`vpart`** | parted | The GPT writer: protective MBR, both headers, both copies of the entry array (D-066) |
 | **`vbootimg`** | mkbootimg | Android boot images, for Qualcomm boards (D-045) |
 | **`vpk`** | — | The package manager: fetch, verify, build, install, remove |
 | **`verkbox`** | coreutils | 42 applets in one multi-call binary |
 | **`vdhcp`** | dhcpcd | The DHCP client |
 | **26 `vX` tools** | GNU / iproute2 / … | `sed`, `awk`, `tar`, `gzip`, `ip`, `ping`, `less`, `find`, `ps`, `curl`… |
+
+**`make boot` uses nothing third-party.** From an empty file to a disk a machine
+starts from: `vpart` writes the table, `vmkfs` the filesystem and its contents,
+`vboot` is the loader, `vcpio` and `vgzip` build the initramfs. ext4 is still
+bought (D-014).
 
 **At least 97 command names on a booted VerkOS resolve to code in this
 repository** — 42 verkbox applet names, plus 55 familiar names symlinked onto 26 `vX` tools
