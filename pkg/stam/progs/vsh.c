@@ -26,6 +26,12 @@ static long dup3_(int old, int newfd)   { return syscall3(24, old, newfd, 0); }
 /* openat(AT_FDCWD, path, flags): -100 is AT_FDCWD, which the kernel ignores
  * because there are no directories. 0 is read-only; O_WRONLY|O_CREAT is 0101. */
 /* 0 read, 0101 = O_WRONLY|O_CREAT, 02101 adds O_APPEND. */
+static long setpgid_(int pid, int pgid) { return syscall3(154, pid, pgid, 0); }
+/* TIOCSPGRP: tell the terminal which group its characters are addressed to.
+ * The real interface, not one of our own — a shell that used a private call
+ * could not be replaced by any other shell. */
+static long fg_(int pgid) { int p = pgid; return syscall3(29, 0, 0x5410, (long)&p); }
+
 static long open_(const char *p, int mode) {
     return syscall3(56, -100, (long)p, mode == 0 ? 0 : (mode == 1 ? 0101 : 02101));
 }
@@ -146,6 +152,12 @@ int main_loop(void) {
      * below does not change at all — the shell does not know whether it is
      * being typed at, which is what makes the script path worth having rather
      * than a second code path that could drift from the first. */
+    /* The shell is its own group, and owns the terminal until it hands it to
+     * a job. Without this the foreground group is zero and Ctrl-C reaches
+     * nobody at all. */
+    setpgid_(0, 0);
+    fg_(getpid());
+
     scripted = 0;
     {
         long f = open_("/rc", 0);
@@ -236,13 +248,18 @@ int main_loop(void) {
          * any more means a pipe whose writer has finished still has an open
          * write end somewhere, and its reader never sees end of file. */
         int prev_read = -1, failed = 0;
-        long last = -1;
+        long last = -1, job = 0;      /* the group every stage of this job joins */
         for (int i = 0; i < nseg; i++) {
             int pfd[2] = { -1, -1 };
             if (i + 1 < nseg && pipe_(pfd) < 0) { say("  vsh: cannot make a pipe\n"); failed = 1; break; }
 
             long pid = fork_();
             if (pid == 0) {
+                /* Set in the child as well as the parent, because either may
+                 * run first and the group has to exist before the terminal is
+                 * pointed at it. Doing it in one place only is a race whose
+                 * symptom is a Ctrl-C that sometimes reaches nothing. */
+                setpgid_(0, (int)job);
                 if (prev_read >= 0) { dup3_(prev_read, 0); close_(prev_read); }
                 else if (in_name && redirect(in_name, 0, 0) < 0) exit_(1);
 
@@ -251,6 +268,8 @@ int main_loop(void) {
 
                 run_or_die(path, sizeof path, seg[i]);
             }
+            if (!job) job = pid;              /* the first stage names the job */
+            setpgid_((int)pid, (int)job);
             if (prev_read >= 0) close_(prev_read);
             if (pid < 0) {
                 say("  vsh: cannot fork\n");
@@ -265,6 +284,7 @@ int main_loop(void) {
         if (prev_read >= 0) close_(prev_read);
         if (failed) continue;
 
+        if (!background && job) fg_((int)job);
         if (background) {
             /* Not waited for. Collected later, at a prompt, because a zombie
              * holds a process slot and sixteen of those is a machine that
@@ -275,8 +295,12 @@ int main_loop(void) {
 
         int status = 0;
         for (int i = 0; i < nseg; i++) wait_(&status);   /* the last one's code wins */
+        /* The shell takes the terminal back before it prompts again, or the
+         * next Ctrl-C would go to a group whose processes are all gone. */
+        fg_(getpid());
         int code = (status >> 8) & 0xff;
-        if (code) { say("  ["); say_num(code); say("]\n"); }
+        if (code == 128 + 2) say("  interrupted\n");
+        else if (code) { say("  ["); say_num(code); say("]\n"); }
 
     }
 }

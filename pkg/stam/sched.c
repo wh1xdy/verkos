@@ -82,6 +82,11 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->status      = 0;
     t->wait_reason = 0;
     t->wait_object = 0;
+    /* A new process joins its parent's group, which is what makes a pipeline
+     * one job: the shell puts the first child in a group of its own and every
+     * later one inherits it. */
+    t->pgid        = current ? current->pgid : 0;
+    t->pending     = 0;
     t->stack_low   = 0;
     t->sp          = 0;
     for (int i = 0; i < NFD; i++) t->fd[i] = 0;
@@ -280,6 +285,54 @@ void thread_wake_pipe(const void *object) {
             threads[i].wait_reason == WAIT_PIPE &&
             threads[i].wait_object == object)
             threads[i].state = THREAD_RUNNABLE;
+}
+
+/* Raise a signal. Delivery is not done here — this runs from the console
+ * interrupt, where the target is not the running thread and its kernel stack
+ * is somewhere else entirely. All that happens is a bit and a wakeup: a
+ * blocked process has to be made runnable or it will never reach the point
+ * where it can act on what it was sent. */
+int thread_signal(int pid, int sig) {
+    uint64_t f = irq_save();
+    int reached = 0;
+    for (int i = 0; i < n_threads; i++) {
+        thread_t *t = &threads[i];
+        if (t->state == THREAD_FREE || t->state == THREAD_ZOMBIE) continue;
+        if (pid < 0 ? (t->pgid != -pid) : (t->id != pid)) continue;
+        t->pending |= 1u << sig;
+        if (t->state == THREAD_BLOCKED) t->state = THREAD_RUNNABLE;
+        reached++;
+    }
+    irq_restore(f);
+    return reached;
+}
+
+int thread_signalled(void) {
+    int p = current->pending;
+    if (!p) return 0;
+    for (int s = 1; s < 31; s++) if (p & (1u << s)) return s;
+    return 0;
+}
+
+int thread_setpgid(int pid, int pgid) {
+    uint64_t f = irq_save();
+    int rc = -1;
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].state != THREAD_FREE &&
+            threads[i].id == (pid ? pid : current->id)) {
+            threads[i].pgid = pgid ? pgid : threads[i].id;
+            rc = threads[i].pgid;
+            break;
+        }
+    irq_restore(f);
+    return rc;
+}
+
+int thread_pgid_of(int pid) {
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].state != THREAD_FREE && threads[i].id == (pid ? pid : current->id))
+            return threads[i].pgid;
+    return -1;
 }
 
 /* Called from the interrupt, so it does the least it can: mark them runnable

@@ -1104,6 +1104,17 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # collects is a zombie holding a process slot.
                     check "a & runs in the background and is collected later" \
                           "grep -aq 'done ' $SL"
+                    # A signal reaching a process that never calls into the
+                    # kernel is the case Ctrl-C is for: a loop that counts has
+                    # no system call to be caught on the way out of, so
+                    # delivery has to happen when the timer interrupts it. The
+                    # program checks the exit status rather than the absence of
+                    # output, because a child that never started and a child
+                    # that was killed both stop printing.
+                    check "a signal ends a process that is not asking for anything" \
+                          "grep -aq 'a signal reached a running process and ended it' $SL"
+                    check "the status says which signal it died of" \
+                          "grep -aq 'exited with 130' $SL"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

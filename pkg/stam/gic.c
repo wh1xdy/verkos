@@ -13,6 +13,7 @@
  */
 #include "gic.h"
 #include "console.h"
+#include "sched.h"
 #include "fdt.h"
 #include "sched.h"
 #include "mmu.h"
@@ -171,7 +172,13 @@ static int timer_intid = -1, console_intid = -1;
 void gic_set_timer_irq(int id)   { timer_intid = id; }
 void gic_set_console_irq(int id) { console_intid = id; }
 
-void irq_dispatch(void) {
+/* The frame is passed in so the handler can tell whether the interrupt landed
+ * on a program or on the kernel. It matters for signals: a process that never
+ * calls into the kernel — a loop that counts, which is exactly what a person
+ * wants to interrupt — has no other moment at which it can be told to die.
+ * Delivering only on the way out of a system call means Ctrl-C works on
+ * everything except the programs it is for. */
+void irq_dispatch(void *frame) {
     if (!gic_present) return;
     uint32_t iar = gic_v3 ? (uint32_t)SYSREG_READ(ICC_IAR1_EL1) : rd(gicc, GICC_IAR);
     unsigned id = iar & 0xffffff;
@@ -185,4 +192,21 @@ void irq_dispatch(void) {
     if (gic_v3) SYSREG_WRITE(ICC_EOIR1_EL1, iar);
     else        wr(gicc, GICC_EOIR, iar);
     if ((int)id == timer_intid) schedule();
+
+    /* And on the way back out: if this interrupt landed on a program and a
+     * signal is waiting for it, this is where it dies. Only when the
+     * interrupted context was EL0 — a signal raised while the kernel is in the
+     * middle of something has to wait until the kernel is finished with it,
+     * and the syscall path already covers that case.
+     *
+     * SPSR's low four bits are the exception level and stack pointer that were
+     * in use: zero means EL0t, which is a program. */
+    {
+        const uint64_t *f = frame;
+        uint64_t spsr = f[32];              /* see the frame layout in vectors.S */
+        if ((spsr & 0xf) == 0) {
+            int sig = thread_signalled();
+            if (sig) thread_exit(128 + sig);
+        }
+    }
 }

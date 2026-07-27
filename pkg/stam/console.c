@@ -172,6 +172,27 @@ static int hw_getc(void) {
 /* Called from the interrupt. Drains the port completely: the interrupt says
  * that at least one character arrived, not how many, and leaving any behind
  * means the next one may never raise another. */
+static int fg_pgid;
+void console_set_foreground(int pgid) { fg_pgid = pgid; }
+int  console_foreground(void) { return fg_pgid; }
+
+/* Ctrl-C is handled here, where the character arrives, and not where it is
+ * read.
+ *
+ * That was the first attempt and it could not work: while a program runs, the
+ * shell is blocked in wait4 and nobody is reading the console at all, so the
+ * byte sat in the ring being nothing. A terminal driver signals on receipt —
+ * the whole point is to reach a process that is not asking for input.
+ *
+ * It is not queued either. A character that caused a signal is not also input,
+ * and delivering it later would put a stray ^C into whatever is read next. */
+static int intr_char(int ch) {
+    if (ch != 3) return 0;
+    kputs("^C\n");
+    if (fg_pgid) thread_signal(-fg_pgid, SIGINT);
+    return 1;
+}
+
 void console_interrupt(void) {
     /* Acknowledge *first*, then drain.
      *
@@ -187,7 +208,7 @@ void console_interrupt(void) {
     if (uart_kind == UART_PL011)
         reg_write(PL011_ICR, PL011_INT_RX | PL011_INT_RT);
     int c;
-    while ((c = hw_getc()) >= 0) ring_put(c);
+    while ((c = hw_getc()) >= 0) if (!intr_char(c)) ring_put(c);
 }
 
 int kgetc(void) {
@@ -213,6 +234,11 @@ long console_read_line(char *out, uint64_t len) {
             if (interrupt_driven) {
                 thread_block_on_console();      /* returns with the mask held */
                 irq_restore(f);
+                /* Woken by a signal rather than by a character: return, so the
+                 * syscall path can act on it. A reader that went back to sleep
+                 * here would be a process that cannot be interrupted while it
+                 * is waiting, which is most of the time. */
+                if (thread_signalled()) return -4;           /* -EINTR */
             } else {
                 irq_restore(f);
                 thread_yield();

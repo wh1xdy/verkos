@@ -127,6 +127,7 @@ fatal_common:
 
 irq_common:
     SAVE_REST
+    mov     x0, sp
     bl      irq_dispatch
     RESTORE_ALL
     eret

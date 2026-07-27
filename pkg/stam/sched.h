@@ -19,6 +19,9 @@ typedef struct {
     int         parent;      /* who is entitled to collect its exit status  */
     int         status;      /* what it exited with, once it is a zombie    */
     int         wait_reason; /* WAIT_CHILD, WAIT_CONSOLE or WAIT_PIPE       */
+    int         pgid;        /* process group: what a signal from the        */
+                             /* terminal is addressed to                     */
+    int         pending;     /* signals raised and not yet acted on          */
     const void *wait_object; /* which pipe, when wait_reason is WAIT_PIPE   */
     /* The open files, this process's own. Copied by fork — the descriptors
      * are duplicated and the objects behind them gain a holder, which is why
@@ -36,6 +39,31 @@ void      thread_exit(int status);
 int       thread_wait(int *status_out);
 /* Non-blocking: the child's id, 0 if none has finished, -1 if there are none. */
 int       thread_reap(int *status_out);
+
+/* Signals, with default dispositions and nothing else.
+ *
+ * A handler needs a frame built on the user stack, a way back through
+ * sigreturn, and a mask that survives it — three things that are only worth
+ * having once a program wants to catch something. Nothing here does. What is
+ * needed is Ctrl-C: a program that will not stop is a shell nobody can use,
+ * and terminating is a default action.
+ *
+ * So a signal is raised, and the process dies of it the next time the kernel
+ * is in a position to say so. Saying which signal in the exit status is what
+ * lets a shell report it. */
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGTERM 15
+
+/* To one process, or to every member of a group when pid is negative. Returns
+ * how many it reached — zero means nobody, which the caller may care about. */
+int       thread_signal(int pid, int sig);
+/* Does the running thread have a signal it must die of? Called where the
+ * kernel is about to return to EL0 or is about to block, because those are the
+ * only two places where dying is safe and timely. */
+int       thread_signalled(void);
+int       thread_setpgid(int pid, int pgid);
+int       thread_pgid_of(int pid);
 #define WAIT_CHILD   1
 #define WAIT_CONSOLE 2
 #define WAIT_PIPE    3

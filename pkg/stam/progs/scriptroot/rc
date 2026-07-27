@@ -11,4 +11,5 @@ hello bg &
 hello settle
 hello settle
 pid
+sigtest
 exit

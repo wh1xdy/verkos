@@ -135,6 +135,16 @@ progs/upper.elf: progs/upper.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Raises a signal and checks the process died of it.
+progs/sigtest.elf: progs/sigtest.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+# Counts forever, so that there is something to interrupt.
+progs/spin.elf: progs/spin.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -159,6 +169,8 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/vsh.elf progs/scriptroot/init
 	@cp progs/hello.elf progs/scriptroot/hello
 	@cp progs/upper.elf progs/scriptroot/upper
+	@cp progs/spin.elf progs/scriptroot/spin
+	@cp progs/sigtest.elf progs/scriptroot/sigtest
 	@cp progs/forky.elf progs/scriptroot/forky
 	@cp progs/twice.elf progs/scriptroot/twice
 	@cp progs/badptr.elf progs/scriptroot/badptr
@@ -168,7 +180,7 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 # A second archive whose /init is the shell. Kept separate so the automatic
 # demonstration still ends by itself: a shell waits for a person, and a test
 # that waits for a person never finishes.
-progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf progs/badptr.elf progs/upper.elf
+progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/sroot && mkdir -p progs/sroot
@@ -178,6 +190,8 @@ progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twi
 	@cp progs/twice.elf progs/sroot/twice
 	@cp progs/badptr.elf progs/sroot/badptr
 	@cp progs/upper.elf progs/sroot/upper
+	@cp progs/spin.elf progs/sroot/spin
+	@cp progs/sigtest.elf progs/sroot/sigtest
 	( cd progs/sroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.elf
@@ -191,7 +205,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
-       progs/badptr.elf progs/upper.elf \
+       progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf \
        progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio
 
 run-prog: stam.img progs/hello.elf

@@ -2980,3 +2980,67 @@ silently on the only machine that builds the kernel. `none` is the value that
 means there is no toolchain.
 
 218 → 224 checks, three consecutive runs.
+
+## D-075 — Signals, and the two places a process can be told to die
+
+Ctrl-C works. A program that counts forever can be stopped from the shell,
+which is the difference between a shell you can use and one you can start
+things in.
+
+**Default dispositions only, and no handlers.** A handler needs a frame built
+on the user stack, a way back through `sigreturn`, and a mask that survives
+it — three things worth having once a program wants to catch something, and
+nothing here does. Terminating is a default action, and it is the one that was
+needed. The exit status is `128 + signal`, which is what a shell already knows
+how to report.
+
+**Process groups, because otherwise there is no true answer to what Ctrl-C
+interrupts.** Without them the kernel would have to guess, and a guess
+interrupts the shell as often as the program. So a process has a `pgid`
+inherited from its parent, `setpgid` sets it, and the terminal has a foreground
+group that `ioctl(TIOCSPGRP)` points at — the real interface, not one of our
+own, because a shell that used a private call could not be replaced by any
+other shell (D-030). vsh puts each job in a group of its own and hands the
+terminal over around it.
+
+### Two things that were wrong first, and both were about *where*
+
+**Ctrl-C was handled where characters are read.** That is where the line
+discipline lives, so it looked like the right place, and it cannot work: while
+a program runs the shell is blocked in `wait4` and nobody is reading the
+console at all. The byte sat in the ring being nothing. A terminal driver
+signals **on receipt** — the whole point is to reach a process that is not
+asking for input. It is handled in the interrupt now, and not queued, because a
+character that caused a signal is not also input.
+
+**Delivery was only on the way out of a system call.** Also plausible, also
+insufficient, and insufficient in exactly the case signals exist for: a loop
+that counts makes no system calls, so it never reaches that point. It reached
+the end of its 400 rounds and printed *"the child was never interrupted"* —
+which is the only reason the gap was visible, because a test that had checked
+for the absence of output would have passed.
+
+Delivery now also happens on the way out of an **interrupt**, when the
+interrupted context was EL0. Not when it was the kernel: a signal raised while
+the kernel is in the middle of something has to wait until the kernel is
+finished with it, and the syscall path already covers that case.
+
+### What is guarded and what is not
+
+`progs/sigtest.c` forks a child that spins without calling into the kernel,
+signals its group, and checks the child exited with 130. It runs from the
+script initrd, so `make test` covers raise, delivery to a running process, the
+default action and the status — deterministically, with no terminal involved.
+
+**The typed Ctrl-C is verified by hand and not by a check.** It cannot be
+driven from a script: the character has to arrive at a terminal and a script is
+read from a file. It was run, and the log says what happened —
+
+    [spin] still here
+    ^C
+      interrupted
+    verk$
+
+— but nothing guards it, and the honest thing is to say which half is which.
+
+224 → 226 checks.

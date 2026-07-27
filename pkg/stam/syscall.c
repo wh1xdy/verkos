@@ -37,6 +37,12 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_WRITE   64
 #define SYS_EXIT    93
 #define SYS_GETPID 172
+#define SYS_KILL   129
+#define SYS_SETPGID 154
+#define SYS_GETPGID 155
+#define SYS_IOCTL   29
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
 #define SYS_CLOSE   57
 #define SYS_PIPE2   59        /* aarch64 Linux has no plain pipe; pipe2 does both */
 #define SYS_DUP     23
@@ -262,6 +268,34 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
                                       (char *const *)(uintptr_t)b, frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
+    case SYS_KILL: {
+        /* Linux's convention, kept: a negative pid names a process group. It
+         * is what a shell already uses to stop a whole pipeline. */
+        int n = thread_signal((int)(long)a, (int)b);
+        return n ? 0 : (uint64_t)-3;                          /* -ESRCH */
+    }
+    case SYS_SETPGID: return (uint64_t)(long)thread_setpgid((int)(long)a, (int)(long)b);
+    case SYS_GETPGID: return (uint64_t)(long)thread_pgid_of((int)(long)a);
+    case SYS_IOCTL: {
+        /* Only the console, and only the two calls that say which group is in
+         * the foreground. That is the whole interface a shell needs to make
+         * Ctrl-C reach the right processes, and it is the interface every
+         * shell already speaks — inventing a friendlier one would mean vsh
+         * could not be replaced by anything else (D-030). */
+        file_t *f = fd_get(a);
+        if (!f) return (uint64_t)-9;
+        if (b == TIOCSPGRP) {
+            if (!vm_user_ok(c, sizeof(int), 0)) return EFAULT;
+            console_set_foreground(*(const int *)(uintptr_t)c);
+            return 0;
+        }
+        if (b == TIOCGPGRP) {
+            if (!vm_user_ok(c, sizeof(int), 1)) return EFAULT;
+            *(int *)(uintptr_t)c = console_foreground();
+            return 0;
+        }
+        return (uint64_t)-25;                                 /* -ENOTTY */
+    }
     case SYS_CLOSE: {
         if (a >= NFD || !thread_current()->fd[a]) return (uint64_t)-9;
         file_close(thread_current()->fd[a]);
@@ -369,6 +403,14 @@ void handle_user_sync(regs_t *r) {
 
     if ((esr >> 26) == 0x15) {              /* SVC from AArch64 */
         r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2], r);
+        /* On the way back out is where a signal is acted on. Not where it is
+         * raised — that happens in an interrupt, with the target's stack
+         * somewhere else — and not at an arbitrary point, because the kernel
+         * has to be finished with whatever it was holding. There are no
+         * handlers, so acting on it means dying of it, and the status says
+         * which signal so a shell can report it. */
+        int sig = thread_signalled();
+        if (sig) thread_exit(128 + sig);
         return;
     }
     /* A write to a page shared by copy-on-write is not a program doing

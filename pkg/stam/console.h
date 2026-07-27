@@ -17,6 +17,12 @@ int  console_is_interrupt_driven(void);
  * have to know that undoing a backspace on screen takes three bytes. Blocks
  * until a whole line is there. */
 long console_read_line(char *out, uint64_t len);
+/* Which process group a character typed at this terminal is addressed to.
+ * Without it there is no true answer to "what does Ctrl-C interrupt" — the
+ * kernel would have to guess, and guessing means interrupting the shell as
+ * often as the program. The shell sets it around each job. */
+void console_set_foreground(int pgid);
+int  console_foreground(void);
 /* Which interrupt the console is on, according to the device tree. */
 int  console_irq(const fdt_t *f);
 void kquiet(int on);
