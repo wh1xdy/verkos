@@ -36,13 +36,15 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_EXIT    93
 #define SYS_GETPID 172
 
+#define EFAULT ((uint64_t)-14)
+
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     if (fd != 1 && fd != 2) return (uint64_t)-9;        /* -EBADF */
-    /* The buffer address comes from a program we do not trust. Nothing here
-     * validates it yet, which is honest to note and wrong to leave: at the
-     * moment the only program is one we wrote and mapped ourselves. Checking
-     * it needs a notion of which pages belong to which process, and that
-     * arrives with the second process. */
+    /* The buffer address came from a program. Without this the call
+     * `write(1, kernel_address, n)` printed kernel memory, and an unmapped one
+     * faulted at EL1 — which is not a program being killed but the machine
+     * stopping. */
+    if (!vm_user_ok(buf, len, 0)) return EFAULT;
     const char *p = (const char *)(uintptr_t)buf;
     for (uint64_t i = 0; i < len; i++) kputc(p[i]);
     return len;
@@ -89,9 +91,14 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
      * space. The moment the new one is installed the old string is gone, and
      * the message that follows would print whatever now lives at that address
      * — which it did, on the first attempt. */
+    /* The path is a pointer from a program, and so is every entry of argv, and
+     * so is every string those entries point at. Three separate things to be
+     * lied to about. */
+    long plen = vm_user_strlen((uint64_t)(uintptr_t)path, 63);
+    if (plen < 0) return EFAULT;
     char name[64];
     unsigned i = 0;
-    for (; i < sizeof name - 1 && path && path[i]; i++) name[i] = path[i];
+    for (; i < (unsigned)plen; i++) name[i] = path[i];
     name[i] = 0;
 
     /* And the arguments, for exactly the same reason and one more: they have to
@@ -108,16 +115,26 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     int   argc = 0;
     unsigned used = 0;
     if (argv) {
-        for (; argc < MAX_ARGS && argv[argc]; argc++) {
+        /* The vector itself, one entry at a time: a program may hand over an
+         * array that is mapped for three entries and not for the fourth, and
+         * finding that out by faulting is not an option at EL1. */
+        for (; argc < MAX_ARGS; argc++) {
+            uint64_t slot = (uint64_t)(uintptr_t)&argv[argc];
+            if (!vm_user_ok(slot, sizeof(char *), 0)) return EFAULT;
             const char *s = argv[argc];
-            unsigned n = 0;
-            while (s[n]) n++;
-            if (used + n + 1 > sizeof argbuf) return (uint64_t)-7;   /* -E2BIG */
-            for (unsigned k = 0; k <= n; k++) argbuf[used + k] = s[k];
-            arglen[argc] = n + 1;
-            used += n + 1;
+            if (!s) break;
+            long n = vm_user_strlen((uint64_t)(uintptr_t)s, ARG_BYTES);
+            if (n < 0) return EFAULT;
+            if (used + (unsigned)n + 1 > sizeof argbuf) return (uint64_t)-7; /* -E2BIG */
+            for (unsigned k = 0; k <= (unsigned)n; k++) argbuf[used + k] = s[k];
+            arglen[argc] = (unsigned)n + 1;
+            used += (unsigned)n + 1;
         }
-        if (argc == MAX_ARGS && argv[argc]) return (uint64_t)-7;     /* -E2BIG */
+        if (argc == MAX_ARGS) {
+            uint64_t slot = (uint64_t)(uintptr_t)&argv[argc];
+            if (!vm_user_ok(slot, sizeof(char *), 0)) return EFAULT;
+            if (argv[argc]) return (uint64_t)-7;                     /* -E2BIG */
+        }
     }
     /* A program is always told its own name, even when the caller passed none.
      * argv[0] being absent is a thing programs do not expect and do not check. */
@@ -202,6 +219,9 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
 static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     if (fd != 0) return (uint64_t)-9;                        /* -EBADF */
     if (!len) return 0;
+    /* Checked before a character is waited for, not after: a read that will
+     * fail should fail now rather than after blocking a person at a prompt. */
+    if (!vm_user_ok(buf, len, 1)) return EFAULT;
     /* Somebody is reading from the console, so somebody is sitting at it. */
     kquiet(1);
     char *out = (char *)(uintptr_t)buf;
@@ -236,9 +256,15 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
     case SYS_WAIT4: {
+        /* Validated before waiting, so a bad pointer is an error rather than a
+         * child collected and its status thrown at an address nobody owns. */
+        if (b && !vm_user_ok(b, sizeof(int), 1)) return EFAULT;
         int st = 0;
         int id = thread_wait(&st);
         if (id < 0) return (uint64_t)-10;                    /* -ECHILD */
+        /* Checked again: thread_wait blocks, and the answer to "is this
+         * address the caller's" is only true at the moment it is used. */
+        if (b && !vm_user_ok(b, sizeof(int), 1)) return EFAULT;
         /* Linux packs the status; a plain exit code sits in the second byte. */
         if (b) *(int *)(uintptr_t)b = (st & 0xff) << 8;
         return (uint64_t)id;

@@ -1919,3 +1919,57 @@ everyone knows about.
 
 166 → 172 checks. CI has no qemu-system-aarch64 and skips the six, which is
 also worth knowing: the boot is proved where the kernel is built, not on push.
+
+## D-056 — A pointer from a program is a claim, not an address
+
+Every system call that took a pointer dereferenced it. `sys_write` said so in a
+comment — *"nothing here validates it yet, which is honest to note and wrong to
+leave"* — and the reasoning it gave for waiting had expired: it said checking
+needs a notion of which pages belong to which process, and that arrived in
+D-043.
+
+**The MMU does not help here.** It stops EL0 reaching the kernel's pages. It has
+nothing to say about EL1 touching an address EL0 *handed over*, and at EL1 that
+same access is permitted. So `write(1, kernel_address, 32)` printed 32 bytes of
+kernel memory to the console, and a read into an unmapped address was a data
+abort at EL1 — which is not a program being killed, it is the machine stopping.
+Both were demonstrated before the fix, which is how those two sentences are
+known rather than assumed.
+
+`vm_user_ok(va, len, write)` walks the caller's own tables — the hardware's
+tables, so there is no second opinion that could disagree with the first — and
+requires every page of the range to be valid and `AP=01`. A kernel page is
+`AP=00` and fails whatever address was claimed. The range must also not wrap and
+must lie inside the 512 GiB the low half can describe at all, because a length
+of `0xffffffffffffff00` otherwise passes any check that only looks at the start.
+
+Strings are the harder half: their length is not known until they have been
+read, and reading is the thing being made safe. `vm_user_strlen` therefore
+validates one page, scans to the end of it, and only then looks at the next.
+
+Applied to all of it — `write`, `read`, `wait4`'s status pointer, `execve`'s
+path, the `argv` vector, and every string inside it. argv is two levels: the
+array may be mapped while the strings it points at are not, so each entry is
+checked before it is followed. `wait4` is checked twice, before blocking and
+before the store, because the answer to "is this address the caller's" is only
+true at the moment it is used.
+
+**The proof is a program that lies.** `progs/badptr.c` hands over eight
+addresses that are not its own and exits non-zero if any is not refused with
+`-EFAULT`. `init` runs it on every boot and `make test` reads its verdict rather
+than our reading of a log. With `vm_user_ok` stubbed to return 1, the first case
+prints kernel memory and the second kills the kernel — so the test discriminates
+rather than merely passing.
+
+### Userspace must not use floating point, and the compiler does not know
+
+Found by `badptr` dying at EC 0x7 — trapped FP/SIMD — on a line that contains no
+arithmetic. stam never enables FP for EL0 (`CPACR_EL1` is untouched), and GCC
+reached for a `q` register to initialise a two-element array of pointers.
+
+Either the kernel enables FP or programs must not emit it. `PROG_CFLAGS` now
+carries `-mgeneral-regs-only`, the same flag the kernel is built with, which is
+the honest choice while nothing needs floating point. Without it a program can
+die on a statement that looks incapable of failing.
+
+172 → 173 checks.

@@ -773,6 +773,16 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                       "grep -aq 'argv ends with NULL, as it must' $BL"
                 check "stam runs a program, collects it, and gets its pages back" \
                       "grep -aq 'memory returned to the free list' $BL"
+                # A program hands the kernel eight addresses that are not its
+                # own — kernel memory, unmapped memory, past the end of the low
+                # half, a length that wraps — and every one must come back
+                # -EFAULT. With the check removed the first prints kernel
+                # memory to the console and the second is a data abort at EL1,
+                # which is the machine stopping rather than a program being
+                # killed. The program exits non-zero if any case is not
+                # refused, so this is its verdict and not our reading of a log.
+                check "stam refuses addresses a program does not own" \
+                      "grep -aq 'the kernel refused every address that was not the caller.s' $BL"
                 check "stam finishes its own demonstration" \
                       "grep -aq 'milestone 4' $BL"
             else

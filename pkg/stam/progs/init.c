@@ -53,6 +53,18 @@ void _start(void) {
     if (none < 0) say("  [init] no children left, and wait said so\n");
     else          say("  [init] wait invented a child\n");
 
+    /* Then a program whose whole purpose is to lie to the kernel about where
+     * its memory is. Run on every boot, because the check it exercises is one
+     * whose absence looks exactly like its presence until something abuses it. */
+    long bad = fork_();
+    if (bad == 0) { exec_("/badptr"); say("  [init] badptr did not run\n"); exit_(1); }
+    status = 0;
+    wait_(&status);
+    if (((status >> 8) & 0xff) == 0)
+        say("  [init] the kernel refused every address that was not the caller's\n");
+    else
+        say("  [init] THE KERNEL ACCEPTED AN ADDRESS THAT WAS NOT THE CALLER'S\n");
+
     say("  [init] still process "); say_num(getpid()); say(", exiting\n");
     exit_(0);
 }

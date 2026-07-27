@@ -106,6 +106,87 @@ int map_user_page(uint64_t va, uint64_t page, int executable) {
     return 0;
 }
 
+/* --- is this address really the caller's? ---------------------------------
+ *
+ * Every pointer a system call is handed came from a program, and until now the
+ * kernel simply dereferenced it. `write(1, (char *)kernel_address, n)` would
+ * have printed kernel memory; a `read` into an unmapped address would have
+ * faulted at EL1, where a fault is not a program being killed but the machine
+ * stopping. The protection the MMU gives us is enforced on EL0's own accesses
+ * and says nothing about what EL1 does on EL0's behalf.
+ *
+ * So the range is walked before it is touched. The walk is deliberately the
+ * hardware's: the same tables, the same descriptors, so there is no second
+ * opinion about what is mapped that could disagree with the first.
+ *
+ * AP=01 (D_AP_EL0) is the bit that says EL0 may reach this page at all, which
+ * is exactly the question — a kernel page has AP=00 and fails here, whatever
+ * address the program claimed. Bit 7 is AP[2], read-only; nothing sets it yet,
+ * and it is checked anyway so that the day something does, this does not have
+ * to be remembered.
+ */
+#define D_AP_RO (1ul << 7)
+
+static uint64_t *walk_to_leaf(uint64_t va, uint64_t *level_size) {
+    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_current_user_table_kva();
+    if (!l1) return 0;
+
+    uint64_t d1 = l1[(va >> 30) & 511];
+    if ((d1 & 0x3ul) == D_BLOCK) { *level_size = 1ul << 30; return &l1[(va >> 30) & 511]; }
+    if ((d1 & 0x3ul) != D_TABLE) return 0;
+
+    uint64_t *l2 = table_at(d1);
+    uint64_t d2 = l2[(va >> 21) & 511];
+    if ((d2 & 0x3ul) == D_BLOCK) { *level_size = 1ul << 21; return &l2[(va >> 21) & 511]; }
+    if ((d2 & 0x3ul) != D_TABLE) return 0;
+
+    uint64_t *l3 = table_at(d2);
+    uint64_t *slot = &l3[(va >> 12) & 511];
+    if ((*slot & 0x3ul) != D_PAGE) return 0;
+    *level_size = 4096;
+    return slot;
+}
+
+/* The low half is 512 GiB — one L1 table of 1 GiB entries. An address above it
+ * is not a user address at all, whatever the tables happen to say, and saying
+ * so here means the walk never runs on a kernel pointer. */
+#define USER_LIMIT (1ul << 39)
+
+int vm_user_ok(uint64_t va, uint64_t len, int write) {
+    if (len == 0) return 1;
+    if (va + len < va) return 0;                  /* wrapped: no such range   */
+    if (va >= USER_LIMIT || va + len > USER_LIMIT) return 0;
+
+    for (uint64_t p = va & ~4095ul; p < va + len; ) {
+        uint64_t size = 0;
+        uint64_t *slot = walk_to_leaf(p, &size);
+        if (!slot) return 0;
+        uint64_t d = *slot;
+        if (!(d & D_VALID)) return 0;
+        if (!(d & D_AP_EL0)) return 0;            /* the kernel's, not theirs */
+        if (write && (d & D_AP_RO)) return 0;
+        p = (p & ~(size - 1)) + size;
+    }
+    return 1;
+}
+
+/* A string's length is not known until it has been read, and reading it is the
+ * thing that has to be made safe. So it is walked one page at a time: check the
+ * page, scan to the end of it, and only then look at the next. A string that
+ * runs off the end of its last mapped page stops at the boundary rather than
+ * faulting one byte past it. */
+long vm_user_strlen(uint64_t va, uint64_t max) {
+    if (va >= USER_LIMIT) return -1;
+    for (uint64_t i = 0; i < max; ) {
+        uint64_t page = (va + i) & ~4095ul;
+        if (!vm_user_ok(page, 1, 0)) return -1;
+        uint64_t end = page + 4096;
+        for (uint64_t a = va + i; a < end && i < max; a++, i++)
+            if (*(const char *)(uintptr_t)a == 0) return (long)i;
+    }
+    return -1;                                    /* no terminator in range   */
+}
+
 /* A fresh, empty low half. Nothing is shared with any other process — not even
  * an intermediate table — so two programs may put different memory at the same
  * address and never see each other's. */

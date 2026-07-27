@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-055.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-056.
 
 ---
 
@@ -128,7 +128,10 @@ What it does today, each verified by running it:
   (D-037, D-042, D-043).
 - Seven system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
   `wait4` — using Linux's aarch64 numbers, because the numbering is the cheapest
-  part of an ABI to agree with (D-039).
+  part of an ABI to agree with (D-039). **Every pointer they are given is
+  checked** against the caller's own page tables before it is dereferenced: the
+  MMU stops a program reaching kernel memory, but says nothing about the kernel
+  reaching it on the program's behalf (D-056).
 - An **ELF loader** fed from a **cpio initrd**, both formats everyone else
   speaks, both readers ours (D-040, D-047).
 - `fork`, `exec`, `wait4`, zombie reaping and pages that come back — a process
@@ -143,10 +146,11 @@ What it does today, each verified by running it:
 
 Named rather than hidden: no SMP and **no locking** — system calls run with
 interrupts enabled, which is a debt (D-050). No copy-on-write; `fork` copies
-outright. No pipes, no redirection, no filesystem beyond the initrd. No
-user-pointer validation. No FP/SIMD for EL0. **A burst of input longer than a
-few characters is lost** — typed slowly the shell reads a whole line, pasted it
-does not (D-054). A **Qualcomm GENI console driver** and `vbootimg` exist for
+outright. No pipes, no redirection, no filesystem beyond the initrd. No FP/SIMD
+for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
+reaches for a `q` register unprompted and a program dies on a line containing no
+arithmetic (D-056). **A burst of input longer than a few characters is lost** —
+typed slowly the shell reads a whole line, pasted it does not (D-054). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 

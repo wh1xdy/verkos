@@ -102,7 +102,15 @@ clean-efi:
 # Static, freestanding, linked at a fixed address. The kernel loads it out of
 # the initrd, so it is a real ELF produced by the real compiler rather than
 # bytes carried inside the kernel.
-PROG_CFLAGS = -ffreestanding -nostdlib -static -fno-stack-protector -O2 -Wall
+# -mgeneral-regs-only, for the same reason the kernel is built with it: stam
+# never enables FP/SIMD for EL0 (CPACR_EL1 is left alone), so any such
+# instruction traps as EC 0x7 and the program is killed. The compiler reaches
+# for a q register unprompted — initialising a two-element array of pointers was
+# enough — so a program can die on a line containing no arithmetic at all.
+# Either the kernel enables FP or userspace must not use it; this is the second,
+# and it is the honest one while nothing needs floating point.
+PROG_CFLAGS = -ffreestanding -nostdlib -static -fno-stack-protector \
+              -mgeneral-regs-only -O2 -Wall
 # --build-id=none: the note section is placed before .text and then overlaps
 # it once -Ttext moves .text to a fixed address, which the linker refuses.
 progs/hello.elf: progs/hello.c
@@ -121,6 +129,11 @@ progs/init.elf: progs/init.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Hands the kernel addresses that are not its own and checks it is refused.
+progs/badptr.elf: progs/badptr.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # The initrd as every Linux initramfs is: a newc cpio archive, written by
 # VerkOS' own vcpio. Names have no leading slash, which is the convention;
 # stam accepts either when a program asks.
@@ -131,7 +144,7 @@ progs/vsh.elf: progs/vsh.c
 # A second archive whose /init is the shell. Kept separate so the automatic
 # demonstration still ends by itself: a shell waits for a person, and a test
 # that waits for a person never finishes.
-progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf
+progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf progs/badptr.elf
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/sroot && mkdir -p progs/sroot
@@ -139,18 +152,21 @@ progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twi
 	@cp progs/hello.elf progs/sroot/hello
 	@cp progs/forky.elf progs/sroot/forky
 	@cp progs/twice.elf progs/sroot/twice
+	@cp progs/badptr.elf progs/sroot/badptr
 	( cd progs/sroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
-progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf
+progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.elf
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/root && mkdir -p progs/root
 	@cp progs/init.elf progs/root/init
 	@cp progs/hello.elf progs/root/hello
 	@cp progs/forky.elf progs/root/forky
+	@cp progs/badptr.elf progs/root/badptr
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
+       progs/badptr.elf \
        progs/initrd.cpio progs/initrd-shell.cpio
 
 run-prog: stam.img progs/hello.elf
