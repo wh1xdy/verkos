@@ -1119,6 +1119,82 @@ else
     printf '  \033[33mskip\033[0m  stam (no aarch64 toolchain here)\n'
 fi
 
+# --- and stam boots the same way ------------------------------------------
+# synthdtb is off by default (D-072), and stam is the one kernel that needs it
+# on — so this path had exactly the shape the log keeps finding: something that
+# looks fine because nobody asked. It was broken when first asked. The config
+# keyword parsed only when followed by a space, and a keyword with no value is
+# followed by a newline, so `synthdtb` on a line of its own did nothing at all.
+#
+# The disk is built here with our own tools, which makes this the whole chain
+# in one check: vpart, vmkfs, vboot, the synthetic tree, and stam.
+say "stam boots through vboot, on a disk built by our own tools"
+SFW=""
+for c in /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+         /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+    [ -f "$c" ] && { SFW="$c"; break; }
+done
+# STAM_CROSS is empty on an aarch64 host, which is correct and not "missing" —
+# requiring it to be non-empty skipped this check on the machine that builds
+# the kernel. "none" is the value that means there is no toolchain.
+if [ "$STAM_CROSS" != none ] && [ -n "$SFW" ] && \
+   [ -x "$T/vmkfs" ] && [ -x "$T/vpart" ] && command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    S=$T/stamboot; mkdir -p "$S"
+    if ( cd pkg/stam && make CROSS="$STAM_CROSS" stam.efi progs >/dev/null 2>&1 ) &&
+       CC="${STAM_CROSS}gcc" OBJCOPY="${STAM_CROSS}objcopy" LD="${STAM_CROSS}ld" \
+       bash pkg/vboot/build.sh "$S/vb" aarch64 >/dev/null 2>&1; then
+        printf 'timeout 0\ndefault 0\n\nentry stam\n  kernel  \\stam.efi\n  initrd  \\initramfs.img\n  cmdline stam.hello\n  synthdtb\n' > "$S/vboot.conf"
+        dd if=/dev/zero of="$S/esp.img" bs=1M count=64 status=none 2>/dev/null
+        "$T/vmkfs" -n VERKESP "$S/esp.img"                                  >/dev/null 2>&1
+        "$T/vmkfs" --mkdir "$S/esp.img" /EFI                                >/dev/null 2>&1
+        "$T/vmkfs" --mkdir "$S/esp.img" /EFI/BOOT                           >/dev/null 2>&1
+        "$T/vmkfs" --copy "$S/esp.img" "$S/vb/BOOTAA64.EFI" /EFI/BOOT/BOOTAA64.EFI >/dev/null 2>&1
+        "$T/vmkfs" --copy "$S/esp.img" pkg/stam/stam.efi          /stam.efi       >/dev/null 2>&1
+        "$T/vmkfs" --copy "$S/esp.img" pkg/stam/progs/initrd.cpio /initramfs.img  >/dev/null 2>&1
+        "$T/vmkfs" --copy "$S/esp.img" "$S/vboot.conf"            /vboot.conf     >/dev/null 2>&1
+        dd if=/dev/zero of="$S/disk.img" bs=1M count=68 status=none 2>/dev/null
+        "$T/vpart" "$S/disk.img" --esp 64 >/dev/null 2>&1
+        dd if="$S/esp.img" of="$S/disk.img" bs=1M seek=1 conv=notrunc status=none 2>/dev/null
+
+        dd if=/dev/zero of="$S/code.fd" bs=1M count=64 status=none 2>/dev/null
+        dd if="$SFW" of="$S/code.fd" conv=notrunc status=none 2>/dev/null
+        dd if=/dev/zero of="$S/vars.fd" bs=1M count=64 status=none 2>/dev/null
+        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 \
+            -display none -no-reboot \
+            -drive if=pflash,format=raw,file="$S/code.fd",readonly=on \
+            -drive if=pflash,format=raw,file="$S/vars.fd" \
+            -drive if=none,id=hd,file="$S/disk.img",format=raw,snapshot=on \
+            -device virtio-blk-pci,drive=hd,bootindex=0 \
+            -serial "file:$S/log" </dev/null >/dev/null 2>&1 & echo $! > "$S/pid" )
+        for _ in $(seq 1 90); do
+            sleep 1
+            grep -aqE 'milestone|Refusing to continue|halted' "$S/log" 2>/dev/null && break
+        done
+        kill "$(cat "$S/pid")" 2>/dev/null
+        wait "$(cat "$S/pid")" 2>/dev/null
+
+        check "vboot starts stam as an EFI application" \
+              "grep -aq 'started as an EFI application' $S/log"
+        # The keyword that did nothing. Without it stam refuses and says so,
+        # which is the correct behaviour and the wrong outcome.
+        check "synthdtb reaches vboot and a tree is installed" \
+              "grep -aq 'device tree found' $S/log && ! grep -aq 'Refusing to continue' $S/log"
+        check "stam finds its console through that tree" \
+              "grep -aqE 'console +(PL011|8250)' $S/log"
+        check "stam finds the interrupt controller and the timer" \
+              "grep -aq 'gic *v' $S/log && grep -aq 'timer' $S/log"
+        # A fixed string would say this whether or not any interrupt arrived.
+        check "stam takes interrupts on the tree vboot built" \
+              "grep -aq 'the kernel can preempt' $S/log"
+        check "the initrd vboot published reaches stam" \
+              "grep -aq 'initrd collected from the loader' $S/log"
+    else
+        bad "stam.efi or vboot did not build for the boot test"
+    fi
+else
+    printf '  \033[33mskip\033[0m  booting stam through vboot (needs a cross toolchain, qemu and UEFI firmware)\n'
+fi
+
 # --- the device tree we write must be the device tree we read ---------------
 # vboot builds a tree (fdtgen.h) and stam parses one (pkg/stam/fdt.c). They are
 # written independently, they never meet on the build host, and a disagreement

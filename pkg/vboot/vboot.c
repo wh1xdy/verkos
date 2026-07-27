@@ -224,11 +224,22 @@ static EFI_HANDLE publish_initrd(void) {
 
 /* ---- config parsing (plain ASCII, no libc) ------------------------------- */
 static int is_space(unsigned char c) { return c == ' ' || c == '\t'; }
-/* does line start with word `w`? if so return the offset just past it */
+/* Does the line start with word `w`? If so, return the offset just past it and
+ * any spaces after it — which is where the value begins, for the keywords that
+ * take one.
+ *
+ * End of line counts as a separator. It did not, and a keyword with no value
+ * is followed by a newline rather than a space, so `synthdtb` on a line of its
+ * own never matched: the option was written, documented, parsed for, and
+ * silently did nothing. That is the shape this whole log is about, and it
+ * arrived in the parser that reads the options.
+ *
+ * Returning 0 means "no match", so a keyword that matches at offset 0 is
+ * impossible by construction — every keyword is at least one character long. */
 static int keyword(unsigned char *p, const char *w) {
     int i = 0;
     while (w[i]) { if (p[i] != (unsigned char)w[i]) return 0; i++; }
-    if (!is_space(p[i])) return 0;
+    if (!is_space(p[i]) && p[i] != '\n' && p[i] != '\r' && p[i] != 0) return 0;
     while (is_space(p[i])) i++;
     return i;
 }

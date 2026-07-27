@@ -2926,3 +2926,57 @@ this is a check that runs where the system is built, like the stam boot before
 it — the boot is proved on the machine that made it, and not on push.
 
 211 → 218 checks.
+
+## D-074 — The option that parsed and did nothing
+
+D-072 made the synthetic device tree opt-in and left stam — the one kernel that
+cannot read ACPI and therefore needs it — depending on a keyword nobody had
+booted. That was named as the next thing to check. It was broken.
+
+`vboot.conf` said `synthdtb`. vboot's parser read the file, matched keywords,
+and never set the flag. `keyword()` required a **space** after the word, and a
+keyword with no value is followed by a newline. So the option existed, was
+documented, was parsed for, and did nothing — and stam, started through vboot
+on firmware that publishes no tree, refused to continue and said exactly why:
+
+    stam: no device tree in the UEFI configuration table.
+    stam: Refusing to continue rather than guess.
+
+That refusal is D-034 working as designed, which is the only reason this was a
+five-minute diagnosis rather than another five entries: the kernel said what
+was missing instead of stopping quietly.
+
+It is also the same defect as D-028 — a boot menu entry naming a flag nothing
+implemented — arriving this time in the parser that reads the flags. End of
+line is a separator now.
+
+### The check
+
+`make test` builds a boot disk with `vpart` and `vmkfs`, puts vboot, `stam.efi`
+and a cpio initrd on it, and boots it under UEFI firmware. Six assertions, and
+between them they cover the whole chain in one run: our partition table, our
+filesystem, our bootloader, the synthetic tree, and our kernel finding its
+hardware through it.
+
+    vboot starts stam as an EFI application
+    synthdtb reaches vboot and a tree is installed
+    stam finds its console through that tree
+    stam finds the interrupt controller and the timer
+    stam takes interrupts on the tree vboot built
+    the initrd vboot published reaches stam
+
+"takes interrupts" is the one that matters most and is deliberately not a
+banner: it asserts on the count of timer interrupts actually taken, because a
+fixed string would say the same thing whether or not any had arrived (D-033).
+
+**Verified by reintroducing the bug.** With the space requirement put back,
+three of the six go red and the other three still pass — which is the correct
+shape: vboot still starts stam, and stam still refuses correctly.
+
+One thing the first version got wrong, worth a line because it is the same
+mistake in miniature: the guard required `$STAM_CROSS` to be non-empty, and on
+an aarch64 host the cross prefix is *correctly* empty. The check skipped
+silently on the only machine that builds the kernel. `none` is the value that
+means there is no toolchain.
+
+218 → 224 checks, three consecutive runs.

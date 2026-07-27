@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-073.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-074.
 
 ---
 
