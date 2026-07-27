@@ -41,6 +41,8 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_SETPGID 154
 #define SYS_GETPGID 155
 #define SYS_IOCTL   29
+#define SYS_RT_SIGACTION 134
+#define SYS_RT_SIGRETURN 139
 #define TIOCGPGRP  0x540F
 #define TIOCSPGRP  0x5410
 #define SYS_CLOSE   57
@@ -223,6 +225,12 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     p[1 + argc] = 0;                 /* end of argv */
     p[2 + argc] = 0;                 /* an empty environment, but a real one */
 
+    /* The new image has none of the old one's handler addresses in it, so a
+     * caught signal goes back to the default action. What was ignored stays
+     * ignored: that is a decision about the signal and not about the code
+     * (POSIX draws the line in the same place). */
+    sig_exec_reset();
+
     frame_t *f = frameptr;
     f->elr    = entry;               /* return to the new program, not the old */
     f->spsr   = 0;                   /* EL0t, interrupts on                    */
@@ -378,6 +386,22 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
         if (b) *(int *)(uintptr_t)b = (st & 0xff) << 8;
         return (uint64_t)id;
     }
+    case SYS_RT_SIGACTION: {
+        /* Not Linux's struct sigaction: that carries a mask whose size depends
+         * on the fourth argument, and a flags word almost all of whose bits
+         * mean something this kernel does not do. Reading a struct whose
+         * fields are ignored is a call that looks supported and is not, so the
+         * arguments are the three things that are actually used and the number
+         * is Linux's only because the numbering is the cheap part (D-039).
+         *
+         *   a = signal, b = handler, c = restorer
+         *
+         * The mask a handler runs under is the signal itself, which sig_deliver
+         * adds regardless. */
+        return (uint64_t)(int64_t)sig_action((int)a, b, c, 0);
+    }
+    case SYS_RT_SIGRETURN:
+        return sig_return(frame);
     case SYS_EXIT:
         thread_exit((int)a);                 /* does not return */
         return 0;
@@ -408,9 +432,13 @@ void handle_user_sync(regs_t *r) {
          * somewhere else — and not at an arbitrary point, because the kernel
          * has to be finished with whatever it was holding. There are no
          * handlers, so acting on it means dying of it, and the status says
-         * which signal so a shell can report it. */
+         * which signal so a shell can report it.
+         *
+         * Unless one is installed, in which case sig_deliver has just edited
+         * this frame to enter the handler instead, and the return below goes
+         * there rather than back to the instruction after the svc. */
         int sig = thread_signalled();
-        if (sig) thread_exit(128 + sig);
+        if (sig && !sig_deliver(sig, r)) thread_exit(128 + sig);
         return;
     }
     /* A write to a page shared by copy-on-write is not a program doing

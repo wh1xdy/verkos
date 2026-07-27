@@ -1147,6 +1147,23 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                           "grep -aq 'a signal reached a running process and ended it' $SL"
                     check "the status says which signal it died of" \
                           "grep -aq 'exited with 130' $SL"
+                    # And the other outcome: a handler runs and the program
+                    # carries on. The child spins with four values in
+                    # caller-saved registers and compares them after the
+                    # handler returns, so this fails if the frame does not come
+                    # back — which a check on the handler's own output would
+                    # not. Its exit status separates the three endings: 7 is
+                    # handled, 3 is handled and lost, 130 is never installed.
+                    check "a program can catch a signal and go on running" \
+                          "grep -aq 'interrupted, handled, and resumed with every register intact' $SL"
+                    check "the interrupted program's registers survive the handler" \
+                          "grep -aq 'a handler ran in a loop that makes no system calls, and the program lived' $SL"
+                    # SIGKILL catchable would be a program that cannot be
+                    # stopped; a handler with no restorer would jump somewhere
+                    # arbitrary on return, and finding that out then rather
+                    # than now is a fault with nothing to do with the mistake.
+                    check "sigaction refuses SIGKILL, a missing restorer and a bad handler" \
+                          "grep -aq 'a missing restorer and a bad handler were all refused' $SL"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

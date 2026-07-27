@@ -39,7 +39,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o syscall.o userprog.o main.o
+OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o signal.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -80,7 +80,7 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c signal.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S smpentry.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
@@ -145,6 +145,13 @@ progs/spin.elf: progs/spin.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Catches a signal in a loop that makes no system calls, and checks that every
+# register came back — a handler that runs and loses the frame is worse than no
+# handler, and only the exit status can tell the two apart.
+progs/catch.elf: progs/catch.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -162,7 +169,8 @@ progs/vsh.elf: progs/vsh.c
 # to synchronise with. The commands are in progs/rc, in the repository, where
 # they can be read.
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
-                          progs/forky.elf progs/twice.elf progs/badptr.elf progs/rc
+                          progs/forky.elf progs/twice.elf progs/badptr.elf \
+                          progs/catch.elf progs/rc
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/scriptroot && mkdir -p progs/scriptroot
@@ -174,6 +182,7 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/forky.elf progs/scriptroot/forky
 	@cp progs/twice.elf progs/scriptroot/twice
 	@cp progs/badptr.elf progs/scriptroot/badptr
+	@cp progs/catch.elf progs/scriptroot/catch
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 

@@ -11,6 +11,11 @@ int vm_cow_fault(uint64_t va);
  * EL0? Every pointer a system call is given must go through this before it is
  * dereferenced — the MMU protects EL0 from the kernel, not the kernel from a
  * pointer EL0 handed it. */
+/* Is this range the caller's, and may it be written?
+ *
+ * With write set this is not only a question: a copy-on-write page in the range
+ * is copied here and now, because the kernel is about to write it and there
+ * will be no fault to resolve. */
 int  vm_user_ok(uint64_t va, uint64_t len, int write);
 /* Length of a NUL-terminated user string, or -1 if it is unreachable or runs
  * past `max` without a terminator. */

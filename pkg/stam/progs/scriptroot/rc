@@ -12,4 +12,5 @@ hello settle
 hello settle
 pid
 sigtest
+catch
 exit

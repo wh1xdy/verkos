@@ -238,7 +238,24 @@ int vm_user_ok(uint64_t va, uint64_t len, int write) {
         uint64_t d = *slot;
         if (!(d & D_VALID)) return 0;
         if (!(d & D_AP_EL0)) return 0;            /* the kernel's, not theirs */
-        if (write && (d & D_AP_RO)) return 0;
+        if (write && (d & D_AP_RO)) {
+            /* Read-only in a user space means one thing here: copy-on-write.
+             * The program may write this page — it just has not tried yet, and
+             * its own store would fault and be resolved. A write the kernel
+             * makes on its behalf has no fault to resolve it, so it resolves it
+             * here.
+             *
+             * Refusing instead is what this did until 2026-07-28, and it is a
+             * kernel telling a program that its own stack is not its own. It
+             * showed up as a signal handler that would not install after fork,
+             * but read() into a fresh child's buffer had it too, and only
+             * ever worked because a program that writes to a page before
+             * reading into it has already broken the sharing. A defect whose
+             * appearance depends on what the caller happened to do first. */
+            if (vm_cow_fault(p) != 0) return 0;
+            d = *slot;
+            if (d & D_AP_RO) return 0;
+        }
         p = (p & ~(size - 1)) + size;
     }
     return 1;

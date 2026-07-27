@@ -87,6 +87,9 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
      * later one inherits it. */
     t->pgid        = current ? current->pgid : 0;
     t->pending     = 0;
+    t->blocked     = 0;
+    for (int i = 0; i < NSIG; i++) t->sigact[i].handler = t->sigact[i].restorer =
+                                   t->sigact[i].mask = 0;
     t->stack_low   = 0;
     t->sp          = 0;
     for (int i = 0; i < NFD; i++) t->fd[i] = 0;
@@ -138,6 +141,15 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
      * not use without taking it from the other. */
     for (int i = 0; i < NFD; i++)
         t->fd[i] = current ? file_ref(current->fd[i]) : 0;
+    /* And the handlers, because the child is the same program at the same
+     * addresses — that is what fork means. slot_init has just cleared them,
+     * which is right for a fresh process and wrong for a copy of one; without
+     * this a child installs its parent's handler and dies of the signal
+     * anyway, and the exit status is the only place it shows. */
+    if (current) {
+        for (int i = 0; i < NSIG; i++) t->sigact[i] = current->sigact[i];
+        t->blocked = current->blocked;
+    }
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -308,9 +320,12 @@ int thread_signal(int pid, int sig) {
 }
 
 int thread_signalled(void) {
-    int p = current->pending;
+    /* Blocked signals stay pending. SIGKILL is not among them: a signal that
+     * can be held off indefinitely is not a way to stop a program, and the
+     * whole reason SIGKILL exists is that it is the one that always works. */
+    uint64_t p = (uint64_t)current->pending & ~(current->blocked & ~(1ull << SIGKILL));
     if (!p) return 0;
-    for (int s = 1; s < 31; s++) if (p & (1u << s)) return s;
+    for (int s = 1; s < NSIG; s++) if (p & (1ull << s)) return s;
     return 0;
 }
 

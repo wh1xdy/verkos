@@ -3132,3 +3132,85 @@ whole machine and the kernel's locking is `irq_save`/`irq_restore` — masking
 interrupts, which locks nothing at all against another processor (D-057 said so
 when it was written). Letting a second core into the run queue means per-CPU
 state and real spinlocks first. Parking is the honest place to stop.
+
+## D-077 — catching a signal, and the write the kernel was not allowed to make
+
+**2026-07-28.** A program can now install a handler and survive being
+interrupted. `rt_sigaction` (134) and `rt_sigreturn` (139), with the interrupted
+state saved on the program's own stack:
+
+```
+  [catch] interrupted, handled, and resumed with every register intact
+  [catch] a handler ran in a loop that makes no system calls, and the program lived
+```
+
+The frame goes on the user stack rather than in the process, because a handler
+may raise the same signal again or block, and one saved frame per process turns
+the second delivery into a lost first one. The stack already nests.
+
+The handler returns through an address the kernel puts in x30. Linux keeps that
+trampoline in the vDSO; there is no vDSO here, so the program supplies it — the
+arrangement Linux still uses where `SA_RESTORER` survives. A `sigaction` without
+one is **refused**, rather than accepted and discovered when the handler returns
+and jumps to zero: a fault at an address with nothing to do with the mistake.
+
+The call is not Linux's `struct sigaction`. That struct carries a mask whose
+width depends on a fourth argument and a flags word almost every bit of which
+means something this kernel does not do, and reading fields that are ignored is
+a call that looks supported and is not. The three arguments are the three things
+used. The number is Linux's, because the numbering is the cheap part (D-039).
+
+### What sigreturn may not restore
+
+Everything comes back verbatim except SPSR, which says **which exception level
+to return to** — and it is read from a page the program can write. Restoring it
+as found is a program choosing to resume at EL1: the kernel handing over the
+machine because it read a number out of userspace. Only NZCV survives; the rest
+is rebuilt as EL0t. ELR is checked as a user address for the same reason.
+
+The frame is also marked, because sigreturn is an ordinary call that any program
+may make with any stack pointer, and without a marker the kernel would load 34
+registers out of whatever was there. The marker does not make it safe — a
+program can write the marker — which is why nothing downstream trusts the
+contents either.
+
+### The test, and why it is that shape
+
+The child spins in a loop that makes **no system calls**, so the only way in is
+delivery on the way out of a timer interrupt. Before the loop it puts four
+values in x9–x12, which are caller-saved: the handler is an ordinary C function
+and the compiler is entitled to destroy all four. After the handler returns the
+loop compares them.
+
+A check on the handler's own output would pass on a kernel that runs the handler
+and loses the frame, which is worse than no handler at all. The exit status
+separates the three endings — **7** handled and resumed, **3** handled and lost,
+**130** never installed — and each is a number nothing else in the program
+produces.
+
+It read 130 the first two times.
+
+### The second 130: fork did not copy the handlers
+
+`thread_fork` calls `slot_init`, which clears the table. Right for a fresh
+process, wrong for a copy of one. The child installed nothing and died of the
+signal, and the exit status was the only place it showed.
+
+### The third: the kernel was refused a write to the program's own stack
+
+`vm_user_ok(..., write)` returned false for any read-only page, and after fork
+every page is read-only because that is what copy-on-write is (D-064). So the
+kernel could not build a signal frame on a stack the program owns.
+
+This was never only about signals. **`read()` into a fresh child's buffer had
+the same bug**, and never showed, because a program that writes to a page before
+reading into it has already broken the sharing — a defect whose appearance
+depends on what the caller happened to do first.
+
+The program's own store would have faulted and been resolved. A write the kernel
+makes on its behalf has no fault to resolve it, so `vm_user_ok` resolves it: a
+read-only page in the range is copied there and then. A predicate with a side
+effect, which is worth naming in the header rather than leaving to be
+discovered.
+
+`make test`: 231 checks, was 228.

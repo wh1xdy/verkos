@@ -134,9 +134,9 @@ What it does today, each verified by running it:
 - Preemptive round-robin scheduling driven from the timer interrupt, with the
   kernel in the high half (TTBR1) and every process holding its own low half
   (D-037, D-042, D-043).
-- Eighteen system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
+- Twenty system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
   `wait4`, `close`, `dup`, `dup3`, `pipe2`, `openat`, `kill`,
-  `setpgid`, `getpgid`, `ioctl` — with `WNOHANG`, `O_APPEND` and `TIOCSPGRP` — using Linux's aarch64 numbers,
+  `setpgid`, `getpgid`, `ioctl`, `rt_sigaction`, `rt_sigreturn` — with `WNOHANG`, `O_APPEND` and `TIOCSPGRP` — using Linux's aarch64 numbers,
   because the numbering is the cheapest part of an ABI to agree with (D-039). **Every pointer they are given is
   checked** against the caller's own page tables before it is dereferenced: the
   MMU stops a program reaching kernel memory, but says nothing about the kernel
@@ -162,6 +162,12 @@ What it does today, each verified by running it:
 - An interrupt-driven console with a line discipline, and a machine that actually
   idles: sitting at the prompt for ten seconds, QEMU consumed no measurable CPU
   (D-050).
+- **Signal handlers.** A program can catch a signal and carry on: the
+  interrupted state goes on its own stack, and it comes back through a restorer
+  the program supplies, because there is no vDSO to keep a trampoline in. What
+  `sigreturn` may *not* restore is the processor state — SPSR says which
+  exception level to resume at and it sits on a page the program can write
+  (D-077).
 - **The other processors start.** PSCI `CPU_ON`, with the conduit read from the
   device tree and each core named by its own `reg` affinity value; with `-smp 4`
   all four come up. What the secondary cannot work out for itself is read off

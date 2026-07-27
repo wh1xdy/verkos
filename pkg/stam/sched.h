@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include "file.h"
 
+#define NSIG    32          /* room for every signal number this kernel knows */
+
 #define THREAD_RUNNABLE 0
 #define THREAD_ZOMBIE   1   /* finished, but nobody has collected the result */
 #define THREAD_BLOCKED  2   /* waiting for something: see wait_reason        */
@@ -23,6 +25,10 @@ typedef struct {
                              /* terminal is addressed to                     */
     int         pending;     /* signals raised and not yet acted on          */
     const void *wait_object; /* which pipe, when wait_reason is WAIT_PIPE   */
+    uint64_t    blocked;     /* signals held off while a handler runs        */
+    /* Where a caught signal goes. Index by signal number; handler 0 means the
+     * default action, which is to die of it. */
+    struct { uint64_t handler, restorer, mask; } sigact[NSIG];
     /* The open files, this process's own. Copied by fork — the descriptors
      * are duplicated and the objects behind them gain a holder, which is why
      * both halves of `a | b` can close their unused end without the other
@@ -58,6 +64,16 @@ int       thread_reap(int *status_out);
 /* To one process, or to every member of a group when pid is negative. Returns
  * how many it reached — zero means nobody, which the caller may care about. */
 int       thread_signal(int pid, int sig);
+
+/* Handlers. sig_action installs one; sig_deliver arranges for the running
+ * program to run it instead of dying, and answers 0 when there is nothing
+ * installed and the caller must kill; sig_return undoes sig_deliver. */
+int       sig_action(int sig, uint64_t handler, uint64_t restorer, uint64_t mask);
+int       sig_deliver(int sig, void *frame);
+uint64_t  sig_return(void *frame);
+/* exec keeps what is ignored and drops what is caught: the handler's address
+ * means nothing in the new image (POSIX says the same). */
+void      sig_exec_reset(void);
 /* Does the running thread have a signal it must die of? Called where the
  * kernel is about to return to EL0 or is about to block, because those are the
  * only two places where dying is safe and timely. */

@@ -4,8 +4,8 @@ Written 2026-07-26, as a handover. The point of this file is to let a new
 session start without reading the whole history: what is proved, what is
 merely written, and what is known to be wrong.
 
-`make test` — 228 checks, all passing, run in the `verkbuild` container on
-2026-07-28; the 226 that predate the two SMP checks have passed twelve
+`make test` — 231 checks, all passing, run in the `verkbuild` container on
+2026-07-28; the 226 that predate the SMP and signal-handler checks have passed twelve
 consecutive runs. The number is host-dependent: some checks are skipped without a
 network or a cross toolchain, so a Mac host reports fewer and fails several on
 missing headers. Run it where the build runs.

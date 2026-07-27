@@ -9,3 +9,17 @@
 *.swp
 *~
 .DS_Store
+
+# pkg/stam builds in place rather than under work/, so its output needs naming
+# here. These were tracked until 2026-07-28: every kernel change committed a
+# fresh set of object files, and the repo carried a stam.efi that had no fixed
+# relation to the sources beside it — a binary a reader could reasonably take
+# for the built one.
+pkg/stam/*.o
+pkg/stam/*.so
+pkg/stam/*.elf
+pkg/stam/*.efi
+pkg/stam/*.img
+pkg/stam/progs/*.o
+pkg/stam/progs/*.elf
+pkg/stam/progs/*.cpio

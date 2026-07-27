@@ -206,7 +206,11 @@ void irq_dispatch(void *frame) {
         uint64_t spsr = f[32];              /* see the frame layout in vectors.S */
         if ((spsr & 0xf) == 0) {
             int sig = thread_signalled();
-            if (sig) thread_exit(128 + sig);
+            /* A handler is the reason this point matters at all: a program in
+             * a loop that makes no system call is exactly the one that must be
+             * interruptible, and this is the only place the kernel gets to look
+             * at it. */
+            if (sig && !sig_deliver(sig, frame)) thread_exit(128 + sig);
         }
     }
 }
