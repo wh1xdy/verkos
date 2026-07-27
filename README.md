@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-067.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-068.
 
 ---
 
@@ -49,7 +49,9 @@ Not a plan — these are directories in `pkg/`, built today; all but `stam`,
 **`make boot` uses nothing third-party.** From an empty file to a disk a machine
 starts from: `vpart` writes the table, `vmkfs` the filesystem and its contents,
 `vboot` is the loader, `vcpio` and `vgzip` build the initramfs. ext4 is still
-bought (D-014).
+bought (D-014). **Booted under AAVMF**: the firmware found the partition, loaded
+vboot out of our filesystem, and vboot read back all 46 MB of kernel — the file
+that crosses cluster 65535 (D-068).
 
 **At least 97 command names on a booted VerkOS resolve to code in this
 repository** — 42 verkbox applet names, plus 55 familiar names symlinked onto 26 `vX` tools

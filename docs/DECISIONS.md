@@ -2586,3 +2586,56 @@ The remaining three are the ones D-014 called the honest trade: own the half
 that is small and specified precisely enough, buy the half where a subtle
 mistake is silent until someone's data is gone. Nothing left in the boot path
 is bought by accident.
+
+## D-068 — Firmware read what our tools wrote
+
+Everything in D-065, D-066 and D-067 was checked against `fsck.fat`, `mtools`,
+`sfdisk` and the Linux vfat driver. All four are readers, and none of them is
+the one that matters: the machine's firmware is what decides whether a disk
+boots, and it had never seen a partition table or a filesystem VerkOS wrote.
+
+`make boot` was rerun so the boot disk came entirely from our own tools, and
+the result was started under AAVMF. Its own log:
+
+    BdsDxe: loading Boot0001 "UEFI Misc Device" from VenHw(...)
+    BdsDxe: starting Boot0001 ...
+
+      vboot: VerkOS 0.1
+      [..] loading \vmlinuz
+      [ok] device tree built and installed (firmware had none)
+      [ok] kernel loaded, 46780928 bytes
+      [..] loading \initramfs.img
+      [ok] initrd loaded, 6569926 bytes
+      [->] starting VerkOS
+
+    EFI stub: Booting Linux Kernel...
+    EFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+    EFI stub: Using DTB from configuration table
+    EFI stub: Exiting boot services...
+
+Four separate claims, each settled by something other than us:
+
+- **The firmware found the partition.** The table came from `vpart` — protective
+  MBR, both headers, both entry arrays — and BdsDxe located a bootable device
+  in it.
+- **The firmware read the filesystem.** `\EFI\BOOT\BOOTAA64.EFI` was placed
+  there by `vmkfs --copy`, and the firmware loaded and started it.
+- **vboot read the large files back at full size.** 46 780 928 bytes of kernel
+  and 6 569 926 of initramfs, through vboot's own FAT reader, which shares no
+  code with the writer. The kernel is the file that crosses cluster 65535 —
+  the `DIR_FstClusHI` case — and a writer that got that wrong would produce
+  exactly this log up to the point where the kernel is short.
+- **Linux accepted the initrd and the device tree**, and exited boot services.
+
+**What was not seen: a login prompt.** The serial log ends at
+`Exiting boot services`, and repeated attempts to keep QEMU alive long enough
+to catch the rest were killed by the harness rather than by anything in the
+system. So what is claimed here is the boot *chain* — table, filesystem,
+loader, kernel handover — and not the userland behind it, which STATUS.md
+already records from earlier boots and which none of this week's work touched.
+
+It is worth saying which of the two halves this proves. The readers that
+passed earlier are thorough about structure and indifferent to intent: fsck
+will tell you a directory chain is well-formed and not that a reader stops at
+the first `0x00` in it (D-065). Firmware is the opposite — it says nothing
+about structure and everything about whether the machine starts.
