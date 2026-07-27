@@ -11,6 +11,7 @@
  */
 #include "console.h"
 #include "sched.h"
+#include "lock.h"
 #include "vm.h"
 #include "mmu.h"
 #include "cpio.h"
@@ -227,14 +228,27 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
     char *out = (char *)(uintptr_t)buf;
     uint64_t n = 0;
     for (;;) {
+        /* Masked from before the buffer is examined until after this thread is
+         * marked blocked. A character arriving in that gap would otherwise find
+         * nobody waiting for it, wake nobody, and leave the reader asleep with
+         * its wakeup already spent — a prompt that ignores the key you pressed.
+         * The window is a handful of instructions, which is exactly the size of
+         * bug that survives a long time. */
+        uint64_t f = irq_save();
         int c = kgetc();
         if (c < 0) {
             /* Sleep if the port can wake us; otherwise there is nothing to do
              * but give way and look again. */
-            if (console_is_interrupt_driven()) thread_block_on_console();
-            else thread_yield();
+            if (console_is_interrupt_driven()) {
+                thread_block_on_console();      /* returns with the mask held */
+                irq_restore(f);
+            } else {
+                irq_restore(f);
+                thread_yield();
+            }
             continue;
         }
+        irq_restore(f);
         if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return n; }
         if (c == 0x7f || c == 8) {           /* backspace */
             if (n) { n--; kputs("\b \b"); }

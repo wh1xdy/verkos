@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-056.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-057.
 
 ---
 
@@ -144,9 +144,11 @@ What it does today, each verified by running it:
   idles: sitting at the prompt for ten seconds, QEMU consumed no measurable CPU
   (D-050).
 
-Named rather than hidden: no SMP and **no locking** — system calls run with
-interrupts enabled, which is a debt (D-050). No copy-on-write; `fork` copies
-outright. No pipes, no redirection, no filesystem beyond the initrd. No FP/SIMD
+Named rather than hidden: **no SMP.** Everything shared with an interrupt
+handler is protected by masking that interrupt, which is sufficient on one CPU
+and not on two — the sections are marked, so the day there is a second core the
+work is finding them rather than finding the races (D-057). No copy-on-write;
+`fork` copies outright. No pipes, no redirection, no filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). **A burst of input longer than a few characters is lost** —

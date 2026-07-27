@@ -15,8 +15,7 @@
 #include "mmu.h"
 #include "vm.h"
 #include "console.h"
-#include "mmu.h"
-#include "vm.h"
+#include "lock.h"
 
 extern void cpu_switch(uint64_t *save_sp_here, uint64_t resume_sp);
 extern uint64_t thread_entry_point(void);
@@ -168,11 +167,22 @@ static thread_t *next_runnable(thread_t *after) {
     return 0;
 }
 
+/* Choosing who runs next reads every slot's state, and the console interrupt
+ * writes those states (thread_wake_console). A tick landing between "this one
+ * is runnable" and "switch to it" could also arrive while `current` is halfway
+ * updated, which is a switch to a thread the scheduler has already left.
+ *
+ * The mask is held across cpu_switch, which looks wrong and is not: each thread
+ * saved DAIF on its own stack on the way in, and restores its own value when
+ * something schedules it again. A thread running for the first time never
+ * reaches that line — it starts in the trampoline, which unmasks interrupts
+ * itself, and always has (D-037). */
 void schedule(void) {
     if (!started || n_threads < 2) return;
+    uint64_t f = irq_save();
     thread_t *prev = current;
     thread_t *next = next_runnable(prev);
-    if (!next || next == prev) return;
+    if (!next || next == prev) { irq_restore(f); return; }
     current = next;
     next->slices++;
     /* The low half belongs to whoever is about to run. Kernel-only threads
@@ -180,7 +190,9 @@ void schedule(void) {
     if (next->space && next->space != prev->space) mmu_switch_user(next->space);
     cpu_switch(&prev->sp, next->sp);
     /* Execution resumes here when something schedules `prev` again — possibly
-     * a long time later, and on a different thread's behalf. */
+     * a long time later, and on a different thread's behalf. `f` is this
+     * thread's own saved DAIF, read off this thread's own stack. */
+    irq_restore(f);
 }
 
 void thread_yield(void) { schedule(); }
@@ -189,21 +201,44 @@ void thread_yield(void) { schedule(); }
  * status because a parent may ask for it, the stack because we are standing on
  * it. Both are released by whoever collects it. Nobody frees themselves. */
 void thread_exit(int status) {
+    /* vm_free_space is outside the section on purpose: it returns hundreds of
+     * pages, and holding interrupts off for that long is a timer tick missed
+     * and a console character dropped. Nothing else can reach this address
+     * space — the process is a zombie before the first page goes back. */
+    uint64_t f = irq_save();
     current->state = THREAD_ZOMBIE;
     current->status = status;
-    /* Its address space is nobody's now; the stack is not, yet. */
-    if (current->space) { vm_free_space(current->space); current->space = 0; }
-    /* Wake a parent that is waiting for exactly this. */
+    uint64_t space = current->space;
+    current->space = 0;
+    irq_restore(f);
+
+    if (space) vm_free_space(space);
+
+    /* Waking the parent is a search-then-write over slots the console
+     * interrupt also writes. */
+    f = irq_save();
     for (int i = 0; i < n_threads; i++)
         if (threads[i].id == current->parent && threads[i].state == THREAD_BLOCKED &&
             threads[i].wait_reason == WAIT_CHILD)
             threads[i].state = THREAD_RUNNABLE;
+    irq_restore(f);
+
     for (;;) schedule();
 }
 
 /* Sleep until a character arrives. Unlike yielding in a loop, a thread parked
  * here is not scheduled at all — the CPU goes to whoever has work, and the
- * interrupt is what puts this one back in the queue. */
+ * interrupt is what puts this one back in the queue.
+ *
+ * **Call this with interrupts already masked**, holding the mask from before
+ * the check that found the buffer empty. Otherwise the wakeup can be lost: a
+ * character arriving between "nothing to read" and "I am blocked" finds nobody
+ * blocked, wakes nobody, and the thread then sleeps with the interrupt already
+ * spent. A machine sitting at a prompt ignoring the key that was pressed looks
+ * exactly like a dead console, and would be blamed on the driver.
+ *
+ * schedule() masks again on the way in and restores this thread's own value on
+ * the way out, so the caller's mask is still held when this returns. */
 void thread_block_on_console(void) {
     current->wait_reason = WAIT_CONSOLE;
     current->state = THREAD_BLOCKED;
@@ -213,6 +248,8 @@ void thread_block_on_console(void) {
 /* Called from the interrupt, so it does the least it can: mark them runnable
  * and let the ordinary scheduler decide when. */
 void thread_wake_console(void) {
+    /* Already in interrupt context with interrupts masked, so this needs no
+     * section of its own — but it is the reason every other one exists. */
     for (int i = 0; i < n_threads; i++)
         if (threads[i].state == THREAD_BLOCKED && threads[i].wait_reason == WAIT_CONSOLE)
             threads[i].state = THREAD_RUNNABLE;
@@ -224,6 +261,12 @@ void thread_wake_console(void) {
 int thread_wait(int *status_out) {
     for (;;) {
         int have_children = 0;
+        /* The scan and the claim must be one step. Two parents looking at the
+         * same zombie is not possible today — a process has one parent — but a
+         * console interrupt landing mid-scan writes the states being read, and
+         * the free_page calls below hand pages to an allocator this may be
+         * interrupted inside of. */
+        uint64_t f = irq_save();
         for (int i = 0; i < n_threads; i++) {
             if (threads[i].parent != current->id) continue;
             if (threads[i].state == THREAD_ZOMBIE) {
@@ -247,14 +290,19 @@ int thread_wait(int *status_out) {
                 threads[i].name        = "free";
                 threads[i].sp          = 0;
                 threads[i].state       = THREAD_FREE;
+                irq_restore(f);
                 return id;
             }
             if (threads[i].state != THREAD_FREE) have_children = 1;
         }
-        if (!have_children) return -1;
+        if (!have_children) { irq_restore(f); return -1; }
+        /* Same shape as the console wait: marked blocked with the mask still
+         * held, so a child exiting in the gap cannot wake a thread that has not
+         * yet said it is asleep. */
         current->wait_reason = WAIT_CHILD;
         current->state = THREAD_BLOCKED;
         schedule();
+        irq_restore(f);
     }
 }
 

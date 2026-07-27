@@ -1973,3 +1973,57 @@ the honest choice while nothing needs floating point. Without it a program can
 die on a statement that looks incapable of failing.
 
 172 → 173 checks.
+
+## D-057 — The locking D-050 said would be needed next
+
+D-050 turned interrupts on for the duration of a system call, because a call
+that waits for a device cannot be woken by that device otherwise, and wrote at
+the same line that this kernel has no locking and that it would be the next
+thing to be wrong. This is that.
+
+**On one CPU the answer is not a lock, it is masking the interrupt.** There is
+no other processor to race with — only the handler that can interrupt us. So
+`lock.h` is `irq_save`/`irq_restore` and deliberately not dressed up as a
+spinlock: an uncontended lock word here would say, falsely, that the SMP
+question had been answered. It has not been. Every section marked is a place
+that will need a real lock the day there is a second core, and marking them is
+most of that work done in advance.
+
+Four races, each a read-modify-write an interrupt can land inside:
+
+**The page allocator.** Popping the free list is read the head, follow it, store
+the next. A timer tick between the first and third reschedules, and a second
+thread reads the same head — after which two address spaces own one page and
+nothing reports anything until they disagree about what is in it. `free_page`
+and the bump path have the same shape.
+
+**Choosing who runs next.** `schedule()` reads every slot's state while the
+console interrupt writes those states. The mask is held *across* `cpu_switch`,
+which looks wrong and is not: each thread saved DAIF on its own stack going in
+and restores its own value when something schedules it again. A thread running
+for the first time never reaches that line — it starts in the trampoline, which
+has unmasked interrupts itself since D-037.
+
+**Collecting a child**, which scans slots and then claims one.
+
+**And the one that is a real bug rather than a theoretical one: the lost
+wakeup.** `sys_read` checked the buffer, found it empty, and then marked itself
+blocked. A character arriving in that gap finds nobody blocked, wakes nobody,
+and the reader sleeps with its interrupt already spent — a prompt that ignores
+the key you pressed, which looks exactly like a dead console driver and would
+have been blamed on one. The mask now covers the check *and* the marking, so
+`thread_block_on_console` is documented as requiring it: the section belongs to
+the caller, because the caller is where the condition is tested.
+
+`thread_exit` frees an address space outside its section, on purpose. Returning
+hundreds of pages with interrupts off is a timer tick missed and a console
+character dropped, and nothing else can reach that space — the process is a
+zombie before the first page goes back.
+
+**What is not claimed:** none of these was reproduced. They are races whose
+windows are a handful of instructions, and a test that provokes them reliably
+is a larger piece of work than the fix. What can be said is what was run: the
+kernel boots, the demonstration completes, the shell reads keys typed at it and
+runs programs, and `make test`'s six boot checks pass. The lost wakeup is the
+one with a visible symptom, and the shell reading input after the change is
+evidence it is not being lost — but not proof it ever was.

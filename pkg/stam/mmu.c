@@ -13,6 +13,7 @@
  */
 #include "mmu.h"
 #include "console.h"
+#include "lock.h"
 
 /* Hidden, for the same reason the assembly symbols are: a linker-script symbol
  * referenced from position-independent code is otherwise fetched through the
@@ -65,26 +66,37 @@ static unsigned pages_returned;
 
 void free_page(void *p) {
     if (!p) return;
+    uint64_t f = irq_save();
     uint64_t *page = p;
     *page = free_list;
     free_list = (uint64_t)(uintptr_t)p;
     pages_returned++;
+    irq_restore(f);
 }
 
 unsigned pmm_pages_free_listed(void) { return pages_returned; }
 
+/* Taking a page off the list is a read, a follow and a store, and a timer tick
+ * in the middle of it reschedules — after which a second thread reads the same
+ * head and both walk away owning the same page. Two address spaces, one piece
+ * of memory, and nothing reports anything until they disagree about what is in
+ * it. The zeroing is inside the section too: the page is not this caller's
+ * until the head has moved past it. */
 void *alloc_page(void) {
+    uint64_t f = irq_save();
     if (free_list) {
         uint64_t *page = (uint64_t *)(uintptr_t)free_list;
         free_list = *page;
         pages_returned--;
+        irq_restore(f);
         for (unsigned i = 0; i < PAGE_SIZE / 8; i++) page[i] = 0;
         return page;
     }
-    if (free_next + PAGE_SIZE > free_top) return 0;
+    if (free_next + PAGE_SIZE > free_top) { irq_restore(f); return 0; }
     uint64_t p = free_next;
     free_next += PAGE_SIZE;
     pages_taken++;
+    irq_restore(f);
     volatile uint64_t *z = usable(p);
     for (unsigned i = 0; i < PAGE_SIZE / 8; i++) z[i] = 0;
     return (void *)z;
@@ -95,10 +107,12 @@ void *alloc_page(void) {
  * out whether two alloc_page() calls may be assumed adjacent. */
 void *alloc_pages(unsigned n) {
     if (!n) return 0;
-    if (free_next + (uint64_t)n * PAGE_SIZE > free_top) return 0;
+    uint64_t f = irq_save();
+    if (free_next + (uint64_t)n * PAGE_SIZE > free_top) { irq_restore(f); return 0; }
     uint64_t p = free_next;
     free_next += (uint64_t)n * PAGE_SIZE;
     pages_taken += n;
+    irq_restore(f);
     volatile uint64_t *z = usable(p);
     for (uint64_t i = 0; i < (uint64_t)n * PAGE_SIZE / 8; i++) z[i] = 0;
     return (void *)z;
