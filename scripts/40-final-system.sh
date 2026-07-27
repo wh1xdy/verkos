@@ -169,6 +169,7 @@ stage_sources() {
     done
     sudo cp "$VERK_ROOT/pkg/vmkfs/vmkfs.c"     "$ROOTFS/sources/vmkfs.c"     2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/vinstall/vinstall.c" "$ROOTFS/sources/vinstall.c" 2>/dev/null || true
+    sudo cp "$VERK_ROOT/pkg/vpart/vpart.c"     "$ROOTFS/sources/vpart.c"     2>/dev/null || true
     sudo cp "$VERK_ROOT/pkg/urverk/urverk.c" "$ROOTFS/sources/urverk.c" 2>/dev/null || true
     sudo rm -rf "$ROOTFS/sources/urverk-services"
     sudo cp -a "$VERK_ROOT/pkg/urverk/services" "$ROOTFS/sources/urverk-services" 2>/dev/null || true
@@ -1012,6 +1013,16 @@ gcc -O2 -o /usr/bin/vmkfs.vfat /sources/vmkfs.c
 for t in mkfs.vfat mkfs.fat mkfs.msdos; do ln -sf vmkfs.vfat "/usr/bin/$t"; done
 for t in mkfs.vfat mkfs.fat mkfs.msdos vmkfs.vfat; do ln -sf ../bin/vmkfs.vfat "/usr/sbin/$t"; done
 cd /sources; mark vmkfs
+fi
+
+# vpart — our own GPT writer. The installer needs a partition table before it
+# needs anything else, and sfdisk was the last third-party tool in that path
+# (D-066). Built before vinstall because vinstall refuses to run without it.
+if need vpart; then
+say "vpart (VerkOS GPT writer)"
+gcc -O2 -o /usr/bin/vpart /sources/vpart.c
+ln -sf ../bin/vpart /usr/sbin/vpart
+cd /sources; mark vpart
 fi
 
 # vinstall — the installer: GPT + ESP + ext4 root + vboot, onto a real disk.

@@ -772,7 +772,7 @@ int main(int argc, char **argv) {
     if (getuid() != 0) die("must be run as root");
 
     /* Everything this needs must exist before anything is destroyed. */
-    const char *needed[] = { "sfdisk", "blkid", "mkfs.ext4", NULL };
+    const char *needed[] = { "vpart", "blkid", "mkfs.ext4", NULL };
     for (const char **t = needed; *t; t++)
         if (!have_tool(*t)) die("%s is not installed — cannot continue", *t);
     const char *mkvfat = have_tool("vmkfs.vfat") ? "vmkfs.vfat"
@@ -869,9 +869,9 @@ int main(int argc, char **argv) {
      * systems (and the firmware) recognise what they are looking at. The root
      * partition takes whatever is left. */
     if (!dry_run) {
-        /* Sizes are worked out here rather than left to sfdisk, because only the
-         * last partition can say "the rest" and root is not last once /home or
-         * swap exist. */
+        /* Sizes are worked out here rather than left to the partitioner,
+         * because only the last partition can say "the rest" and root is not
+         * last once /home or swap exist. */
         unsigned long total = disk_mb(disk);
         if (!total) die("cannot determine the size of %s", disk);
         unsigned long fixed = esp_mb + swap_mb + home_mb + 2;   /* 2 MiB alignment slack */
@@ -881,27 +881,23 @@ int main(int argc, char **argv) {
                 swap_mb ? " , swap" : "", home_mb ? " and /home" : "");
         unsigned long root_mb = total - fixed;
 
-        FILE *sf = fopen("/run/vinstall.sfdisk", "w");
-        if (!sf) die("cannot write the partition script: %s", strerror(errno));
-        fprintf(sf, "label: gpt\n");
+        /* vpart, not sfdisk: the table is ours now (D-066). The sizes are
+         * still worked out here, because only the last partition can mean
+         * "the rest" and root is not last once /home or swap exist. */
+        char args[512];
+        int a = 0;
         if (ramdisk_root) {
             /* One partition. There is nothing to put in a second one: the whole
              * system is a file on this one, and nothing is kept between boots. */
-            fprintf(sf, "start=1MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n");
+            a += snprintf(args + a, sizeof args - a, " --esp-all");
         } else {
-            fprintf(sf, "start=1MiB, size=%uMiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI System\"\n",
-                    esp_mb);
-            fprintf(sf, "size=%luMiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"VerkOS\"\n", root_mb);
+            a += snprintf(args + a, sizeof args - a, " --esp %u --root %lu", esp_mb, root_mb);
+            if (home_mb) a += snprintf(args + a, sizeof args - a, " --home %u", home_mb);
+            if (swap_mb) a += snprintf(args + a, sizeof args - a, " --swap %u", swap_mb);
         }
-        if (home_mb)
-            fprintf(sf, "size=%uMiB, type=933AC7E1-2EB4-4F13-B844-0E14E2AEF915, name=\"home\"\n", home_mb);
-        if (swap_mb)
-            fprintf(sf, "size=%uMiB, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F, name=\"swap\"\n", swap_mb);
-        fclose(sf);
+        run("vpart %s%s", disk, args);
     }
-    run("sfdisk --quiet --wipe always %s < /run/vinstall.sfdisk", disk);
     run("partx -u %s >/dev/null 2>&1 || partprobe %s >/dev/null 2>&1 || true", disk, disk);
-    unlink("/run/vinstall.sfdisk");
     wait_for_partition(esp_part);
     if (!ramdisk_root) wait_for_partition(root_part);
     }

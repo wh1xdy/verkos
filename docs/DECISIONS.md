@@ -2548,3 +2548,41 @@ the root filesystem (D-014), `sfdisk` inside `vinstall` — which now has an
 obvious replacement — and `xorriso` as a test-only judge of what `viso` writes.
 
 199 → 207 checks.
+
+## D-067 — sfdisk leaves the installer too
+
+D-066 took `parted` out of the boot disk and left `sfdisk` inside `vinstall`,
+where it was doing the same job on a real machine's real disk. `vpart` grew the
+three partition types the installer needs — root, `/home`, swap — and the
+installer calls it instead of generating a script for somebody else's tool.
+
+**The root is sized here, not left to take "the rest".** Only the last
+partition can mean the rest, and root is not last once `/home` or swap exist.
+A partitioner that quietly gives the remainder to the wrong one produces a disk
+that installs, boots, and has no swap — with nothing reported anywhere, which
+is this log's recurring shape.
+
+`vinstall`'s required-tools list is the other half of that. It refuses to touch
+a disk before checking that everything it needs exists (D-015), and `sfdisk`
+was on that list; now `vpart` is. A tool list that names something the program
+no longer runs is a check that passes for the wrong reason.
+
+One small thing worth its own line, because it cost a red test: the check
+"vinstall never calls sfdisk" was written as `! grep -q sfdisk`, and failed on
+the *comment* explaining that vpart replaced sfdisk. A check that greps for a
+word rather than for a call is a check about prose. It looks for the call now.
+
+207 → 211 checks.
+
+### Where this leaves the third-party tools
+
+    ours          vpart, vmkfs, viso, vboot, vcpio, vgzip, verkbox, the vX set
+    bought        mkfs.ext4 + e2fsck for the root filesystem, deliberately (D-014)
+    bought        libxcrypt for password hashing, deliberately (D-013)
+    bought        cryptsetup for LUKS, deliberately (D-020)
+    test only     xorriso, fsck.fat, mtools, sfdisk — as judges of what we wrote
+
+The remaining three are the ones D-014 called the honest trade: own the half
+that is small and specified precisely enough, buy the half where a subtle
+mistake is silent until someone's data is gone. Nothing left in the boot path
+is bought by accident.

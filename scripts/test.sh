@@ -778,6 +778,27 @@ if $CC -O2 -w -o "$T/vpart" pkg/vpart/vpart.c 2>/dev/null; then
            ! $T/vpart $T/tiny.img --esp 1 >/dev/null 2>&1"
     check "stage 70 partitions with vpart and never calls parted" \
           "grep -q vpart scripts/70-boot-image.sh && ! grep -q '^[^#]*parted' scripts/70-boot-image.sh"
+    # Four partitions in the order the installer numbers them, each with the
+    # type GUID other systems recognise. Root is sized rather than left to take
+    # "the rest", because it is not last once /home or swap exist — a
+    # partitioner that gives the rest to the wrong one produces a disk that
+    # installs and then has no swap, with nothing reported.
+    dd if=/dev/zero of="$T/full.img" bs=1M count=2048 status=none 2>/dev/null
+    "$T/vpart" "$T/full.img" --esp 512 --root --home 256 --swap 128 >/dev/null 2>&1
+    if command -v sfdisk >/dev/null 2>&1; then
+        check "vpart lays out esp, root, home and swap in that order" \
+              "sfdisk -l $T/full.img 2>/dev/null | grep -A5 '^Device' | \
+               awk 'NR==2{a=\$0} NR==3{b=\$0} NR==4{c=\$0} NR==5{d=\$0} \
+                    END{exit !(a ~ /EFI System/ && b ~ /Linux filesystem/ && \
+                               c ~ /Linux home/ && d ~ /Linux swap/)}'"
+        check "the four-partition table verifies too" \
+              "sfdisk --verify $T/full.img 2>&1 | grep -q 'No errors detected'"
+    fi
+    check "vinstall partitions with vpart and never runs sfdisk" \
+          "grep -q 'run(\"vpart' pkg/vinstall/vinstall.c && \
+           ! grep -qE 'run\\(\"sfdisk|\"sfdisk\"' pkg/vinstall/vinstall.c"
+    check "the build installs vpart into the rootfs" \
+          "grep -q 'o /usr/bin/vpart' scripts/40-final-system.sh"
 else
     bad "vpart does not compile"
 fi
