@@ -34,6 +34,21 @@ file_t *file_console(void);
  * either pipes or file objects. */
 int file_pipe(file_t **read_end, file_t **write_end);
 
+/* Where the initrd is, so `< name` has something to open. Set once at boot,
+ * the same archive exec reads from. */
+void file_set_archive(uint64_t addr, uint64_t size);
+
+/* Open a name. Reading finds it in the initrd; writing creates or truncates a
+ * file that lives in memory and is gone at the next boot.
+ *
+ * That asymmetry is the honest shape of what exists: the initrd is a cpio
+ * archive, which is not a filesystem — there is no directory structure and
+ * nothing can be written to it (D-047). Rather than pretend otherwise, writing
+ * goes to a small fixed table of named buffers. It is enough for `a > f` and
+ * `b < f` to mean what they say, and it is not a filesystem, which is why it
+ * is not called one. Returns 0, or a negative errno. */
+int file_open(const char *name, int for_writing, file_t **out);
+
 file_t *file_ref(file_t *f);   /* one more holder */
 void    file_close(file_t *f); /* one fewer; the last one releases it */
 

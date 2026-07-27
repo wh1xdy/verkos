@@ -8,7 +8,7 @@
  * the kernel, it is a program like any other, and being able to write it as one
  * is the evidence that the interface beneath it is real.
  *
- * It passes arguments now. Still no pipes and no redirection.
+ * It passes arguments, runs a|b, and redirects with > and <.
  */
 static long syscall3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
@@ -23,6 +23,9 @@ static long write_(const char *s, unsigned long n) { return syscall3(64, 1, (lon
 static long close_(int fd)              { return syscall3(57, fd, 0, 0); }
 static long pipe_(int fds[2])           { return syscall3(59, (long)fds, 0, 0); }
 static long dup3_(int old, int newfd)   { return syscall3(24, old, newfd, 0); }
+/* openat(AT_FDCWD, path, flags): -100 is AT_FDCWD, which the kernel ignores
+ * because there are no directories. 0 is read-only; O_WRONLY|O_CREAT is 0101. */
+static long open_(const char *p, int write) { return syscall3(56, -100, (long)p, write ? 0101 : 0); }
 static long getpid(void)          { return syscall3(172, 0, 0, 0); }
 static long fork_(void)           { return syscall3(220, 0, 0, 0); }
 static long exec_(const char *p, char *const *av) { return syscall3(221, (long)p, (long)av, 0); }
@@ -61,6 +64,22 @@ static int split(char *line, char *words[], int max) {
     }
     words[n] = 0;
     return n;
+}
+
+/* Open a name and put it at fd 0 or 1. Runs in the child, after the fork and
+ * before the exec, which is the only moment at which the descriptors can be
+ * arranged for a program that does not know they were. */
+static int redirect(const char *name, int fd, int write) {
+    long f = open_(name, write);
+    if (f < 0) {
+        say("  vsh: cannot open ");
+        say(name);
+        say("\n");
+        return -1;
+    }
+    dup3_((int)f, fd);
+    close_((int)f);
+    return 0;
 }
 
 /* Resolve a command name to a path in the initrd and become it. Only returns
@@ -104,8 +123,27 @@ int main_loop(void) {
             say("  built in: help, pid, exit\n");
             say("  anything else is looked for in the initrd and run,\n");
             say("  with the rest of the line as its arguments.\n");
-            say("  a | b  runs both, b reading what a writes\n");
+            say("  a | b   runs both, b reading what a writes\n");
+            say("  a > f   sends a's output to f;  a < f  feeds a from f\n");
             continue;
+        }
+
+        /* Pull > and < out of the words before anything else looks at them, so
+         * the redirection is not mistaken for an argument. Removing them here
+         * rather than in the child means a bad filename is reported by the
+         * shell, at the prompt, instead of by a process that has already
+         * forked and can only exit with a number. */
+        char *out_name = 0, *in_name = 0;
+        {
+            int w = 0;
+            for (int i = 0; i < nw; i++) {
+                if (same(words[i], ">") && i + 1 < nw)      { out_name = words[++i]; continue; }
+                if (same(words[i], "<") && i + 1 < nw)      { in_name  = words[++i]; continue; }
+                words[w++] = words[i];
+            }
+            words[w] = 0;
+            nw = w;
+            if (nw == 0) { say("  vsh: no command\n"); continue; }
         }
 
         /* Split at the first | into two argument vectors. One pipe, not a
@@ -131,6 +169,12 @@ int main_loop(void) {
                 dup3_(pfd[1], 1);
                 close_(pfd[0]); close_(pfd[1]);
             }
+            /* Redirection is applied after the pipe, so `a < f | b` reads from
+             * the file and still writes into the pipe, and an explicit `> f`
+             * on the left of a pipe wins over the pipe — which is what every
+             * shell does, and is the last one named taking effect. */
+            if (in_name && redirect(in_name, 0, 0) < 0) exit_(1);
+            if (!right && out_name && redirect(out_name, 1, 1) < 0) exit_(1);
             run_or_die(path, sizeof path, left);
         }
         if (a < 0) {
@@ -144,6 +188,7 @@ int main_loop(void) {
             if (b == 0) {
                 dup3_(pfd[0], 0);
                 close_(pfd[0]); close_(pfd[1]);
+                if (out_name && redirect(out_name, 1, 1) < 0) exit_(1);
                 run_or_die(path, sizeof path, right);
             }
         }

@@ -2141,3 +2141,56 @@ running. The instinct to blame timing for an intermittent test is the thing to
 distrust; the first fix attempted was a longer wait, and it changed nothing.
 
 174 → 176 checks.
+
+## D-060 — Redirection, and the smallest thing that can hold a file
+
+`> f` and `< f` needed something to open. The initrd answers half of it: it is
+a cpio archive, so a name can be found and read, and `upper < saved` has a
+source. It answers none of the other half — a cpio archive has no directory
+structure and nothing can be written to it (D-047).
+
+Rather than pretend otherwise, writing goes to a small fixed table of named
+buffers: four files of one page each, gone at the next boot. **It is not a
+filesystem, which is why it is not called one.** It is enough for `a > f` and
+`b < f` to mean what they say, and calling it a filesystem would be a claim
+the code cannot support.
+
+Reading prefers a memory file over the archive entry of the same name, because
+a program that wrote a file expects to read back what it wrote.
+
+`openat` is the call — aarch64 has no `open` — and the `dirfd` argument is
+accepted and ignored rather than pretended about, since there are no
+directories for a relative path to be relative to.
+
+The shell strips `>` and `<` from the words before anything else looks at
+them, so a filename is never mistaken for an argument, and it opens in the
+child between the fork and the exec. That is the only moment the descriptors
+can be arranged for a program that does not know they were.
+
+**Both directions in one exchange, because either alone proves less:**
+
+    verk$ hello redir > saved      (nothing on the console)
+    verk$ upper < saved
+      [HELLO] ARGV[1] = "REDIR"
+
+Checking only `> f` would pass on a shell that discarded the output entirely,
+so the test asserts both that the lower-case line never reached the console and
+that the upper-case one did.
+
+### The flaky test, third time
+
+This check went intermittent twice more before it was right, and both times the
+first instinct — wait longer — was wrong.
+
+The fix that worked was to stop waiting for each command's *output* and start
+waiting for the **prompt to come back**. Waiting on output makes a command that
+failed indistinguishable from one that is slow, and the next line then goes in
+while the shell is still busy. Counting prompts is the shell saying it is ready,
+which is the only thing worth waiting for.
+
+Ten consecutive runs at 178/0 before it was kept. There was one 177/1 earlier in
+that sequence, immediately after an edit and before a clean rebuild, and its
+failing check was not recorded — so it is written down here rather than assumed
+away.
+
+176 → 178 checks.

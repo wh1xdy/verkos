@@ -10,6 +10,7 @@
 #include "sched.h"
 #include "console.h"
 #include "lock.h"
+#include "cpio.h"
 
 #define NPIPE      8
 #define NFILE      32
@@ -19,6 +20,12 @@
 #define FILE_CONSOLE  1
 #define FILE_PIPE_R   2
 #define FILE_PIPE_W   3
+#define FILE_INITRD   4        /* read-only, straight out of the cpio archive */
+#define FILE_MEM      5        /* a named buffer that lasts until the reboot  */
+
+#define NMEM       4
+#define MEM_SIZE   4096
+#define NAME_MAX   32
 
 typedef struct pipe {
     char     buf[PIPE_SIZE];
@@ -27,10 +34,25 @@ typedef struct pipe {
     int      used;
 } pipe_t;
 
+typedef struct memfile {
+    char     name[NAME_MAX];
+    char     data[MEM_SIZE];
+    uint64_t len;
+    int      used;
+} memfile_t;
+
 struct file {
     int      refs;             /* how many descriptors, in any process      */
     int      kind;
     pipe_t  *pipe;
+    /* For the two kinds that are a sequence of bytes rather than a channel.
+     * The position belongs to the open file, not to the file: two programs
+     * that opened the same name each read it from the beginning, which is
+     * what `a < f | b < f` would need and what every Unix does. */
+    memfile_t     *mem;
+    const uint8_t *ro;         /* initrd contents, borrowed not owned       */
+    uint64_t       ro_len;
+    uint64_t       pos;
 };
 
 static pipe_t   pipes[NPIPE];
@@ -43,8 +65,81 @@ static struct file *file_alloc(int kind, pipe_t *p) {
             files[i].kind = kind;
             files[i].refs = 1;
             files[i].pipe = p;
+            files[i].mem  = 0;
+            files[i].ro   = 0;
+            files[i].ro_len = 0;
+            files[i].pos  = 0;
             return &files[i];
         }
+    return 0;
+}
+
+static memfile_t memfiles[NMEM];
+static uint64_t archive_addr, archive_size;
+
+void file_set_archive(uint64_t addr, uint64_t size) {
+    archive_addr = addr; archive_size = size;
+}
+
+static int name_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+/* A leading slash is accepted and ignored, as cpio_find does: the archive
+ * stores names without one and people type one. */
+static const char *skip_slash(const char *s) { return s[0] == '/' ? s + 1 : s; }
+
+int file_open(const char *name, int for_writing, file_t **out) {
+    name = skip_slash(name);
+    uint64_t s = irq_save();
+
+    if (for_writing) {
+        memfile_t *m = 0;
+        for (int i = 0; i < NMEM; i++)
+            if (memfiles[i].used && name_eq(memfiles[i].name, name)) { m = &memfiles[i]; break; }
+        if (!m)
+            for (int i = 0; i < NMEM; i++)
+                if (!memfiles[i].used) { m = &memfiles[i]; break; }
+        if (!m) { irq_restore(s); return -24; }              /* -EMFILE */
+        unsigned k = 0;
+        for (; k < NAME_MAX - 1 && name[k]; k++) m->name[k] = name[k];
+        m->name[k] = 0;
+        m->len = 0;                     /* opening for writing truncates */
+        m->used = 1;
+        struct file *f = file_alloc(FILE_MEM, 0);
+        if (!f) { irq_restore(s); return -24; }
+        f->mem = m; f->pos = 0;
+        *out = f;
+        irq_restore(s);
+        return 0;
+    }
+
+    /* Reading: a memory file if one exists by that name, otherwise the
+     * initrd. That order matters — a program that wrote a file expects to
+     * read back what it wrote, not the archive entry it shadowed. */
+    for (int i = 0; i < NMEM; i++)
+        if (memfiles[i].used && name_eq(memfiles[i].name, name)) {
+            struct file *f = file_alloc(FILE_MEM, 0);
+            if (!f) { irq_restore(s); return -24; }
+            f->mem = &memfiles[i]; f->pos = 0;
+            *out = f;
+            irq_restore(s);
+            return 0;
+        }
+
+    uint64_t at = 0, len = 0;
+    if (!archive_size || cpio_find(archive_addr, archive_size, name, &at, &len) != 0) {
+        irq_restore(s);
+        return -2;                                            /* -ENOENT */
+    }
+    struct file *f = file_alloc(FILE_INITRD, 0);
+    if (!f) { irq_restore(s); return -24; }
+    f->ro = (const uint8_t *)(uintptr_t)at;
+    f->ro_len = len;
+    f->pos = 0;
+    *out = f;
+    irq_restore(s);
     return 0;
 }
 
@@ -122,6 +217,19 @@ long file_read(file_t *f, char *buf, uint64_t len) {
     if (f->kind == FILE_CONSOLE) return console_read_line(buf, len);
     if (!len) return 0;
 
+    /* A file is a sequence of bytes with a position, and running off the end
+     * is end of file rather than an error — which is what makes `upper < f`
+     * terminate at all. */
+    if (f->kind == FILE_INITRD || f->kind == FILE_MEM) {
+        const char *src = f->kind == FILE_MEM ? f->mem->data : (const char *)f->ro;
+        uint64_t total  = f->kind == FILE_MEM ? f->mem->len  : f->ro_len;
+        uint64_t s2 = irq_save();
+        uint64_t n = 0;
+        while (n < len && f->pos < total) buf[n++] = src[f->pos++];
+        irq_restore(s2);
+        return (long)n;
+    }
+
     pipe_t *p = f->pipe;
     uint64_t s = irq_save();
     /* Masked across the test and the block, for the reason in
@@ -148,6 +256,18 @@ long file_write(file_t *f, const char *buf, uint64_t len) {
     if (f->kind == FILE_CONSOLE) {
         for (uint64_t i = 0; i < len; i++) kputc(buf[i]);
         return (long)len;
+    }
+    if (f->kind == FILE_INITRD) return -9;   /* the archive is read-only */
+    if (f->kind == FILE_MEM) {
+        /* A short write when the buffer fills, which is what a program should
+         * be told rather than having the excess silently dropped. */
+        uint64_t s2 = irq_save();
+        uint64_t n = 0;
+        while (n < len && f->pos < MEM_SIZE) { f->mem->data[f->pos++] = buf[n++]; }
+        if (f->pos > f->mem->len) f->mem->len = f->pos;
+        irq_restore(s2);
+        if (n == 0 && len) { return -28; }   /* -ENOSPC */
+        return (long)n;
     }
     pipe_t *p = f->pipe;
     uint64_t s = irq_save();

@@ -815,28 +815,26 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # after which the second line may never be read at all.
                     # That, not the timing, is why this was flaky.
                     exec 9> "$SD/p.in"
-                    printf 'hello one two three\n' >&9
-                    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                        sleep 1
-                        grep -aq 'argv\[3\]' "$SD/out.log" 2>/dev/null && break
-                    done
-                    # Then a pipeline. `upper` reads standard input and writes
-                    # it back in capitals, and knows nothing about where either
-                    # is attached — so capitals appearing is the descriptor
-                    # having been redirected, not the program behaving
-                    # differently. It also proves end of file: upper only stops
-                    # when the last writer closes, so a result at all means the
-                    # pipe reported EOF rather than hanging.
-                    # Longer than the others on purpose: a pipeline is two
-                    # forks, two execs and a buffer that is only flushed when
-                    # the writer exits, so its answer arrives later than an
-                    # unpiped command's. Fifteen seconds was enough two runs in
-                    # three, which is the worst possible amount (D-038).
-                    printf 'hello world | upper\n' >&9
-                    for _ in $(seq 1 40); do
-                        sleep 1
-                        grep -aq 'ARGV\[1\]' "$SD/out.log" 2>/dev/null && break
-                    done
+                    # Each command is followed by waiting for the prompt to
+                    # come back, not for that command's own output. Waiting on
+                    # the output means a command that fails is indistinguishable
+                    # from one that is slow, and the next line then goes in
+                    # while the shell is still busy — which is what made this
+                    # flaky twice. Counting prompts is the shell telling us it
+                    # is ready, which is the only thing worth waiting for.
+                    send_and_wait() {
+                        want=$(( $(grep -ac 'verk\$' "$SD/out.log" 2>/dev/null || echo 0) + 1 ))
+                        printf '%s\n' "$1" >&9
+                        for _ in $(seq 1 45); do
+                            sleep 1
+                            [ "$(grep -ac 'verk\$' "$SD/out.log" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
+                        done
+                        return 1
+                    }
+                    send_and_wait 'hello one two three'
+                    send_and_wait 'hello world | upper'
+                    send_and_wait 'hello redir > saved'
+                    send_and_wait 'upper < saved'
                     exec 9>&-
                     kill "$(cat "$SD/qpid")" 2>/dev/null
                     kill "$(cat "$SD/cpid")" 2>/dev/null
@@ -850,6 +848,12 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # simply capitalised everything.
                     check "the same program unpiped still writes to the console" \
                           "grep -aq 'argv\[1\] = \"one\"' $SD/out.log"
+                    # `> f` sent it to a file: the lower-case line never
+                    # reached the console.
+                    check "a > f keeps the output off the console" \
+                          "! grep -aq 'argv\[1\] = \"redir\"' $SD/out.log"
+                    check "a < f feeds a program what the file holds" \
+                          "grep -aq 'ARGV\[1\] = \"REDIR\"' $SD/out.log"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

@@ -41,6 +41,9 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_PIPE2   59        /* aarch64 Linux has no plain pipe; pipe2 does both */
 #define SYS_DUP     23
 #define SYS_DUP3    24        /* and no dup2 either; dup3 covers it */
+#define SYS_OPENAT  56        /* aarch64 has no open(); openat is the call  */
+#define O_WRONLY    1
+#define O_CREAT     0100
 
 #define EFAULT ((uint64_t)-14)
 
@@ -78,6 +81,7 @@ static uint64_t do_fork(void *frame) {
 static uint64_t archive_addr, archive_size;
 void syscall_set_archive(uint64_t addr, uint64_t size) {
     archive_addr = addr; archive_size = size;
+    file_set_archive(addr, size);
 }
 
 typedef struct { uint64_t x[30]; uint64_t lr, elr, spsr, sp_el0; } frame_t;
@@ -283,6 +287,22 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
         if (thread_current()->fd[b]) file_close(thread_current()->fd[b]);
         thread_current()->fd[b] = f;
         return b;
+    }
+    case SYS_OPENAT: {
+        /* openat(dirfd, path, flags, mode). There are no directories, so the
+         * dirfd is accepted and ignored rather than pretended about — a
+         * relative path has nowhere else to be relative to. */
+        long n = vm_user_strlen(b, 63);
+        if (n < 0) return EFAULT;
+        char name[64];
+        const char *p = (const char *)(uintptr_t)b;
+        for (long k = 0; k <= n; k++) name[k] = p[k];
+        file_t *f = 0;
+        int rc = file_open(name, (c & (O_WRONLY | O_CREAT)) != 0, &f);
+        if (rc < 0) return (uint64_t)(long)rc;
+        int fd = fd_alloc(f);
+        if (fd < 0) { file_close(f); return (uint64_t)-24; }
+        return (uint64_t)fd;
     }
     case SYS_PIPE2: {
         if (!vm_user_ok(a, 2 * sizeof(int), 1)) return EFAULT;
