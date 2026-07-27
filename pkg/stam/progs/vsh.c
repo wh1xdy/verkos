@@ -38,6 +38,35 @@ static long wait_(int *st)        { return syscall3(260, -1, (long)st, 0); }
 static long reap_(int *st)        { return syscall3(260, -1, (long)st, 1); }
 static void exit_(int c)          { syscall3(93, c, 0, 0); __builtin_unreachable(); }
 
+/* One line at a time, from whatever fd 0 turns out to be.
+ *
+ * The console hands over exactly one line per read, because the line discipline
+ * is in the kernel. A file hands over as much as fits in the buffer, so the
+ * shell has to do its own splitting — and once it does, the same loop reads a
+ * script and a person without knowing which it has. That is the point: a shell
+ * that can only be typed at is a shell no test can drive, and every attempt to
+ * drive this one over a serial line has been intermittent (D-062).
+ *
+ * Returns the line length, or 0 at end of input. */
+static char  inbuf[256];
+static int   inlen, inpos;
+
+static long get_line(char *out, int max) {
+    int n = 0;
+    for (;;) {
+        if (inpos >= inlen) {
+            long got = read_(inbuf, sizeof inbuf);
+            if (got <= 0) return n;          /* end of input, or an error */
+            inlen = (int)got; inpos = 0;
+        }
+        while (inpos < inlen) {
+            char c = inbuf[inpos++];
+            if (c == '\n') { out[n] = 0; return n + 1; }
+            if (n < max - 1) out[n++] = c;
+        }
+    }
+}
+
 static unsigned long slen(const char *s) { unsigned long n = 0; while (s[n]) n++; return n; }
 static void say(const char *s) { write_(s, slen(s)); }
 static void say_num(long v) {
@@ -106,10 +135,22 @@ static void run_or_die(char *path, unsigned long size, char **argv) {
     exit_(127);
 }
 
+static int scripted;
+
 int main_loop(void) {
     char line[128];
     char path[130];
     char *words[MAX_WORDS];
+
+    /* A script, if the initrd carries one. Opening it onto fd 0 means the loop
+     * below does not change at all — the shell does not know whether it is
+     * being typed at, which is what makes the script path worth having rather
+     * than a second code path that could drift from the first. */
+    scripted = 0;
+    {
+        long f = open_("/rc", 0);
+        if (f >= 0) { dup3_((int)f, 0); close_((int)f); scripted = 1; }
+    }
 
     say("\n  vsh — VerkOS shell, running on stam.\n");
     say("  Try: hello one two, forky, twice.  Also: help, pid, exit.\n\n");
@@ -125,9 +166,14 @@ int main_loop(void) {
             say("  [done "); say_num(done); say("]\n");
         }
         say("verk$ ");
-        long n = read_(line, sizeof line);
-        if (n <= 0) continue;
-        line[n - 1] = 0;                      /* drop the newline */
+        /* A script's lines are not echoed by a terminal, so the shell echoes
+         * them: a log that shows the answers and not the questions cannot be
+         * read, and this log exists to be read by a test. */
+        long n = get_line(line, sizeof line);
+        if (n == 0) { say("\n"); return 0; }  /* end of a script, or of input */
+        if (n == 1) continue;                 /* a blank line */
+
+        if (scripted) { say(line); say("\n"); }
 
         int nw = split(line, words, MAX_WORDS);
         if (nw < 0) { say("  vsh: too many words\n"); continue; }

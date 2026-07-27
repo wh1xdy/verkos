@@ -835,115 +835,66 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 check "stam finishes its own demonstration" \
                       "grep -aq 'milestone 4' $BL"
 
-                # --- the shell, one command per boot -------------------------
-                # OFF BY DEFAULT. These six are correct about the product — the
-                # features they describe were verified by hand and the checks
-                # pass nine runs in ten — but one run in ten fails, on whichever
-                # check is unlucky, for a reason not understood. D-038 says a
-                # check that is only sometimes right is worse than no check,
-                # because the next person learns to re-run it and a real
-                # regression then looks like the noise they have been taught to
-                # dismiss. So they are kept, and they do not run unless asked:
+                # --- the shell, from a script -------------------------------
+                # No fifo, no sleeps between commands, no interactive session to
+                # synchronise with. vsh opens /rc from the initrd onto its own
+                # standard input and runs it, so the machine does the whole
+                # sequence by itself and this only has to read what it printed.
                 #
-                #     VERK_SHELL_CHECKS=1 make test
-                #
-                # The fix is not a longer timeout — that was tried four times.
-                # It is to stop driving an interactive shell over a fifo at all:
-                # teach vsh to read commands from a file in the initrd, and the
-                # whole class disappears because there is no timing left.
-                # Driving an interactive shell over a fifo is only reliable in
-                # short sessions. A ten-command sequence in one boot was
-                # intermittent three separate ways — a closed fifo, waiting on
-                # output instead of readiness, counting lines instead of
-                # matches — and each looked like timing. One command per boot
-                # costs a few QEMU starts and removes the whole class: nothing
-                # accumulates, so nothing can drift.
-                #
-                # Every command is sent as one whole line, because feeding a
-                # character at a time is exactly the case that always worked
-                # (D-058).
-                shell_says() {
-                    local label="$1" want="$2"; shift 2
-                    local d="$T/sh-$(printf '%s' "$label" | tr -cd 'a-z' | cut -c1-12)"
-                    rm -rf "$d"; mkdir -p "$d"
-                    # -serial pipe:X uses X.in and X.out, so those are the names.
-                    mkfifo "$d/p.in" "$d/p.out"
+                # That replaces a harness which was intermittent five separate
+                # ways — a fifo closed between writes, waiting on output instead
+                # of readiness, counting lines instead of matches, an argument
+                # order that sent assertions as commands, and one cause never
+                # found (D-062). Every one of them looked like timing. The fix
+                # was to remove the timing.
+                if [ -f pkg/stam/progs/initrd-script.cpio ]; then
+                    SL=$T/script.log
                     ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
-                        -display none -serial "pipe:$d/p" -no-reboot \
+                        -display none -serial "file:$SL" -no-reboot \
                         -kernel pkg/stam/stam.img \
-                        -initrd pkg/stam/progs/initrd-shell.cpio \
-                        >/dev/null 2>&1 & echo $! > "$d/qpid" ) 2>/dev/null
-                    ( cat "$d/p.out" > "$d/log" & echo $! > "$d/cpid" )
-                    local i
-                    for i in $(seq 1 25); do
+                        -initrd pkg/stam/progs/initrd-script.cpio \
+                        </dev/null >/dev/null 2>&1 & echo $! > "$T/spid" )
+                    # The script ends with `exit`, so the shell says bye. Wait
+                    # for that rather than for a fixed time.
+                    for _ in $(seq 1 90); do
                         sleep 1
-                        grep -aq 'vsh —' "$d/log" 2>/dev/null && break
+                        grep -aq 'bye' "$SL" 2>/dev/null && break
                     done
-                    # Held open across every line: each `> fifo` would be an
-                    # open and a close, and the close is EOF on QEMU's input.
-                    exec 8> "$d/p.in"
-                    local cmd n
-                    for cmd in "$@"; do
-                        n=$(( $(grep -ao 'verk\$' "$d/log" | wc -l) + 1 ))
-                        printf '%s\n' "$cmd" >&8
-                        # Waiting for the prompt, not for output: a command
-                        # that failed is otherwise indistinguishable from one
-                        # that is slow, and the next line goes in early.
-                        # Occurrences, not lines — output shares a line with
-                        # the prompt.
-                        # Generous, because this waits on readiness and the
-                        # machine is running other QEMUs at the same time. A
-                        # three-stage chain is three forks, three execs and two
-                        # pipes, and it was seen to miss a forty-second window
-                        # once in eleven runs. Waiting longer is the wrong fix
-                        # for a test that is watching the wrong thing, and the
-                        # right one for a test that is watching readiness.
-                        for i in $(seq 1 90); do
-                            sleep 1
-                            [ "$(grep -ao 'verk\$' "$d/log" | wc -l)" -ge "$n" ] && break
-                        done
-                    done
-                    exec 8>&-
-                    kill "$(cat "$d/qpid")" 2>/dev/null
-                    kill "$(cat "$d/cpid")" 2>/dev/null
-                    wait "$(cat "$d/qpid")" 2>/dev/null
-                    if grep -aq "$want" "$d/log" 2>/dev/null; then ok "$label"
-                    else
-                        bad "$label"
-                        [ -n "${VERK_SHELL_DEBUG:-}" ] && {
-                            printf '        log %s bytes, tail:\n' "$(wc -c < "$d/log")"
-                            tail -6 "$d/log" | sed 's/^/        /'
-                        }
-                    fi
-                }
+                    kill "$(cat "$T/spid")" 2>/dev/null
+                    wait "$(cat "$T/spid")" 2>/dev/null
 
-                if [ -n "${VERK_SHELL_CHECKS:-}" ]; then
-                shell_says "a line pasted at stam's shell arrives whole" \
-                           'argv\[3\] = "three"' 'hello one two three'
-                # `upper` reads standard input and writes it back in capitals,
-                # and knows nothing about where either is attached — so
-                # capitals are the descriptor having moved, not the program
-                # behaving differently.
-                shell_says "a | b sends one program's output to the other" \
-                           'ARGV\[1\] = "WORLD"' 'hello world | upper'
-                # Three segments, because a chain is the same calls in a loop
-                # and only a third stage shows the loop is right.
-                shell_says "a | b | c chains all three" \
-                           'ARGV\[1\] = "CHAIN"' 'hello chain | upper | upper'
-                # Written to a file and read back by a different program: `> f`
-                # alone would pass on a shell that discarded the output.
-                shell_says "a > f then a < f carries the bytes through a file" \
-                           'ARGV\[1\] = "REDIR"' 'hello redir > saved' 'upper < saved'
-                # >> must keep what > wrote.
-                shell_says "a >> f appends instead of truncating" \
-                           'ARGV\[1\] = "SECOND"' 'hello first > two' 'hello second >> two' 'upper < two'
-                # & returns the prompt without waiting, and the job is
-                # collected at a later prompt — one nobody collects is a zombie
-                # holding a process slot.
-                shell_says "a & runs in the background and is collected later" \
-                           'done ' 'hello bg &' 'pid'
-                else
-                    printf '  \033[33mskip\033[0m  the shell checks (set VERK_SHELL_CHECKS=1; see the comment)\n'
+                    check "the shell runs a script and reaches its end" \
+                          "grep -aq 'bye' $SL"
+                    check "a whole line of arguments reaches the program" \
+                          "grep -aq 'argv\[3\] = \"three\"' $SL"
+                    # `upper` reads standard input and writes it back in
+                    # capitals, knowing nothing about where either is attached.
+                    # Capitals are the descriptor having moved, not the program
+                    # behaving differently — which is why the unpiped case is
+                    # checked too.
+                    check "a | b sends one program's output to the other" \
+                          "grep -aq 'ARGV\[1\] = \"WORLD\"' $SL"
+                    check "the same program unpiped still writes to the console" \
+                          "grep -aq 'argv\[1\] = \"one\"' $SL"
+                    # Three segments, because a chain is the same calls in a
+                    # loop and only a third stage shows the loop is right.
+                    check "a | b | c chains all three" \
+                          "grep -aq 'ARGV\[1\] = \"CHAIN\"' $SL"
+                    # Written to a file and read back by a different program.
+                    # `> f` alone would pass on a shell that discarded output.
+                    check "a > f keeps the output off the console" \
+                          "! grep -aq 'argv\[1\] = \"redir\"' $SL"
+                    check "a < f feeds a program what the file holds" \
+                          "grep -aq 'ARGV\[1\] = \"REDIR\"' $SL"
+                    # >> must keep what > wrote: reading the file back shows
+                    # both runs, or append silently truncated.
+                    check "a >> f appends instead of truncating" \
+                          "grep -aq 'ARGV\[1\] = \"FIRST\"' $SL && grep -aq 'ARGV\[1\] = \"SECOND\"' $SL"
+                    # & returned the prompt without waiting, and the job was
+                    # collected at a later one — a background job nobody
+                    # collects is a zombie holding a process slot.
+                    check "a & runs in the background and is collected later" \
+                          "grep -aq 'done ' $SL"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

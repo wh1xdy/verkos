@@ -2330,3 +2330,50 @@ the right one.
 collected at a later one. Each was run and watched; none is guarded.
 
 185 → 186 checks when the shell checks are on, 180 when they are not.
+
+## D-063 — A shell that can be run, not only typed at
+
+`vsh` opens `/rc` from the initrd onto its own standard input when the archive
+carries one, and runs it. The loop below that does not change at all — the
+shell does not know whether it is being typed at, which is the point. A second
+code path for scripts would drift from the interactive one, and then a test
+would be exercising something nobody uses.
+
+It needed one real change: **the shell had to learn to split lines itself.**
+The console hands over exactly one line per read, because the line discipline
+is in the kernel (D-049); a file hands over as much as fits in the buffer. Once
+`vsh` buffers and splits, the same loop reads a person and a script without
+knowing which it has. Reading 0 bytes is end of input, and the shell exits —
+which is what makes the script terminate rather than spin.
+
+Scripted lines are echoed, because a terminal is what normally echoes them and
+a log that shows the answers but not the questions cannot be read.
+
+### What this was actually for
+
+The shell checks were switched off in D-062 because the harness that drove them
+failed one run in ten. **Five separate causes had been found and fixed in it:**
+a fifo closed between writes, waiting on output instead of readiness, counting
+lines instead of matches, an argument order that sent each assertion to the
+shell as a command — and a fifth never identified. Every one of them presented
+as timing, and the first instinct each time was to wait longer. It was wrong
+every time.
+
+`make test` now boots one machine with `initrd-script.cpio`, waits for the
+shell to say `bye`, and reads the log. No fifo, no input, no synchronisation,
+because there is nothing left to synchronise with. **Twelve consecutive runs at
+189/0**, against nine in ten before.
+
+The nine checks that were switched off are on again, and three of them cover
+things that had only ever been verified by hand: three-stage chains, `>>`
+keeping what `>` wrote, and `&` returning the prompt with the job collected at
+a later one.
+
+One thing the script exposed that a person never would: **`hello bg &` followed
+immediately by `exit` never runs the background job at all.** The shell reads
+its next line from memory, so it never blocks, so the child is never scheduled
+before the shell leaves. Correct behaviour, and invisible when a human types at
+a prompt because typing is itself a delay. The script has two ordinary commands
+after the background one, which is what a person's typing would have been.
+
+186 → 189 checks, and the six that needed asking for now run by default.

@@ -147,6 +147,24 @@ progs/vsh.elf: progs/vsh.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# A third archive: the shell plus an /rc it runs and exits from. This is what
+# makes the shell testable at all — no fifo, no sleeps, no interactive session
+# to synchronise with. The commands are in progs/rc, in the repository, where
+# they can be read.
+progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
+                          progs/forky.elf progs/twice.elf progs/badptr.elf progs/rc
+	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
+	    { echo "vcpio did not build"; exit 1; }
+	@rm -rf progs/scriptroot && mkdir -p progs/scriptroot
+	@cp progs/vsh.elf progs/scriptroot/init
+	@cp progs/hello.elf progs/scriptroot/hello
+	@cp progs/upper.elf progs/scriptroot/upper
+	@cp progs/forky.elf progs/scriptroot/forky
+	@cp progs/twice.elf progs/scriptroot/twice
+	@cp progs/badptr.elf progs/scriptroot/badptr
+	@cp progs/rc progs/scriptroot/rc
+	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
+
 # A second archive whose /init is the shell. Kept separate so the automatic
 # demonstration still ends by itself: a shell waits for a person, and a test
 # that waits for a person never finishes.
@@ -174,7 +192,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
        progs/badptr.elf progs/upper.elf \
-       progs/initrd.cpio progs/initrd-shell.cpio
+       progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio
 
 run-prog: stam.img progs/hello.elf
 	qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nographic \
