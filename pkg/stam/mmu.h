@@ -22,6 +22,7 @@ int      mmu_init(uint64_t ram_base, uint64_t ram_size);
  * from it. Does not return: it calls kmain_high. */
 void     mmu_go_high(void);
 uint64_t mmu_user_table(void);
+uint64_t mmu_identity_table(void);   /* the low map, for a starting processor */
 void     mmu_set_user_table(uint64_t table);
 void     mmu_drop_low_half(void);
 void     mmu_note_high(void);
@@ -38,5 +39,9 @@ uint64_t mmu_current_user_table_kva(void);
 void     mmu_switch_user(uint64_t l1_kva);
 void     mmu_set_current_user_table_kva(uint64_t l1_kva);
 uint64_t mmu_table(void);
+/* Push a range out of this CPU's data cache into memory. A processor that is
+ * still starting has its caches off and reads RAM directly, so anything
+ * prepared for it has to be there and not here. */
+void     mmu_clean(void *addr, uint64_t size);
 void     exceptions_install(void);
 #endif

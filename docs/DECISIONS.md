@@ -3044,3 +3044,91 @@ read from a file. It was run, and the log says what happened —
 — but nothing guards it, and the honest thing is to say which half is which.
 
 224 → 226 checks.
+
+## D-076 — a processor that accepted the start and never arrived
+
+**2026-07-28.** `stam` now starts the other processors. On QEMU's `virt` with
+`-smp 4`, all four come up:
+
+```
+  cpus      4
+  cpu 1      online, mpidr 0x1
+  cpu 2      online, mpidr 0x2
+  cpu 3      online, mpidr 0x3
+  cpus      4 online
+```
+
+The mechanism is PSCI `CPU_ON`, with the conduit — `hvc` or `smc` — read from
+`/psci` in the device tree rather than assumed. Each core is named by the
+affinity value in its `/cpus/cpu@N` `reg` property, not by a counter, because
+`reg` is what `CPU_ON` takes and a counter only happens to match it.
+
+What the secondary needs and cannot work out for itself is left in one
+structure: a stack, `mair`, `tcr`, `ttbr1`, `sctlr`, and where to go once
+virtual memory is on. Every value is **read off the running primary** rather
+than recomputed. Two code paths that must agree about page tables are a defect
+generator, and this way there is only one.
+
+### The report that did not depend on what it reported
+
+The first version waited for nothing. `CPU_ON` returned 0, so it printed the
+core as started. That is a return value meaning *the request was accepted*, and
+printing "online" from it would have said online whether or not any processor
+was executing — the defect this project keeps finding. So the counter is
+incremented by the secondary itself, in C, after it has configured its own MMU;
+the primary waits to see it rise and otherwise says so:
+
+```
+  cpus      cpu 1 accepted the start and never arrived
+```
+
+Which is what it said, for the whole first afternoon. Twice, for two different
+reasons.
+
+### First: the address of a symbol, taken from C — for the third time
+
+```c
+psci_call(PSCI_CPU_ON_64, aff, kva_to_phys((void *)secondary_entry), ...);
+```
+
+`&secondary_entry` in this kernel is routed through the GOT, which holds the
+address the image had when it was linked and which nothing relocates. D-037
+found this as a thread starting at `0x193c`; D-039 found it again in the first
+user program. Here it was PSCI faithfully starting a processor at an address
+that no longer meant anything. The rule is in CLAUDE.md, and I broke it anyway,
+so the fix is the two-instruction `adrp`/`add` accessor the rule prescribes.
+
+That was necessary and it was not sufficient. The core still never arrived.
+
+### Second: the ground it was standing on
+
+`secondary_entry` runs with the MMU off and a program counter in the low half.
+It installs the tables it was given and turns the MMU on. It was given the
+primary's *current* `ttbr0` — which, since `mmu_drop_low_half()`, is `l1_user`:
+an empty table. So the instruction after `msr sctlr_el1` had nothing to
+translate it, and the vector table was unreachable for the same reason, and the
+core died without a word.
+
+It now gets `mmu_identity_table()`, the low map that has been sitting unused
+since the kernel moved high, and `secondary_main` drops it as its first act.
+
+### How it was actually found
+
+Not by reasoning about it. By writing a character straight to the UART's
+physical address as the first instruction of `secondary_entry`, with the MMU
+still off, and counting how many appeared. One — so the entry point was reached
+and the core died configuring itself, which is a different question from the one
+I had been asking. Before that byte, "never arrived" covered both.
+
+This is the same move as D-071. When a thing does not work and there are four
+plausible explanations, the cheapest next step is almost never to test one of
+them; it is to make the program say where it got to.
+
+### Where it stops
+
+Every secondary parks in `wfi`. It is online, it is idle, and it is not
+pretending to share the work. The scheduler's `current` is one variable for the
+whole machine and the kernel's locking is `irq_save`/`irq_restore` — masking
+interrupts, which locks nothing at all against another processor (D-057 said so
+when it was written). Letting a second core into the run queue means per-CPU
+state and real spinlocks first. Parking is the honest place to stop.

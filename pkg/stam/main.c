@@ -16,6 +16,7 @@
 #include "vm.h"
 #include "elf.h"
 #include "cpio.h"
+#include "smp.h"
 
 extern void syscall_set_archive(uint64_t addr, uint64_t size);
 extern void syscall_open_stdio(void);
@@ -209,7 +210,11 @@ void kmain_high(void) {
          * stage, and it looks exactly like a timer that works. */
         uint64_t target = timer_hz();
         while (timer_ticks() < target) __asm__ volatile("wfi");
-        kprintf("  ticking   %llu interrupts taken — the kernel can preempt\n",
+        {
+        int others = smp_start_others(machine_tree());
+        if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
+    }
+    kprintf("  ticking   %llu interrupts taken — the kernel can preempt\n",
                 (unsigned long long)timer_ticks());
     }
 

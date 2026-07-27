@@ -214,6 +214,8 @@ static void dcache_clean_to_memory(void *addr, uint64_t size) {
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+void mmu_clean(void *addr, uint64_t size) { dcache_clean_to_memory(addr, size); }
+
 static uint64_t block(uint64_t pa, unsigned attr, int executable) {
     uint64_t d = (pa & ~(GIB - 1)) | DESC_AF | (attr << 2) | DESC_BLOCK;
     if (attr == ATTR_NORMAL) d |= DESC_SH_INNER;
@@ -364,6 +366,18 @@ void mmu_drop_low_half(void) {
         "isb\n"
         :: "r"(kva_to_phys(l1_user)) : "memory");
 }
+
+/* The low map, still intact after mmu_drop_low_half stopped using it.
+ *
+ * A processor that PSCI starts begins with the MMU off and a program counter in
+ * the low half, so the table it enables the MMU with has to translate the low
+ * half or the very next instruction fetch faults. TTBR0 by then holds l1_user,
+ * which is empty: that is a second core that reaches its entry point and dies
+ * one instruction into virtual memory, with no fault reported because the
+ * vector table is unreachable for the same reason. It is only for the four
+ * instructions between enabling the MMU and branching high — secondary_main
+ * drops it immediately. */
+uint64_t mmu_identity_table(void) { return kva_to_phys(l1); }
 
 uint64_t mmu_user_table(void)  { return kva_to_phys(l1_user); }
 uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }

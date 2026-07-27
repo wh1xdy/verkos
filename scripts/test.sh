@@ -1044,6 +1044,38 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 check "stam finishes its own demonstration" \
                       "grep -aq 'milestone 4' $BL"
 
+                # --- the second processor -----------------------------------
+                # Its own run, and a short one: this waits for the CPU report
+                # and nothing further, so a machine where PSCI behaves
+                # differently fails one check with a clear name instead of
+                # taking every stam check down with it.
+                #
+                # "2 online" is printed from a counter the second processor
+                # increments itself, after it has configured its own MMU and
+                # reached C. A CPU_ON that returns success prints nothing here:
+                # for a whole afternoon that was exactly the difference between
+                # a call that was accepted and a processor that was running
+                # (D-076).
+                SM=$T/stam-smp.log
+                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                    -smp 2 -display none -serial "file:$SM" -no-reboot \
+                    -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
+                    </dev/null >/dev/null 2>&1 & echo $! > "$T/qpid" )
+                for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                    sleep 1
+                    grep -aq 'cpus      2 online' "$SM" 2>/dev/null && break
+                    grep -aq 'never arrived' "$SM" 2>/dev/null && break
+                done
+                kill "$(cat "$T/qpid")" 2>/dev/null
+                wait "$(cat "$T/qpid")" 2>/dev/null
+
+                check "stam starts the second processor and it arrives" \
+                      "grep -aq 'cpus      2 online' $SM"
+                # Written by the secondary from its own MPIDR, so it also says
+                # the core knows which one it is.
+                check "the second processor reports its own identity" \
+                      "grep -aq 'cpu 1      online, mpidr' $SM"
+
                 # --- the shell, from a script -------------------------------
                 # No fifo, no sleeps between commands, no interactive session to
                 # synchronise with. vsh opens /rc from the initrd onto its own

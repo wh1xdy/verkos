@@ -39,7 +39,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o syscall.o userprog.o main.o
+OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -80,8 +80,8 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c syscall.c main.c exceptions.c
-EFI_ASM    = vectors.S switch.S userprog.S
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c syscall.c main.c exceptions.c
+EFI_ASM    = vectors.S switch.S userprog.S smpentry.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
 	@for a in $(EFI_ASM); do $(CC) $(EFI_CFLAGS) -c $$a -o efi-$${a%.S}.o || exit 1; done

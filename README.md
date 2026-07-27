@@ -162,18 +162,25 @@ What it does today, each verified by running it:
 - An interrupt-driven console with a line discipline, and a machine that actually
   idles: sitting at the prompt for ten seconds, QEMU consumed no measurable CPU
   (D-050).
+- **The other processors start.** PSCI `CPU_ON`, with the conduit read from the
+  device tree and each core named by its own `reg` affinity value; with `-smp 4`
+  all four come up. What the secondary cannot work out for itself is read off
+  the running primary rather than recomputed, so there is one description of the
+  page tables and not two (D-076).
 
-Named rather than hidden: **no SMP.** Everything shared with an interrupt
-handler is protected by masking that interrupt, which is sufficient on one CPU
-and not on two — the sections are marked, so the day there is a second core the
-work is finding them rather than finding the races (D-057). No filesystem beyond the initrd. No FP/SIMD
+Named rather than hidden: the secondary processors **park**. They are online and
+idle, and they take no work: `current` is one variable for the whole machine, and
+everything shared with an interrupt handler is protected by masking that
+interrupt — which is sufficient on one CPU and locks nothing at all against
+another (D-057). The sections are marked, so making the scheduler per-CPU is
+finding them rather than finding the races. No filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: eight checks start the kernel under QEMU and read what
+`make test` now boots it: nine checks start the kernel under QEMU and read what
 it printed — including one that pastes a whole line at the shell, because
 feeding one character at a time is exactly the case that always worked (D-058) — the scheduler's own verdict, a program's report of its arguments,
 the pages a finished process gave back. Each was validated by breaking the
