@@ -39,6 +39,7 @@
 #define D_UXN       (1ul << 54)     /* EL0 may not execute this             */
 #define ATTR_NORMAL 1ul
 
+#define D_AP_RO     (1ul << 7)      /* AP[2]: read-only for everyone         */
 #define ADDR_MASK   0x0000fffffffff000ul
 
 /* A descriptor holds a physical address; the kernel has to look at the table
@@ -75,6 +76,81 @@ static uint64_t *descend(uint64_t *tbl, unsigned idx, uint64_t child_size) {
 /* `page` is a kernel pointer, as returned by alloc_page; the descriptor needs
  * the physical address behind it. Converting here rather than at every call
  * site means one place to be wrong. */
+/* Install a descriptor that already exists, rather than building one from a
+ * page and a permission. vm_copy_space needs this: the child's entry must be
+ * the parent's entry, attributes and all, or a copy-on-write page could come
+ * back executable when the original was not. */
+int map_user_page_raw(uint64_t va, uint64_t desc) {
+    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_current_user_table_kva();
+    if (!l1) return -1;
+    uint64_t *l2 = descend(l1, (unsigned)((va >> 30) & 511), 1ul << 21);
+    if (!l2) return -1;
+    uint64_t *l3 = descend(l2, (unsigned)((va >> 21) & 511), 4096);
+    if (!l3) return -1;
+    l3[(va >> 12) & 511] = desc;
+    return 0;
+}
+
+/* A write to a shared page. If nobody else holds it, the sharing is over and
+ * the permission simply comes back; otherwise this space gets a private copy.
+ * Returns 0 if it handled the fault, -1 if this was not a copy-on-write page
+ * at all — in which case the program really did do something it may not, and
+ * telling those two apart is the whole job of this function. */
+int vm_cow_fault(uint64_t va) {
+    uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_current_user_table_kva();
+    if (!l1) return -1;
+    uint64_t d1 = l1[(va >> 30) & 511];
+    if ((d1 & 0x3ul) != D_TABLE) return -1;
+    uint64_t *l2 = table_at(d1);
+    uint64_t d2 = l2[(va >> 21) & 511];
+    if ((d2 & 0x3ul) != D_TABLE) return -1;
+    uint64_t *l3 = table_at(d2);
+    uint64_t *slot = &l3[(va >> 12) & 511];
+    uint64_t d = *slot;
+
+    if ((d & 0x3ul) != D_PAGE) return -1;      /* nothing mapped: a real fault */
+    if (!(d & D_AP_EL0)) return -1;            /* the kernel's, not theirs     */
+    if (!(d & D_AP_RO)) return -1;             /* already writable: not us     */
+
+    uint64_t pa = d & ADDR_MASK;
+    if (page_count(pa) > 1) {
+        unsigned char *fresh = alloc_page();
+        if (!fresh) return -1;
+        const unsigned char *from = (const unsigned char *)(uintptr_t)phys_to_kva(pa);
+        for (unsigned b = 0; b < PAGE_SIZE; b++) fresh[b] = from[b];
+        /* The copy was made with ordinary stores, which land in the data
+         * cache. If the page holds instructions — and a copy-on-write page
+         * may, because fork shares everything including the text — the
+         * instruction cache has no idea. The CPU then fetches whatever was at
+         * that physical address before, and executes it: an undefined
+         * instruction at an address that looks perfectly valid.
+         *
+         * Clean to the point of unification and invalidate I-cache. This is
+         * the same class of mistake as the MMU-off sequence in D-034 — a cache
+         * holding the newest copy of something the other side of the machine
+         * is reading. */
+        uint64_t ctr;
+        __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+        uint64_t dline = 4ul << ((ctr >> 16) & 0xf);
+        uint64_t iline = 4ul << (ctr & 0xf);
+        uint64_t base  = (uint64_t)(uintptr_t)fresh;
+        for (uint64_t p = base; p < base + PAGE_SIZE; p += dline)
+            __asm__ volatile("dc cvau, %0" :: "r"(p) : "memory");
+        __asm__ volatile("dsb ish" ::: "memory");
+        for (uint64_t p = base; p < base + PAGE_SIZE; p += iline)
+            __asm__ volatile("ic ivau, %0" :: "r"(p) : "memory");
+        __asm__ volatile("dsb ish\n isb" ::: "memory");
+
+        page_unref(pa);
+        *slot = (kva_to_phys(fresh) & ADDR_MASK) | (d & ~ADDR_MASK & ~D_AP_RO);
+    } else {
+        *slot = d & ~D_AP_RO;
+    }
+    __asm__ volatile("dsb ishst\n tlbi vaae1is, %0\n dsb ish\n isb"
+                     :: "r"(va >> 12) : "memory");
+    return 0;
+}
+
 int map_user_page(uint64_t va, uint64_t page, int executable) {
     uint64_t pa = kva_to_phys((const void *)(uintptr_t)page);
     /* Into the process's own table, not the kernel's. Before the kernel moves
@@ -125,8 +201,6 @@ int map_user_page(uint64_t va, uint64_t page, int executable) {
  * and it is checked anyway so that the day something does, this does not have
  * to be remembered.
  */
-#define D_AP_RO (1ul << 7)
-
 static uint64_t *walk_to_leaf(uint64_t va, uint64_t *level_size) {
     uint64_t *l1 = (uint64_t *)(uintptr_t)mmu_current_user_table_kva();
     if (!l1) return 0;
@@ -209,6 +283,16 @@ uint64_t vm_new_space(void) {
  * memory, not through the user addresses, so this does not depend on which
  * address space is currently installed.
  */
+/* Share a page between two spaces instead of copying it, and take the write
+ * permission away from both. Neither side can tell — until one writes, and the
+ * fault handler gives it a private copy. */
+static uint64_t cow_share(uint64_t *slot) {
+    uint64_t d = *slot;
+    *slot = d | D_AP_RO;
+    page_ref(d & ADDR_MASK);
+    return *slot;
+}
+
 uint64_t vm_copy_space(uint64_t src_l1_kva) {
     uint64_t *src = (uint64_t *)(uintptr_t)src_l1_kva;
     uint64_t dst_l1 = vm_new_space();
@@ -227,18 +311,21 @@ uint64_t vm_copy_space(uint64_t src_l1_kva) {
                 uint64_t d = l3[i3];
                 if ((d & 0x3ul) != D_PAGE) continue;
                 uint64_t va = ((uint64_t)i1 << 30) | ((uint64_t)i2 << 21) | ((uint64_t)i3 << 12);
-                unsigned char *from = (unsigned char *)(uintptr_t)phys_to_kva(d & ADDR_MASK);
-                unsigned char *to = alloc_page();
-                if (!to) { mmu_set_current_user_table_kva(saved); return 0; }
-                for (unsigned b = 0; b < PAGE_SIZE; b++) to[b] = from[b];
-                int exec = !(d & D_UXN);
-                if (map_user_page(va, (uint64_t)(uintptr_t)to, exec)) {
+                /* The parent's entry loses write permission too, so the next
+                 * write by *either* side faults. Copying only for the child
+                 * would let the parent scribble on memory the child believes
+                 * is its own. */
+                uint64_t shared = cow_share(&l3[i3]);
+                if (map_user_page_raw(va, shared) != 0) {
                     mmu_set_current_user_table_kva(saved);
                     return 0;
                 }
             }
         }
     }
+    /* The parent is running with these tables installed, and half its pages
+     * just became read-only. Nothing has invalidated them yet. */
+    __asm__ volatile("dsb ishst\n tlbi vmalle1is\n dsb ish\n isb" ::: "memory");
     mmu_set_current_user_table_kva(saved);
     return dst_l1;
 }
@@ -261,8 +348,15 @@ void vm_free_space(uint64_t l1_kva) {
             if ((l2[i2] & 0x3ul) != D_TABLE) continue;
             uint64_t *l3 = table_at(l2[i2]);
             for (unsigned i3 = 0; i3 < 512; i3++)
-                if ((l3[i3] & 0x3ul) == D_PAGE)
-                    free_page((void *)(uintptr_t)phys_to_kva(l3[i3] & ADDR_MASK));
+                if ((l3[i3] & 0x3ul) == D_PAGE) {
+                    /* Shared pages belong to whoever is still holding them.
+                     * Freeing one here would hand a live page back to the
+                     * allocator while another process is reading it — the
+                     * quietest possible corruption. */
+                    uint64_t pa = l3[i3] & ADDR_MASK;
+                    if (page_unref(pa) == 0)
+                        free_page((void *)(uintptr_t)phys_to_kva(pa));
+                }
             free_page(l3);
         }
         free_page(l2);

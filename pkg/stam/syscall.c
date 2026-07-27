@@ -371,6 +371,21 @@ void handle_user_sync(regs_t *r) {
         r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2], r);
         return;
     }
+    /* A write to a page shared by copy-on-write is not a program doing
+     * something wrong, it is a program doing the ordinary thing to memory the
+     * kernel arranged to share behind its back. Telling that apart from a real
+     * permission fault is the whole reason the handler looks at the tables
+     * rather than at the fault status alone: the status says "you may not
+     * write here" in both cases.
+     *
+     * EC 0x24 is a data abort from EL0; ESR bit 6 (WnR) says it was a write.
+     * Anything else falls through and the program is killed, as before. */
+    if ((esr >> 26) == 0x24 && (esr & (1u << 6))) {
+        uint64_t far;
+        __asm__ volatile("mrs %0, far_el1" : "=r"(far));
+        if (vm_cow_fault(far) == 0) return;
+    }
+
     /* A program that faults is killed; the machine is not. This is the point
      * of the whole address-space exercise — a program cannot take the system
      * down by being wrong, only itself. */

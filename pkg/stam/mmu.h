@@ -26,6 +26,13 @@ void     mmu_set_user_table(uint64_t table);
 void     mmu_drop_low_half(void);
 void     mmu_note_high(void);
 uint64_t kva_to_phys(const void *p);
+/* How many address spaces hold this physical page. One means the holder may
+ * write to it; more means the next write has to make a private copy. The
+ * counts live in a table sized at pmm_init, because a page's identity is its
+ * frame number and nothing else is small enough to index by. */
+void     page_ref(uint64_t pa);
+int      page_unref(uint64_t pa);     /* returns the count after decrementing */
+int      page_count(uint64_t pa);
 uint64_t mmu_user_table_kva(void);
 uint64_t mmu_current_user_table_kva(void);
 void     mmu_switch_user(uint64_t l1_kva);

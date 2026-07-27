@@ -24,6 +24,7 @@ extern char _kernel_end[] __attribute__((visibility("hidden")));
 /* A bump allocator. It cannot free, which is exactly right for page tables
  * that live as long as the kernel; a real allocator arrives with userspace. */
 static uint64_t free_next, free_top;
+static uint64_t pmm_start;      /* where the allocator began, before any page */
 static unsigned pages_taken;
 
 /* Before the move, a kernel pointer *is* a physical address. After it, every
@@ -55,6 +56,7 @@ void pmm_init(uint64_t ram_base, uint64_t ram_size, uint64_t avoid, uint64_t avo
         if (avoid + avoid_size > start) start = avoid + avoid_size;
     free_next = (start + 0xfff) & ~0xffful;
     free_top  = ram_base + ram_size;
+    pmm_start = free_next;
 }
 
 /* Pages that have been given back, threaded through themselves: the first
@@ -63,6 +65,70 @@ void pmm_init(uint64_t ram_base, uint64_t ram_size, uint64_t avoid, uint64_t avo
  * doing the bookkeeping would itself need pages. */
 static uint64_t free_list;
 static unsigned pages_returned;
+
+/* One byte per page of RAM: 128 KiB for a 512 MiB machine, taken from the
+ * allocator itself once its bounds are known. A page nobody has shared has a
+ * count of zero rather than one — the common case costs nothing to maintain,
+ * and only vm_copy_space ever raises it. */
+static unsigned char *refs;
+static uint64_t refs_base, refs_pages;
+
+void pmm_init_refs(void) {
+    if (refs) return;
+    /* From where the allocator began, not from where it has reached: a page
+     * freed early and handed out again later must still have an entry, or a
+     * shared page would report a count of one and copy-on-write would hand
+     * both processes the same memory. */
+    refs_base  = pmm_start;
+    refs_pages = (free_top - pmm_start) / PAGE_SIZE;
+    uint64_t need = (refs_pages + PAGE_SIZE - 1) / PAGE_SIZE;
+    refs = alloc_pages((unsigned)need);
+    if (!refs) { refs_pages = 0; return; }
+    for (uint64_t i = 0; i < refs_pages; i++) refs[i] = 0;
+}
+
+static long refs_index(uint64_t pa) {
+    if (!refs || pa < refs_base) return -1;
+    uint64_t i = (pa - refs_base) / PAGE_SIZE;
+    return i < refs_pages ? (long)i : -1;
+}
+
+void page_ref(uint64_t pa) {
+    long i = refs_index(pa);
+    if (i < 0) return;
+    uint64_t f = irq_save();
+    if (refs[i] < 255) refs[i]++;
+    irq_restore(f);
+}
+
+/* Holders remaining *after* letting go — zero meaning the page is nobody's and
+ * may be freed.
+ *
+ * The first version returned the count from before the decrement, which reads
+ * naturally and is exactly wrong: two processes sharing a page gave 1, the
+ * first to exit freed it, and the survivor carried on executing from memory
+ * the allocator had already handed to somebody else. It surfaced as an
+ * undefined instruction at a code address that had been running fine a moment
+ * earlier — the quietest possible corruption, and only reachable once fork
+ * stopped copying.
+ *
+ * refs[i] holds (holders - 1), so an untracked page is one holder and freeing
+ * it is correct. */
+int page_unref(uint64_t pa) {
+    long i = refs_index(pa);
+    if (i < 0) return 0;
+    uint64_t f = irq_save();
+    int left = 0;
+    if (refs[i] > 0) { refs[i]--; left = refs[i] + 1; }
+    irq_restore(f);
+    return left;
+}
+
+int page_count(uint64_t pa) {
+    long i = refs_index(pa);
+    if (i < 0) return 1;
+    return refs[i] ? refs[i] + 1 : 1;
+}
 
 void free_page(void *p) {
     if (!p) return;

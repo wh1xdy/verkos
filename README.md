@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-063.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-064.
 
 ---
 
@@ -136,7 +136,9 @@ What it does today, each verified by running it:
 - An **ELF loader** fed from a **cpio initrd**, both formats everyone else
   speaks, both readers ours (D-040, D-047).
 - `fork`, `exec`, `wait4`, zombie reaping and pages that come back — a process
-  that exits returns every page of its address space (D-046, D-048).
+  that exits returns every page of its address space (D-046, D-048). **fork is
+  copy-on-write**: pages are shared read-only and copied on the first write by
+  either side, counted one byte per page of RAM (D-064).
 - **File descriptors, and a pipe.** A descriptor names a refcounted object, the
   table belongs to the process, and `fork` duplicates it — so `a | b` is two
   programs that each believe they are talking to a terminal. End of file is the
@@ -154,8 +156,7 @@ What it does today, each verified by running it:
 Named rather than hidden: **no SMP.** Everything shared with an interrupt
 handler is protected by masking that interrupt, which is sufficient on one CPU
 and not on two — the sections are marked, so the day there is a second core the
-work is finding them rather than finding the races (D-057). No copy-on-write;
-`fork` copies outright. No filesystem beyond the initrd. No FP/SIMD
+work is finding them rather than finding the races (D-057). No filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for

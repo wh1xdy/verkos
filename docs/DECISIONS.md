@@ -2377,3 +2377,53 @@ a prompt because typing is itself a delay. The script has two ordinary commands
 after the background one, which is what a person's typing would have been.
 
 186 → 189 checks, and the six that needed asking for now run by default.
+
+## D-064 — Copy-on-write, and a reference count that was off by one owner
+
+`fork` copied every page of the address space outright. D-046 said that was the
+right thing to do first and the wrong thing to do forever, and named what
+copy-on-write would need: write faults, a reference count per page, and a
+handler that can tell "not allowed" from "not yet".
+
+All three are here. `vm_copy_space` maps the parent's pages into the child and
+takes the write permission away from **both** — copying only for the child
+would let the parent scribble on memory the child believes is its own. The
+counts live in one byte per page of RAM, 128 KiB for a 512 MiB machine, taken
+from the allocator once its bounds are known. A page nobody has shared has a
+count of zero rather than one, so the common case costs nothing to maintain.
+
+The fault handler is the part that had to be careful. A write to a shared page
+is not a program doing something wrong; it is a program doing the ordinary
+thing to memory the kernel arranged to share behind its back. The fault status
+says "you may not write here" in both cases, so the handler looks at the tables
+instead: mapped, EL0-accessible, and read-only means copy-on-write. Anything
+else falls through and the program is killed, exactly as before.
+
+`fork` now returns 34 pages to the free list where it returned 50.
+
+### The bug, which is the entry
+
+`forky` — the program from D-043 that records its process id, spins long enough
+to be preempted, and checks the value survived — printed the right answers and
+*then* died with an undefined instruction at a code address that had been
+running a moment earlier.
+
+`page_unref` returned the count from **before** the decrement. It reads
+naturally and it is exactly wrong: two processes sharing a page gave 1, the
+first to exit freed it, the allocator handed it to somebody else, and the
+survivor carried on executing whatever was written there next.
+
+It is the quietest possible corruption and it is only reachable once fork stops
+copying — which is to say, the feature and its worst bug arrived together. What
+made it findable was that the failure was *loud and immediate*: an undefined
+instruction, not a wrong answer. The counts are now defined as holders
+remaining after letting go, with zero meaning the page is nobody's.
+
+An I-cache maintenance pass was written first, on the reasoning that a copied
+page may hold instructions and the fetch side would not know. It changed
+nothing — the fault was in the freeing, not the copying — but it is kept,
+because the reasoning is sound and the day a program writes to its own text is
+the day it would have mattered.
+
+**Verified by running it:** child sets 222, parent still reads 100, and the
+script initrd runs to `bye`. `make test` is 189/0, four consecutive runs.

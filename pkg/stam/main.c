@@ -19,6 +19,7 @@
 
 extern void syscall_set_archive(uint64_t addr, uint64_t size);
 extern void syscall_open_stdio(void);
+extern void pmm_init_refs(void);
 
 extern void enter_user(uint64_t entry, uint64_t stack_top);
 
@@ -192,6 +193,7 @@ void kmain_high(void) {
      * at all. exceptions_install computes the address PC-relative, so calling
      * it again from up here installs the high one. */
     exceptions_install();
+    pmm_init_refs();
     syscall_set_archive(0, 0);
     mmu_drop_low_half();
     kprintf("  kernel    now running from 0x%llx upwards; the low half is a\n"
