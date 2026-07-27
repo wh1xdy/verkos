@@ -71,8 +71,6 @@ EOF
 }
 
 build_iso() {
-    need_tool mkfs.vfat dosfstools
-    need_tool mcopy mtools
 
     local kernel="$OUT_DIR/vmlinuz"
     local initramfs="$OUT_DIR/initramfs.img"
@@ -89,6 +87,11 @@ build_iso() {
     local tools="$BUILD_DIR/hosttools"
     mkdir -p "$tools"
     cc -O2 -o "$tools/viso" "$VERK_ROOT/pkg/viso/viso.c" || die "could not build viso for the host"
+    # And our own FAT32 formatter and file writer, so the ESP is built without
+    # dosfstools or mtools. Both are host tools here: the image is assembled on
+    # the build machine, not inside the target system.
+    cc -O2 -o "$tools/vmkfs" "$VERK_ROOT/pkg/vmkfs/vmkfs.c" || die "could not build vmkfs for the host"
+    local VMKFS="$tools/vmkfs"
 
     local cfg; cfg="$(write_live_config)"
     local esp="$BUILD_DIR/efi.img"
@@ -105,19 +108,16 @@ build_iso() {
     [ "$need_mb" -lt 48 ] && need_mb=48
     log "EFI boot image: ${need_mb} MiB"
     dd if=/dev/zero of="$esp" bs=1M count="$need_mb" status=none
-    # -F 32 is not optional. Without it dosfstools picks the type from the
-    # cluster count and chose FAT16 at every size this has ever been built at,
-    # while everything around it — this comment, the 33 MB floor, the docs —
-    # said FAT32. UEFI requires FAT32 on fixed media and permits FAT12/16 only
-    # on removable; AAVMF and OVMF accept FAT16 anyway, which is the only
-    # reason it has always booted. That is D-023's shape: something we got away
-    # with because we had only met one firmware.
-    mkfs.vfat -F 32 -n VERKESP "$esp" >/dev/null
-    mmd -i "$esp" ::/EFI ::/EFI/BOOT
-    mcopy -i "$esp" "$vboot_efi" "::/EFI/BOOT/$EFI_NAME"
-    mcopy -i "$esp" "$(readlink -f "$kernel")" ::/vmlinuz
-    mcopy -i "$esp" "$initramfs" ::/initramfs.img
-    mcopy -i "$esp" "$cfg"       ::/vboot.conf
+    # Our own formatter and our own file writer: no dosfstools, no mtools. The
+    # FAT16 that D-052 found cannot come back, because vmkfs refuses anything
+    # but FAT32 rather than choosing by size.
+    "$VMKFS" -n VERKESP "$esp"
+    "$VMKFS" --mkdir "$esp" /EFI
+    "$VMKFS" --mkdir "$esp" /EFI/BOOT
+    "$VMKFS" --copy  "$esp" "$vboot_efi" "/EFI/BOOT/$EFI_NAME"
+    "$VMKFS" --copy  "$esp" "$(readlink -f "$kernel")" /vmlinuz
+    "$VMKFS" --copy  "$esp" "$initramfs" /initramfs.img
+    "$VMKFS" --copy  "$esp" "$cfg"       /vboot.conf
 
     # --- the system image ---------------------------------------------------
     # Built here rather than reused from stage 60: that image is sized for a

@@ -2427,3 +2427,72 @@ the day it would have mattered.
 
 **Verified by running it:** child sets 222, parent still reads 100, and the
 script initrd runs to `bye`. `make test` is 189/0, four consecutive runs.
+
+## D-065 — mtools and dosfstools leave the build
+
+The last third-party tools in the boot path were the ones that *filled* the
+partition the machine starts from. `vmkfs` has made the ESP since D-014, and
+then `mkfs.vfat`, `mmd` and `mcopy` were called anyway — because owning a
+formatter is not the same as owning a filesystem, and writing a file into one
+is the larger half.
+
+It is also where D-052 hid for a year: nothing checked what came out of
+`mkfs.vfat`, so the ESP was FAT16. That defect cannot come back now, and not
+because a flag is remembered — **vmkfs is FAT32-only and refuses rather than
+choosing**, so there is no size at which the wrong answer is available.
+
+`vmkfs --mkdir` and `vmkfs --copy` read the volume's geometry back from its own
+boot sector rather than recomputing it. vmkfs halves the cluster size in a loop
+until the count is legal, so the size table alone does not predict what is on
+the disk, and a writer that disagrees by one sector corrupts silently.
+
+Three things the design had to get right before the first file, rather than
+after the first failure:
+
+- **`DIR_FstClusHI` is a separate field from `FstClusLO`.** Every cluster
+  number below 65535 fits in the low half, so a writer that sets only the low
+  one works perfectly until the first file past 32 MiB of data — which on this
+  build is the kernel, on the first build.
+- **The allocator stops at the last real cluster.** The FAT is over-provisioned
+  by Microsoft's sizing approximation, so there are entries past the end that
+  read as zero and look exactly like free space. Allocating one writes past the
+  end of the image; a regular file simply grows, and stage 70's
+  `dd ... seek=1 conv=notrunc` then puts those bytes over the backup GPT.
+- **The FAT sector cache is flushed, into every copy.** A 34 MB file is ~66 000
+  links across 500-odd sectors; without a cache it is unusably slow, and with a
+  cache the missing final flush leaves the last hundred links zero and the file
+  99.8% correct.
+
+### The bug the tests found, which is the entry
+
+A directory cluster holds sixteen entries and a long name costs one entry per
+thirteen characters *plus* the short one, so the root of a signed ESP is two
+slots from needing a second cluster. Growing it worked. Reading it back did
+not: `fsck.fat` walked the chain and reported all 32 files, and **mtools stopped
+at five**.
+
+The gap was a single byte. When a directory grows, the slots left unused in the
+cluster being left behind still hold `0x00` — and a first byte of zero does not
+mean "this slot is free", it means **"the directory ends here, and nothing
+after this is a file"**. Every entry in every later cluster was invisible to
+anything that honours the marker. They are filled with `0xE5` now.
+
+What makes it worth recording is which tool was right. A checker that walks the
+chain and a reader that honours the marker disagreed, and **the reader was
+right** — firmware is a reader. Had only `fsck.fat` been consulted, this would
+have shipped, and the failure would have been a machine that boots until the
+eighth file is added to the ESP.
+
+### Judged by three things that are not ours
+
+`fsck.fat` accepts the volume and renames nothing. mtools reads every file back
+byte-identical, including a 34 MB one past cluster 65535, one in a
+subdirectory, an empty one, and twenty long names spread across four directory
+clusters. And **the Linux kernel's own vfat driver mounts it** and `cmp` agrees.
+
+`make test` gains nine checks and loses the two that asked whether `mkfs.vfat`
+was called with `-F 32`, since it is not called at all. 189 → 199.
+
+Still bought, and deliberately: `parted` for the GPT, and ext4 (D-014). The
+partitioner is the obvious next one to take, because `vinstall` already writes
+a GPT — that code exists and would only need lifting out.

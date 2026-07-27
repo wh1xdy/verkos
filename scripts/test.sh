@@ -668,21 +668,104 @@ done
 # requires FAT32 for an ESP on fixed media; AAVMF and OVMF accept FAT16 anyway,
 # which is the only reason this ever booted. Nothing reported it, because
 # mkfs.vfat succeeded and the firmware did not object.
-say "the EFI system partition is FAT32, not whatever mkfs.vfat felt like"
+say "vmkfs writes files into the volume it made (no mtools, no dosfstools)"
+if $CC -O2 -w -o "$T/vmkfs" pkg/vmkfs/vmkfs.c 2>/dev/null; then
+    ok "vmkfs compiles"
+    V=$T/vmkfs
+    dd if=/dev/zero of="$T/esp.img" bs=1M count=48 status=none 2>/dev/null
+    "$V" -n VERKESP "$T/esp.img" >/dev/null 2>&1
+    before=$(stat -c%s "$T/esp.img" 2>/dev/null || stat -f%z "$T/esp.img")
+
+    # A file bigger than 32 MiB, because every cluster number below that fits in
+    # sixteen bits: a writer that forgets DIR_FstClusHI works perfectly until
+    # the first file past cluster 65535, which on this build is the kernel.
+    head -c 34000000 /dev/urandom > "$T/big.bin" 2>/dev/null
+    printf 'hello\n' > "$T/small.txt"
+    : > "$T/empty.bin"
+
+    "$V" --mkdir "$T/esp.img" /EFI          >/dev/null 2>&1
+    "$V" --mkdir "$T/esp.img" /EFI/BOOT     >/dev/null 2>&1
+    "$V" --copy  "$T/esp.img" "$T/big.bin"   /vmlinuz        >/dev/null 2>&1
+    "$V" --copy  "$T/esp.img" "$T/small.txt" /initramfs.img  >/dev/null 2>&1
+    "$V" --copy  "$T/esp.img" "$T/small.txt" /vboot.conf     >/dev/null 2>&1
+    "$V" --copy  "$T/esp.img" "$T/empty.bin" /empty.bin      >/dev/null 2>&1
+    "$V" --copy  "$T/esp.img" "$T/small.txt" /EFI/BOOT/BOOTAA64.EFI >/dev/null 2>&1
+
+    # The image must not have grown. The FAT is over-provisioned, so there are
+    # entries past the last real cluster that read as free; allocating one
+    # writes past the end, a regular file simply extends, and stage 70's
+    # `dd ... seek=1 conv=notrunc` then puts those bytes over the backup GPT.
+    after=$(stat -c%s "$T/esp.img" 2>/dev/null || stat -f%z "$T/esp.img")
+    check "populating the volume does not grow the image past its end" \
+          "[ '$before' = '$after' ]"
+
+    # Twenty long names, which forces the root past one cluster. A cluster holds
+    # sixteen entries and a long name costs two of them, so this is not an edge
+    # case — it is the eighth file. The bug it catches: the free slot left
+    # behind when a directory grows stays 0x00, which does not mean "free", it
+    # means "the directory ends here" — and every entry in every later cluster
+    # becomes invisible to anything that honours the marker.
+    for i in $(seq 1 20); do
+        "$V" --copy "$T/esp.img" "$T/small.txt" "/a-long-file-name-$i.txt" >/dev/null 2>&1
+    done
+
+    # The judges are deliberately not ours.
+    if command -v fsck.fat >/dev/null 2>&1; then
+        if fsck.fat -n "$T/esp.img" >"$T/fsck.log" 2>&1; then
+            ok "fsck.fat accepts the volume vmkfs filled"
+        else
+            bad "fsck.fat rejects it: $(tail -1 "$T/fsck.log")"
+        fi
+        check "fsck.fat renames nothing (no duplicate short names)" \
+              "! grep -q 'Renamed to' $T/fsck.log"
+    else
+        printf '  \033[33mskip\033[0m  fsck.fat (not installed)\n'
+    fi
+    if command -v mcopy >/dev/null 2>&1 && command -v mdir >/dev/null 2>&1; then
+        # Byte-for-byte, because a structural check passes on a file whose tail
+        # is zeroes and whose size field is right.
+        mcopy -i "$T/esp.img" ::/vmlinuz "$T/back.bin" >/dev/null 2>&1
+        check "a 34 MB file reads back byte-identical (past cluster 65535)" \
+              "cmp -s $T/back.bin $T/big.bin"
+        mcopy -i "$T/esp.img" ::/EFI/BOOT/BOOTAA64.EFI "$T/back2.bin" >/dev/null 2>&1
+        check "a file in a subdirectory reads back byte-identical" \
+              "cmp -s $T/back2.bin $T/small.txt"
+        check "mtools sees all twenty long names past the first cluster" \
+              "[ \"$(mdir -i $T/esp.img :: 2>/dev/null | grep -c 'a-long-file-name')\" = 20 ]"
+    else
+        printf '  \033[33mskip\033[0m  mtools round-trip (not installed)\n'
+    fi
+
+    # A mode that is present must be obeyed or refused, never ignored: this
+    # used to fall through to the formatter, one option away from reformatting
+    # the image it was asked to add a file to.
+    check "a misplaced --copy is refused, not treated as a format" \
+          "! $V -v --copy $T/nosuch.img $T/small.txt /x >/dev/null 2>&1"
+else
+    bad "vmkfs does not compile"
+fi
+
+say "the EFI system partition is FAT32, and now by construction"
+# Left to choose, dosfstools picked the FAT type from the cluster count and
+# chose FAT16 at both sizes VerkOS builds, for a year, while every comment and
+# document said FAT32 (D-052). The fix then was to pass -F 32 and check the
+# output. The fix now is that dosfstools is gone: vmkfs is FAT32-only and
+# refuses anything else rather than choosing, so the question cannot be got
+# wrong — a better place to be than remembering a flag.
 for s in scripts/70-boot-image.sh scripts/71-iso.sh; do
-    check "$(basename "$s") builds its ESP with mkfs.vfat -F 32" \
-        "grep -qE 'mkfs\.vfat +-F +32' $s"
+    check "$(basename "$s") builds its ESP with our own vmkfs" \
+        "grep -q VMKFS $s"
+    check "$(basename "$s") calls no mkfs.vfat, mmd or mcopy" \
+        "! grep -qE 'mkfs[.]vfat|[^a-z]mmd |[^a-z]mcopy ' $s"
 done
 # Structural greps say what the script asks for; this says what comes out.
-if command -v mkfs.vfat >/dev/null 2>&1 && command -v file >/dev/null 2>&1; then
+if [ -x "$T/vmkfs" ] && command -v file >/dev/null 2>&1; then
     for mb in 48 160; do
         dd if=/dev/zero of="$T/esp$mb.img" bs=1M count=$mb status=none 2>/dev/null
-        mkfs.vfat -F 32 -n VERKESP "$T/esp$mb.img" >/dev/null 2>&1
-        check "a ${mb} MiB ESP really comes out FAT32" \
+        "$T/vmkfs" -n VERKESP "$T/esp$mb.img" >/dev/null 2>&1
+        check "a ${mb} MiB volume from vmkfs really comes out FAT32" \
             "file '$T/esp$mb.img' | grep -q 'FAT (32 bit)'"
     done
-else
-    printf '  \033[33mskip\033[0m  ESP FAT32 build check (no mkfs.vfat)\n'
 fi
 
 say "stam (our own kernel) builds, and is a valid arm64 Image"

@@ -207,8 +207,6 @@ EOF
 }
 
 build_boot_disk() {
-    need_tool mkfs.vfat dosfstools
-    need_tool mcopy mtools
     need_tool parted parted
     local esp="$BUILD_DIR/esp.img" img="$OUT_DIR/verkos-boot-${ARCH}.img"
     local kernel="$OUT_DIR/vmlinuz" initramfs="$OUT_DIR/initramfs.img"
@@ -220,16 +218,23 @@ build_boot_disk() {
     # -F 32, for the reason spelled out in 71-iso.sh: left to choose, dosfstools
     # made this FAT16 at the default 160 MiB, and UEFI requires FAT32 for an ESP
     # on a fixed disk.
-    mkfs.vfat -F 32 -n VERKESP "$esp" >/dev/null
-    mmd -i "$esp" ::/EFI ::/EFI/BOOT
-    mcopy -i "$esp" "$BUILD_DIR/vboot/$EFI_NAME" "::/EFI/BOOT/$EFI_NAME"
+    # Our own formatter and our own file writer: no dosfstools, no mtools.
+    # vmkfs refuses anything but FAT32 rather than choosing by size, so the
+    # FAT16 of D-052 cannot come back.
+    local tools="$BUILD_DIR/hosttools"; mkdir -p "$tools"
+    cc -O2 -o "$tools/vmkfs" "$VERK_ROOT/pkg/vmkfs/vmkfs.c" || die "could not build vmkfs for the host"
+    local VMKFS="$tools/vmkfs"
+    "$VMKFS" -n VERKESP "$esp"
+    "$VMKFS" --mkdir "$esp" /EFI
+    "$VMKFS" --mkdir "$esp" /EFI/BOOT
+    "$VMKFS" --copy  "$esp" "$BUILD_DIR/vboot/$EFI_NAME" "/EFI/BOOT/$EFI_NAME"
     sign_payloads "$kernel" "$initramfs"
-    mcopy -i "$esp" "$kernel"    ::/vmlinuz
-    mcopy -i "$esp" "$initramfs" ::/initramfs.img
-    mcopy -i "$esp" "$cfg"       ::/vboot.conf
+    "$VMKFS" --copy "$esp" "$kernel"    /vmlinuz
+    "$VMKFS" --copy "$esp" "$initramfs" /initramfs.img
+    "$VMKFS" --copy "$esp" "$cfg"       /vboot.conf
     # signatures, when the payloads have been signed (see pkg/vboot/vsign.c)
-    [ -f "$kernel.sig" ]    && mcopy -i "$esp" "$kernel.sig"    ::/vmlinuz.sig
-    [ -f "$initramfs.sig" ] && mcopy -i "$esp" "$initramfs.sig" ::/initramfs.img.sig
+    [ -f "$kernel.sig" ]    && "$VMKFS" --copy "$esp" "$kernel.sig"    /vmlinuz.sig
+    [ -f "$initramfs.sig" ] && "$VMKFS" --copy "$esp" "$initramfs.sig" /initramfs.img.sig
 
     # GPT with a single ESP; the firmware needs the partition table to find it
     local total=$((ESP_MB + 4))
