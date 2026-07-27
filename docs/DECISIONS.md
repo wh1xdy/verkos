@@ -2775,3 +2775,62 @@ whether it speaks.
 `make test` is 211/0, unchanged: none of this is covered by a check, because
 nothing in the suite boots a distro under firmware. That is the honest gap, and
 it is the same one D-055 closed for stam and nobody has closed for Linux.
+
+## D-071 — The timer fired at nobody, and printing the tree is what found it
+
+Linux now boots on the tree vboot synthesises. It reaches userspace and runs
+`urverk`. The thing that had stopped it was not any of the four gaps D-069
+named and D-070 filled — it was the timer.
+
+`vboot` wrote the architected timer's `interrupts` as four identical triples of
+`<1 ppi 0x08>`. Two things wrong with that, and the second is the one that
+mattered:
+
+- **The four are not the same interrupt.** GTDT lists secure EL1, non-secure
+  EL1, virtual and hypervisor timers separately, and only the non-secure one
+  was ever read. A kernel that uses the virtual timer — which one under a
+  hypervisor does — was handed the physical timer's number.
+- **The third cell of a per-processor interrupt is not a trigger type alone.**
+  Its high byte is the mask of processors the interrupt is delivered to.
+  `0x08` left that mask empty, so the timer was described as firing at **no
+  processor at all**. QEMU writes `0x304`: processors 0 and 1, level, high.
+
+An interrupt targeted at nobody is not an error to anybody. The controller
+accepts the configuration, the timer runs, and the delivery goes nowhere.
+
+### What actually found it
+
+Not reasoning. Three rounds of careful, well-supported, wrong diagnosis came
+first — a missing phandle, a missing clock, a missing compatible — each argued
+from a real difference against QEMU's tree, each fixed, and none of them the
+cause. What settled it was **printing the tree**.
+
+`dumpdtb` in `vboot.conf` walks the blob that was just built and prints every
+node and property before installing it. The identical triples were visible
+immediately, in one line, having been invisible in the source for as long as
+the source was what anybody read. It also caught two bugs introduced *by the
+previous round of fixes*: `compatible` and `clock-names` were written with
+`sizeof s - 1`, which strips the terminating NUL, so both properties were
+malformed strings that a reader would take as raw bytes.
+
+That is the third time in this log that the answer was to make the program
+report what it did rather than what it was asked to do — after the boot menu
+entry that named a flag nothing implemented (D-028), and the ESP that was
+FAT16 while every document said FAT32 (D-052).
+
+### Where it stops now
+
+`urverk` runs and cannot find its root: `/dev/vda` never appears. The synthetic
+tree has **no PCI host bridge**, so a `virtio-blk-pci` disk is invisible to
+Linux — the tree describes memory, the console, the CPUs, the interrupt
+controller and the timer, which is everything ACPI was asked for and nothing
+about where the disks are. ACPI's MCFG has the bridge's configuration space,
+and reading it is the obvious next node.
+
+So the honest state: **Linux boots on our tree and reaches an emergency shell**,
+which is further than it has ever come without firmware handing over a tree of
+its own, and one node short of a system.
+
+211 checks, unchanged. Nothing here is guarded, because nothing in `make test`
+boots a distro under firmware — the same gap D-055 closed for stam and D-070
+already named.

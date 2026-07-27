@@ -45,6 +45,52 @@ static int      n_entries, cfg_default, cfg_timeout = 5;
 
 /* ---- tiny console helpers ------------------------------------------------ */
 static void print(CHAR16 *s) { ST->ConOut->OutputString(ST->ConOut, s); }
+
+static int vb_cfg_dumpdtb;
+
+static void vb_print_ascii(const char *s) {
+    CHAR16 w[128]; int i = 0;
+    while (s[i] && i < 127) { w[i] = (CHAR16)(unsigned char)s[i]; i++; }
+    w[i] = 0;
+    print(w);
+}
+
+static unsigned fg_rd32(const unsigned char *p) {
+    return ((unsigned)p[0] << 24) | ((unsigned)p[1] << 16) |
+           ((unsigned)p[2] << 8) | (unsigned)p[3];
+}
+
+/* Printable text as text, everything else as words. A property is either a
+ * string or a list of 32-bit cells often enough that guessing is useful, and
+ * the guess is stated by how it is shown rather than asserted. */
+static void vb_print_prop(const unsigned char *v, unsigned len) {
+    if (!len) { print(L"(empty)"); return; }
+    int textual = v[len - 1] == 0;
+    for (unsigned i = 0; i < len && textual; i++)
+        if (v[i] && (v[i] < 32 || v[i] > 126)) textual = 0;
+    if (textual) {
+        CHAR16 w[192]; unsigned o = 0;
+        for (unsigned i = 0; i < len && o < 190; i++)
+            w[o++] = v[i] ? (CHAR16)v[i] : (CHAR16)',';
+        w[o] = 0;
+        print(L"\""); print(w); print(L"\"");
+    } else if (len % 4 == 0) {
+        CHAR16 w[192]; unsigned o = 0;
+        for (unsigned c = 0; c < len / 4 && o < 180; c++) {
+            unsigned x = fg_rd32(v + c * 4);
+            CHAR16 t[12]; int n = 0;
+            if (!x) t[n++] = '0';
+            while (x) { unsigned d = x & 15; t[n++] = (CHAR16)(d < 10 ? '0' + d : 'a' + d - 10); x >>= 4; }
+            w[o++] = '<'; w[o++] = '0'; w[o++] = 'x';
+            while (n--) w[o++] = t[n];
+            w[o++] = '>';
+        }
+        w[o] = 0;
+        print(w);
+    } else {
+        print(L"(bytes)");
+    }
+}
 static void attr(UINTN a)    { ST->ConOut->SetAttribute(ST->ConOut, a); }
 static void at(UINTN col, UINTN row) { ST->ConOut->SetCursorPosition(ST->ConOut, col, row); }
 static void print_num(UINTN v) {
@@ -221,6 +267,12 @@ static void parse_config(unsigned char *buf) {
             copy_line(p + off, cur->cmdline, CMDLINE_MAX);
         } else if ((off = keyword(p, "timeout"))) {
             cfg_timeout = (int)parse_num(p + off);
+        } else if ((off = keyword(p, "dumpdtb"))) {
+            /* Print the device tree we build, node by node, before handing it
+             * over. Everything else in this file reports what vboot believes
+             * it wrote; this is the only thing that shows what the kernel is
+             * actually given, and the two had already differed (D-071). */
+            vb_cfg_dumpdtb = 1; (void)off;
         } else if ((off = keyword(p, "default"))) {
             cfg_default = (int)parse_num(p + off);
         }
@@ -555,12 +607,20 @@ static int vb_madt(UINT64 *dist, UINT64 *cpuif, unsigned *ncpu, unsigned *gicver
  * global interrupt id; a device tree wants it relative to the start of the
  * per-processor range, which is 16. Getting that subtraction wrong produces a
  * kernel that boots and never ticks. */
-static int vb_gtdt_timer_ppi(unsigned *ppi) {
+static int vb_gtdt_timer_ppi(unsigned ppi[4]) {
     unsigned char *t = vb_acpi_table("GTDT");
-    if (!t || vb_le32(t + 4) < 64) return 0;
-    UINT32 gsiv = vb_le32(t + 56);               /* non-secure EL1 timer */
-    if (gsiv < 16 || gsiv > 31) return 0;
-    *ppi = gsiv - 16;
+    if (!t || vb_le32(t + 4) < 80) return 0;
+    /* Four timers, four interrupts, in the order the binding lists them:
+     * secure EL1, non-secure EL1, virtual, hypervisor. Only the second was
+     * read before, and it was then written into all four slots — so a kernel
+     * that uses the virtual timer, as one under a hypervisor does, was given
+     * the physical one's number. */
+    static const unsigned off[4] = { 48, 56, 64, 72 };
+    for (int i = 0; i < 4; i++) {
+        UINT32 gsiv = vb_le32(t + off[i]);
+        if (gsiv < 16 || gsiv > 31) return 0;
+        ppi[i] = gsiv - 16;
+    }
     return 1;
 }
 
@@ -773,18 +833,26 @@ static int vb_install_dtb(void) {
                   fg_prop(&g, "reg", b, 32); }
             fg_end_node(&g);
 
-            unsigned ppi = 0;
-            if (vb_gtdt_timer_ppi(&ppi)) {
+            unsigned ppi[4] = {0,0,0,0};
+            if (vb_gtdt_timer_ppi(ppi)) {
                 fg_node(&g, "timer");
                     fg_prop_str(&g, "compatible", "arm,armv8-timer");
                     /* four triples, as the binding specifies: secure,
                      * non-secure, virtual, hypervisor. Only the second is
                      * read, but a short property is a malformed one. */
+                    /* The third cell of a per-processor interrupt is not a
+                     * trigger type alone: its high byte is the mask of CPUs
+                     * the interrupt is delivered to. Writing 0x08 left that
+                     * mask empty, so the timer was described as firing at no
+                     * processor at all — which is not an error anywhere, just
+                     * a machine that never ticks. */
                     { unsigned char b[48];
+                      unsigned mask = ncpu >= 8 ? 0xff : ((1u << (ncpu ? ncpu : 1)) - 1);
+                      unsigned cell3 = (mask << 8) | 0x04;   /* level, high  */
                       for (int t = 0; t < 4; t++) {
                           fg_be32(b + t*12,     1);          /* PPI          */
-                          fg_be32(b + t*12 + 4, ppi);
-                          fg_be32(b + t*12 + 8, 0x08);       /* level, low   */
+                          fg_be32(b + t*12 + 4, ppi[t]);
+                          fg_be32(b + t*12 + 8, cell3);
                       }
                       fg_prop(&g, "interrupts", b, 48); }
                 fg_end_node(&g);
@@ -805,7 +873,7 @@ static int vb_install_dtb(void) {
                      * "arm,primecell" is what makes the AMBA bus claim the
                      * device in the first place. */
                     static const char pl011c[] = "arm,pl011\0arm,primecell";
-                    fg_prop(&g, "compatible", pl011c, sizeof pl011c - 1);
+                    fg_prop(&g, "compatible", pl011c, sizeof pl011c);
                 } else {
                     fg_prop_str(&g, "compatible", uart_compat);
                 }
@@ -815,7 +883,7 @@ static int vb_install_dtb(void) {
                     fg_be32(cb, VB_PH_CLK); fg_be32(cb + 4, VB_PH_CLK);
                     fg_prop(&g, "clocks", cb, 8);
                     static const char cn[] = "uartclk\0apb_pclk";
-                    fg_prop(&g, "clock-names", cn, sizeof cn - 1);
+                    fg_prop(&g, "clock-names", cn, sizeof cn);
                 }
                 /* A shared peripheral interrupt is <0 (gsi - 32) 4>: type 0 is
                  * SPI, the numbering starts at 32, and 4 is level-triggered
@@ -832,6 +900,41 @@ static int vb_install_dtb(void) {
     fg_end_node(&g);
 
     if (!fg_finish(&g)) return -1;
+
+    /* Walk the blob we just built and print it, node by node. This is the only
+     * way to see what the kernel is actually handed: everything before this
+     * point is what we believe we wrote, and the whole reason for the exercise
+     * is that those two had already differed once. Off unless asked for, since
+     * a boot log is for the person watching it. */
+    if (vb_cfg_dumpdtb) {
+        const unsigned char *b = (const unsigned char *)dtb_area;
+        unsigned soff = fg_rd32(b + 8), stoff = fg_rd32(b + 12);
+        unsigned ssz  = fg_rd32(b + 36);
+        const char *strs = (const char *)b + stoff;
+        print(L"  --- device tree as built ---\r\n");
+        for (unsigned i = 0; i < ssz; ) {
+            unsigned tok = fg_rd32(b + soff + i); i += 4;
+            if (tok == 1) {                                  /* FDT_BEGIN_NODE */
+                const char *nm = (const char *)b + soff + i;
+                unsigned l = 0; while (nm[l]) l++;
+                print(L"  node "); vb_print_ascii(nm[0] ? nm : "/"); print(L"\r\n");
+                i += (l + 4) & ~3u;
+            } else if (tok == 2) {                           /* FDT_END_NODE   */
+                ;
+            } else if (tok == 3) {                           /* FDT_PROP       */
+                unsigned len = fg_rd32(b + soff + i);
+                unsigned noff = fg_rd32(b + soff + i + 4);
+                i += 8;
+                print(L"    ");
+                vb_print_ascii(strs + noff);
+                print(L" = ");
+                vb_print_prop(b + soff + i, len);
+                print(L"\r\n");
+                i += (len + 3) & ~3u;
+            } else if (tok == 9) break;                      /* FDT_END        */
+        }
+        print(L"  --- end ---\r\n");
+    }
     vb_instcfg_t inst = (vb_instcfg_t)BS->InstallConfigurationTable;
     if (EFI_ERROR(inst(&dtb_guid, dtb_area))) return -1;
     return 1;
