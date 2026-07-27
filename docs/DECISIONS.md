@@ -3303,3 +3303,89 @@ that takes the thread, so it cannot say more than is true and it says "1
 processor" on a one-core machine rather than falling silent.
 
 `make test`: 233 checks, was 231, three consecutive runs.
+
+## D-079 — the kernel reads a disk, and it is the one our formatter wrote
+
+**2026-07-28.** Everything `stam` had run came out of an initrd: an archive
+handed to it at boot and unpacked in memory. That is enough to prove a process,
+a pipe and a shell, and it is not a system — a system reads what it was not
+given. It now does:
+
+```
+  disk      virtio-blk v1, 131072 sectors (64 MiB)
+  fat       FAT32 "STAMDISK", 1 sectors per cluster, 129010 clusters
+verk$ diskprog from-the-disk
+  [hello] argv[1] = "from-the-disk"
+verk$ upper < /note.txt
+A FILE THE KERNEL READ OFF A DISK OUR OWN FORMATTER WROTE
+```
+
+`diskprog` is in no initrd. `exec` had nowhere else to find it.
+
+### Why FAT32, and why that matters more than the filesystem
+
+Because **`vmkfs` writes it.** Since D-065 and D-068, every EFI system partition
+this project produces is formatted and populated by our own tool, with no
+dosfstools and no mtools. A reader in the kernel makes the two halves check each
+other: an image one wrote and the other reads, sharing no line of code and
+written for opposite jobs, so neither can agree with the other by sharing a
+mistake about the format. `fsck.fat` and mtools have been judging vmkfs from
+outside; this is the project judging it from the other end.
+
+It is also the filesystem the firmware reads, so a kernel that can read it can
+read the partition it was booted from.
+
+Read-only. Writing FAT means allocating clusters, updating both copies of the
+table and keeping FSInfo honest, and vmkfs already does all three — doing it
+again in the kernel is a second implementation of the same on-disk rules, which
+is the arrangement D-042 is about.
+
+### The device
+
+virtio-blk over MMIO, discovered from the device tree. Not a second ramdisk,
+which would have been easier and would have proved nothing: a driver that talks
+to a device through a queue in shared memory is the shape every real driver has.
+
+Both transport versions are handled. Which one appears depends on the QEMU that
+happens to be installed, and a driver that supports the one on this machine is a
+driver that fails silently on the next.
+
+Polled, not interrupt-driven. That is deliberate: an interrupt-driven version
+needs the requesting thread to block and be woken, and what is being proved here
+is that the device answers at all. Polling makes the failure "it never answered"
+rather than "it answered and the wakeup was lost", and those are different bugs.
+
+### Two places it did nothing, quietly
+
+**The node walk started at -1.** `fdt_next_node` steps past the node it is
+given, and -1 is not a node — so it walked nothing, found nothing, and returned
+"no disk", which is indistinguishable from a machine that has none. It now says
+which of the three it was: no transports in the tree, transports with nothing in
+them, or devices that are not block devices.
+
+**The used ring was at the wrong offset.** A legacy virtio-mmio device is given
+one page-frame number and derives the descriptor table, the available ring and
+the used ring from it and from the alignment the driver declares. The first
+version put the used ring at the end of the page — where it would belong if the
+alignment were the page size — and then declared an alignment of the page size,
+which puts the used ring on the *next* page. Every read timed out with the
+device having done nothing wrong. The alignment is the driver's to choose, so it
+is 64 now and the whole ring fits in one page.
+
+### Where it stops
+
+The scheduler lock is **not** held across a disk read. Holding the lock that the
+console, the pipes and every scheduling decision need for the duration of a
+polled sector read is a machine that stops answering while it reads.
+
+An executable is read whole rather than mapped: demand paging off a disk needs a
+page cache and a fault handler that can block, and neither exists. The staging
+pages are returned before the program starts, which is seventeen pages per run
+that would otherwise leak.
+
+`fat_read` walks the cluster chain from the beginning on every call, so a
+sequential read is quadratic in clusters. For a 67 KB program that is fourteen
+steps. The honest fix is a cached position in `fat_file_t`, and it is not needed
+yet.
+
+`make test`: 236 checks, was 233, three consecutive runs.

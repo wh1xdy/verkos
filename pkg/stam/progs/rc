@@ -13,4 +13,6 @@ hello settle
 pid
 sigtest
 catch
+diskprog from-the-disk
+upper < /note.txt
 exit

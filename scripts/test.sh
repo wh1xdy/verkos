@@ -1101,8 +1101,27 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 # was to remove the timing.
                 if [ -f pkg/stam/progs/initrd-script.cpio ]; then
                     SL=$T/script.log
+                    # A disk for the same run, formatted and populated by our
+                    # own vmkfs, holding one program and one text file that are
+                    # in no initrd. The kernel's FAT32 reader and the formatter
+                    # were written for opposite jobs and share no code, so an
+                    # image one wrote and the other reads is each checking the
+                    # other against the on-disk format rather than against a
+                    # shared assumption about it (D-079).
+                    DISK=""
+                    if cc -O2 -o "$T/vmkfs-host" pkg/vmkfs/vmkfs.c 2>/dev/null; then
+                        dd if=/dev/zero of="$T/stam.disk" bs=1M count=64 status=none
+                        printf 'a file the kernel read off a disk our own formatter wrote\n' > "$T/note.txt"
+                        if "$T/vmkfs-host" -n STAMDISK "$T/stam.disk" >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/stam.disk" pkg/stam/progs/hello.elf /diskprog >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/stam.disk" "$T/note.txt" /note.txt >/dev/null 2>&1; then
+                            DISK="-drive file=$T/stam.disk,if=none,format=raw,id=hd0 -device virtio-blk-device,drive=hd0"
+                        fi
+                    fi
+                    [ -n "$DISK" ] || log "vmkfs did not build a disk; the FAT checks will fail"
+                    # shellcheck disable=SC2086
                     ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
-                        -display none -serial "file:$SL" -no-reboot \
+                        -display none -serial "file:$SL" -no-reboot $DISK \
                         -kernel pkg/stam/stam.img \
                         -initrd pkg/stam/progs/initrd-script.cpio \
                         </dev/null >/dev/null 2>&1 & echo $! > "$T/spid" )
@@ -1175,6 +1194,25 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # than now is a fault with nothing to do with the mistake.
                     check "sigaction refuses SIGKILL, a missing restorer and a bad handler" \
                           "grep -aq 'a missing restorer and a bad handler were all refused' $SL"
+
+                    # --- the disk -------------------------------------------
+                    # The label is read back off sector 0, so this is the
+                    # device answering rather than the driver reporting that it
+                    # asked. A kernel that found no disk prints a line saying
+                    # how many transports it saw and how many were occupied,
+                    # which is a different string and fails here.
+                    check "stam finds the disk and mounts what vmkfs formatted" \
+                          "grep -aq 'fat       FAT32 \"STAMDISK\"' $SL"
+                    # Run from the disk, not from the archive: `diskprog` is in
+                    # no initrd, so exec had nowhere else to find it. It prints
+                    # the argv it was given, which also says the arguments
+                    # survived a load that took a different path.
+                    check "the shell runs a program that exists only on the disk" \
+                          "grep -aq 'argv\[1\] = \"from-the-disk\"' $SL"
+                    # And ordinary file reading: the contents come back through
+                    # openat and read, up the same path a pipe uses.
+                    check "a program reads a file off the disk through openat" \
+                          "grep -aq 'A FILE THE KERNEL READ OFF A DISK OUR OWN FORMATTER WROTE' $SL"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

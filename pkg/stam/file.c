@@ -8,6 +8,7 @@
  */
 #include "file.h"
 #include "sched.h"
+#include "fat.h"
 #include "console.h"
 #include "lock.h"
 #include "cpio.h"
@@ -22,6 +23,7 @@
 #define FILE_PIPE_W   3
 #define FILE_INITRD   4        /* read-only, straight out of the cpio archive */
 #define FILE_MEM      5        /* a named buffer that lasts until the reboot  */
+#define FILE_FAT      6        /* read-only, off the disk                     */
 
 #define NMEM       4
 #define MEM_SIZE   4096
@@ -52,6 +54,7 @@ struct file {
     memfile_t     *mem;
     const uint8_t *ro;         /* initrd contents, borrowed not owned       */
     uint64_t       ro_len;
+    fat_file_t     fat;        /* where it is on the disk, for FILE_FAT     */
     uint64_t       pos;
 };
 
@@ -135,6 +138,21 @@ int file_open(const char *name, int mode, file_t **out) {
 
     uint64_t at = 0, len = 0;
     if (!archive_size || cpio_find(archive_addr, archive_size, name, &at, &len) != 0) {
+        /* Then the disk. Last, so that a name in the initrd still wins: the
+         * initrd is what the machine was started with and the disk is what it
+         * found, and a boot that silently preferred the disk would be a boot
+         * whose behaviour depends on what is plugged in. */
+        fat_file_t ff;
+        if (fat_mounted() && fat_open(name, &ff) == 0 && !ff.is_dir) {
+            struct file *df = file_alloc(FILE_FAT, 0);
+            if (!df) { sched_unlock_irq(s); return -24; }
+            df->fat = ff;
+            df->ro_len = ff.size;
+            df->pos = 0;
+            *out = df;
+            sched_unlock_irq(s);
+            return 0;
+        }
         sched_unlock_irq(s);
         return -2;                                            /* -ENOENT */
     }
@@ -235,6 +253,17 @@ long file_read(file_t *f, char *buf, uint64_t len) {
         return (long)n;
     }
 
+    if (f->kind == FILE_FAT) {
+        /* Not under the scheduler lock. A sector read polls the device for as
+         * long as it takes, and holding the lock that the console, the pipes
+         * and every scheduling decision need for the duration of a disk access
+         * is a machine that stops answering while it reads. The position
+         * belongs to this open file and nothing else touches it. */
+        long n = fat_read(&f->fat, f->pos, buf, len);
+        if (n > 0) f->pos += (uint64_t)n;
+        return n;
+    }
+
     pipe_t *p = f->pipe;
     uint64_t s = sched_lock_irq();
     /* Masked across the test and the block, for the reason in
@@ -263,6 +292,7 @@ long file_write(file_t *f, const char *buf, uint64_t len) {
         return (long)len;
     }
     if (f->kind == FILE_INITRD) return -9;   /* the archive is read-only */
+    if (f->kind == FILE_FAT) return -9;      /* and so is the disk, for now  */
     if (f->kind == FILE_MEM) {
         /* A short write when the buffer fills, which is what a program should
          * be told rather than having the excess silently dropped. */

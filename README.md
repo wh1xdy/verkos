@@ -177,10 +177,19 @@ What it does today, each verified by running it:
   timer interrupt count, both counted from where the threads actually ran
   (D-076, D-078).
 
+- **A disk.** virtio-blk over MMIO, found in the device tree, and a **FAT32
+  reader** on top of it — the filesystem `vmkfs` writes. So the shell can run a
+  program that is in no initrd, and `upper < /note.txt` reads a file off the
+  medium. An image one of our tools wrote, read by another that shares no line
+  of code with it: each checks the other against the on-disk format rather than
+  against a shared assumption about it (D-079). Read-only, and read whole rather
+  than mapped.
+
 Named rather than hidden: **one lock** covers the scheduler, the pipes and the
 console, because those three block on each other's state and separate locks
 would be taken in more than one order by paths that already exist. It is correct
-and it is coarse. No filesystem beyond the initrd. No FP/SIMD
+and it is coarse. The disk is read-only and the reader walks each cluster chain
+from the beginning, which is quadratic and fine at seventeen pages. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for

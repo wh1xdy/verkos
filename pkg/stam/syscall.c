@@ -18,6 +18,7 @@
 #include "cpio.h"
 #include "elf.h"
 #include "bootinfo.h"
+#include "fat.h"
 #include <stdint.h>
 
 typedef struct {
@@ -112,7 +113,8 @@ typedef struct { uint64_t x[30]; uint64_t lr, elr, spsr, sp_el0; } frame_t;
 #define ARG_BYTES 512
 
 static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
-    if (!archive_size) return (uint64_t)-2;                 /* -ENOENT */
+    /* No initrd is no longer no programs: there may be a disk. */
+    if (!archive_size && !fat_mounted()) return (uint64_t)-2;   /* -ENOENT */
 
     /* Copy the name out of the caller's memory before touching the address
      * space. The moment the new one is installed the old string is gone, and
@@ -174,27 +176,60 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
         argc = 1;
     }
 
+    /* The initrd first, then the disk — the same order file_open uses, and for
+     * the same reason: the initrd is what the machine was started with. */
     uint64_t file = 0, len = 0;
+    unsigned char *from_disk = 0;
+    unsigned disk_pages = 0;
     if (cpio_find(archive_addr, archive_size, name, &file, &len) != 0) {
-        kprintf("  [kernel] exec: no '%s' in the initrd\n", name);
-        return (uint64_t)-2;
+        fat_file_t ff;
+        if (!fat_mounted() || fat_open(name, &ff) != 0 || ff.is_dir || !ff.size) {
+            kprintf("  [kernel] exec: no '%s' in the initrd or on the disk\n", name);
+            return (uint64_t)-2;
+        }
+        /* Read whole rather than mapped. Demand paging an executable off a
+         * disk needs a page cache and a fault handler that can block, and
+         * neither exists yet; reading it in is the honest version of the same
+         * thing, and it is a program the loader then treats exactly as if it
+         * had come out of the archive. */
+        disk_pages = (unsigned)((ff.size + PAGE_SIZE - 1) / PAGE_SIZE);
+        from_disk = alloc_pages(disk_pages);
+        if (!from_disk) return (uint64_t)-12;                    /* -ENOMEM */
+        long got = fat_read(&ff, 0, from_disk, ff.size);
+        if (got != (long)ff.size) {
+            for (unsigned p = 0; p < disk_pages; p++) free_page(from_disk + p * PAGE_SIZE);
+            kprintf("  [kernel] exec: '%s' is %u bytes and only %ld could be read\n",
+                    name, ff.size, got);
+            return (uint64_t)-5;                                 /* -EIO */
+        }
+        file = (uint64_t)(uintptr_t)from_disk;
+        len  = ff.size;
     }
+#define DROP_DISK() do { if (from_disk) \
+    for (unsigned p_ = 0; p_ < disk_pages; p_++) free_page(from_disk + p_ * PAGE_SIZE); } while (0)
+
     uint64_t space = vm_new_space();
-    if (!space) return (uint64_t)-12;
+    if (!space) { DROP_DISK(); return (uint64_t)-12; }
     uint64_t saved = mmu_current_user_table_kva();
     mmu_switch_user(space);
 
     uint64_t entry = 0;
     if (elf_load(file, len, &entry) != 0) {
         mmu_switch_user(saved);
+        DROP_DISK();
         return (uint64_t)-8;                                /* -ENOEXEC */
     }
     void *stack = alloc_page();
     uint64_t stack_va = 0x7f00100000ul;
     if (!stack || map_user_page(stack_va, (uint64_t)(uintptr_t)stack, 0)) {
         mmu_switch_user(saved);
+        DROP_DISK();
         return (uint64_t)-12;
     }
+    /* The image has been copied into the new address space; the staging pages
+     * have no further use, and holding them would leak seventeen pages per
+     * program run from the disk. */
+    DROP_DISK();
     thread_current()->space = space;
 
     /* Lay the arguments out at the top of the new stack, the way every aarch64

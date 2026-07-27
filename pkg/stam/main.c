@@ -17,6 +17,8 @@
 #include "elf.h"
 #include "cpio.h"
 #include "smp.h"
+#include "virtio.h"
+#include "fat.h"
 
 extern void syscall_set_archive(uint64_t addr, uint64_t size);
 extern void syscall_open_stdio(void);
@@ -225,6 +227,7 @@ void kmain_high(void) {
         /* After the scheduler exists, not before: a secondary's first act is to
          * adopt its own thread, and there is no table to adopt into until this
          * core has made one. */
+        if (virtio_blk_init(machine_tree()) == 0) fat_mount();
         int others = smp_start_others(machine_tree());
         if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
         thread_create("worker-a", worker, (void *)(uintptr_t)0);
