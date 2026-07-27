@@ -2878,3 +2878,51 @@ evidence.
 
 211 checks, unchanged. Nothing here is guarded, and after five rounds of this
 that is the most uncomfortable line in the entry.
+
+## D-073 — Something boots the distribution now
+
+D-055 made `make test` boot stam and said, in as many words, that the next
+defect of that shape would also be found by a person rather than by a test. It
+was: five entries, D-068 to D-072, about a machine that took the kernel and
+never spoke again. Not one of them would have been needed if something had
+started the thing.
+
+`make test` now boots the whole distribution under UEFI firmware and reads
+what it printed. Seven checks, and each names a different link in the chain, so
+a failure says where it broke rather than that it broke:
+
+    the firmware finds the partition table vpart wrote
+    vboot runs, out of the filesystem vmkfs wrote
+    vboot reads the whole kernel back off that filesystem
+    Linux runs and says which machine it is on
+    the root filesystem is found and mounted
+    the distribution reaches a shell
+    nothing panicked on the way
+
+**Plain `virt`, deliberately** — ACPI only, no device tree from the firmware.
+That is the configuration D-072 fixed and the one a real ARM server is. Booting
+the easy case would have passed on every day of the last week.
+
+Two details that are the difference between a check and a nuisance:
+
+**`snapshot=on` on both drives.** A test that writes to the images it is
+testing passes once, and the second run inherits whatever the first left. It
+also stops the test fighting a stray QEMU for a write lock, which is how the
+first version failed — six red checks and an empty log, for a reason that had
+nothing to do with the system.
+
+**It waits for a marker, not a clock.** Waiting on time makes a system that
+failed indistinguishable from one that is slow (D-063), and this one takes
+about ninety seconds to come up.
+
+**Verified by reintroducing the bug.** With the synthetic tree forced back on,
+`Linux runs` still passes and `the root filesystem is found` and `reaches a
+shell` both fail — which is exactly the shape of D-072, and exactly what the
+checks are for: the kernel ran, and could not find its disk. Three consecutive
+runs at 218/0 with the bug removed.
+
+It skips where the artifacts or the firmware are absent, which includes CI. So
+this is a check that runs where the system is built, like the stam boot before
+it — the boot is proved on the machine that made it, and not on push.
+
+211 → 218 checks.

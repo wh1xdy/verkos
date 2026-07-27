@@ -21,6 +21,8 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; fail=$((fail+1)); }
 check(){ if eval "$2" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
 
 CC=${CC:-cc}
+# The suite is architecture-independent except where it boots something.
+ARCH_FOR_TESTS=${ARCH:-aarch64}
 
 say "compiles"
 for src in pkg/vpk/vpk.c pkg/verkbox/verkbox.c pkg/urverk/urverk.c pkg/vcpio/vcpio.c \
@@ -743,6 +745,72 @@ if $CC -O2 -w -o "$T/vmkfs" pkg/vmkfs/vmkfs.c 2>/dev/null; then
           "! $V -v --copy $T/nosuch.img $T/small.txt /x >/dev/null 2>&1"
 else
     bad "vmkfs does not compile"
+fi
+
+# --- the distro boots, under firmware, with no help ------------------------
+# Five rounds of diagnosis went into a machine that took the kernel and said
+# nothing (D-068 through D-072), and not one of them would have been needed if
+# something had booted the thing. D-055 closed this gap for stam and left it
+# open for the distribution.
+#
+# Deliberately plain `virt`: ACPI only, no device tree from the firmware. That
+# is the configuration that was broken, and the one a real ARM server is.
+say "the distribution boots under UEFI firmware"
+BOOTIMG=work/$ARCH_FOR_TESTS/out/verkos-boot-$ARCH_FOR_TESTS.img
+ROOTIMG=work/$ARCH_FOR_TESTS/out/verkos-$ARCH_FOR_TESTS.ext4
+FW=""
+for c in /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+         /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+    [ -f "$c" ] && { FW="$c"; break; }
+done
+if [ -f "$BOOTIMG" ] && [ -f "$ROOTIMG" ] && [ -n "$FW" ] && \
+   command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    # snapshot=on above: the test must not write to the images it is testing,
+    # and must not fight another QEMU for a lock on them. A check that mutates
+    # its own subject passes once.
+    D=$T/distro; mkdir -p "$D"
+    dd if=/dev/zero of="$D/code.fd" bs=1M count=64 status=none 2>/dev/null
+    dd if="$FW" of="$D/code.fd" conv=notrunc status=none 2>/dev/null
+    dd if=/dev/zero of="$D/vars.fd" bs=1M count=64 status=none 2>/dev/null
+    ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 2048 -smp 2 \
+        -display none -no-reboot \
+        -drive if=pflash,format=raw,file="$D/code.fd",readonly=on \
+        -drive if=pflash,format=raw,file="$D/vars.fd" \
+        -drive if=none,id=rootdisk,file="$ROOTIMG",format=raw,snapshot=on \
+        -device virtio-blk-pci,drive=rootdisk \
+        -drive if=none,id=espdisk,file="$BOOTIMG",format=raw,snapshot=on \
+        -device virtio-blk-pci,drive=espdisk,bootindex=0 \
+        -serial "file:$D/log" </dev/null >/dev/null 2>&1 & echo $! > "$D/pid" )
+    # Waiting for a marker rather than a fixed time, for the reason D-063 spells
+    # out: a command that failed is otherwise indistinguishable from one that is
+    # slow. Generous, because this is a whole distribution coming up.
+    for _ in $(seq 1 150); do
+        sleep 1
+        grep -aqE 'root@verkos|login:|Kernel panic' "$D/log" 2>/dev/null && break
+    done
+    kill "$(cat "$D/pid")" 2>/dev/null
+    wait "$(cat "$D/pid")" 2>/dev/null
+
+    check "the firmware finds the partition table vpart wrote" \
+          "grep -aq 'BdsDxe: starting' $D/log"
+    check "vboot runs, out of the filesystem vmkfs wrote" \
+          "grep -aq 'vboot: VerkOS' $D/log"
+    # The kernel is the file that crosses cluster 65535 — a writer that got
+    # DIR_FstClusHI wrong produces this log up to a kernel that is short.
+    check "vboot reads the whole kernel back off that filesystem" \
+          "grep -aqE 'kernel loaded, [0-9]{8}' $D/log"
+    # This is the one the five rounds were about: with ACPI-only firmware the
+    # kernel used to take the handover and never speak again.
+    check "Linux runs and says which machine it is on" \
+          "grep -aq 'Linux version' $D/log"
+    check "the root filesystem is found and mounted" \
+          "grep -aq 'urverk' $D/log && ! grep -aq 'root device never appeared' $D/log"
+    check "the distribution reaches a shell" \
+          "grep -aq 'root@verkos' $D/log"
+    check "nothing panicked on the way" \
+          "! grep -aq 'Kernel panic' $D/log"
+else
+    printf '  \033[33mskip\033[0m  booting the distribution (needs a built image and UEFI firmware)\n'
 fi
 
 say "vpart writes the partition table (no parted)"
