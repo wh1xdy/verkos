@@ -785,6 +785,40 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                       "grep -aq 'the kernel refused every address that was not the caller.s' $BL"
                 check "stam finishes its own demonstration" \
                       "grep -aq 'milestone 4' $BL"
+
+                # --- and a line pasted at the shell arrives whole ------------
+                # The console acknowledged its interrupt *after* draining the
+                # port, so a character arriving during the drain had its status
+                # cleared and sat there with nothing pending. Typed slowly the
+                # shell read a whole line; pasted, it got the first three
+                # characters and slept. The proof has to be a whole line
+                # delivered at once, because one character at a time is exactly
+                # the case that always worked.
+                if [ -f pkg/stam/progs/initrd-shell.cpio ]; then
+                    SD=$T/shell; rm -rf "$SD"; mkdir -p "$SD"
+                    mkfifo "$SD/p.in" "$SD/p.out"
+                    ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                        -display none -serial "pipe:$SD/p" -no-reboot \
+                        -kernel pkg/stam/stam.img \
+                        -initrd pkg/stam/progs/initrd-shell.cpio \
+                        >/dev/null 2>&1 & echo $! > "$SD/qpid" )
+                    ( cat "$SD/p.out" > "$SD/out.log" & echo $! > "$SD/cpid" )
+                    # Wait for the prompt rather than guessing how long boot takes.
+                    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                        sleep 1
+                        grep -aq 'vsh —' "$SD/out.log" 2>/dev/null && break
+                    done
+                    printf 'hello one two three\n' > "$SD/p.in" 2>/dev/null
+                    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                        sleep 1
+                        grep -aq 'argv\[3\]' "$SD/out.log" 2>/dev/null && break
+                    done
+                    kill "$(cat "$SD/qpid")" 2>/dev/null
+                    kill "$(cat "$SD/cpid")" 2>/dev/null
+                    wait "$(cat "$SD/qpid")" 2>/dev/null
+                    check "a line pasted at stam's shell arrives whole" \
+                          "grep -aq 'argv\[3\] = \"three\"' $SD/out.log"
+                fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"
             fi

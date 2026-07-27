@@ -22,6 +22,11 @@ extern size_t strlen(const char *);
 #define PL011_FR   0x18
 #define PL011_FR_TXFF (1u << 5)
 #define PL011_FR_RXFE (1u << 4)     /* receive FIFO empty */
+#define PL011_FR_BUSY (1u << 3)     /* still shifting a character out       */
+#define PL011_LCRH 0x2c             /* line control: word length, and FEN   */
+#define PL011_LCRH_FEN (1u << 4)    /* the receive FIFO exists when this is set */
+#define PL011_CR   0x30
+#define PL011_CR_EN (1u << 0)       /* UARTEN: must be off to change LCR_H  */
 #define PL011_IFLS 0x34             /* FIFO level that raises an interrupt */
 #define PL011_IMSC 0x38             /* which interrupts are wanted         */
 #define PL011_MIS  0x40             /* which are asserted, after masking   */
@@ -166,10 +171,21 @@ static int hw_getc(void) {
  * that at least one character arrived, not how many, and leaving any behind
  * means the next one may never raise another. */
 void console_interrupt(void) {
-    int c;
-    while ((c = hw_getc()) >= 0) ring_put(c);
+    /* Acknowledge *first*, then drain.
+     *
+     * The other order looks more natural and loses characters. Clearing after
+     * the drain clears the status of anything that arrived while we were
+     * draining: the character is sitting in the port, no interrupt is pending
+     * for it, and the reader is asleep waiting for an interrupt that will never
+     * come. Whatever arrives next wakes it and the earlier bytes appear late
+     * and out of order — or, if nothing else is typed, never.
+     *
+     * Acknowledging first can only cost a spurious interrupt with nothing to
+     * read, which the drain loop handles by finding the port empty. */
     if (uart_kind == UART_PL011)
         reg_write(PL011_ICR, PL011_INT_RX | PL011_INT_RT);
+    int c;
+    while ((c = hw_getc()) >= 0) ring_put(c);
 }
 
 int kgetc(void) {
@@ -184,6 +200,22 @@ int console_is_interrupt_driven(void) { return interrupt_driven; }
  * round; afterwards it can sleep. */
 void console_enable_interrupt(void) {
     if (uart_kind == UART_PL011) {
+        /* Turn the receive FIFO on. Without FEN the port holds exactly one
+         * character, so anything arriving faster than the reader drains it is
+         * overwritten in the hardware and never seen — which is what a pasted
+         * line is. IFLS was already being set to "raise at 1/8 full" and meant
+         * nothing, because there was no FIFO to be an eighth of.
+         *
+         * LCR_H may only be changed with the UART disabled, and the port must
+         * finish what it is transmitting first, or the character in flight is
+         * mangled. Real hardware enforces this; QEMU does not, which is exactly
+         * the sort of difference that is discovered on a board and not here. */
+        uint32_t cr = reg_read(PL011_CR);
+        reg_write(PL011_CR, cr & ~PL011_CR_EN);
+        wait_for(PL011_FR, PL011_FR_BUSY, 0);
+        reg_write(PL011_LCRH, reg_read(PL011_LCRH) | PL011_LCRH_FEN);
+        reg_write(PL011_CR, cr);
+
         reg_write(PL011_IFLS, 0);                          /* raise at 1/8 full */
         reg_write(PL011_ICR, 0x7ff);                       /* start clean       */
         reg_write(PL011_IMSC, PL011_INT_RX | PL011_INT_RT);

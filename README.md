@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-057.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-058.
 
 ---
 
@@ -151,13 +151,13 @@ work is finding them rather than finding the races (D-057). No copy-on-write;
 `fork` copies outright. No pipes, no redirection, no filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
-arithmetic (D-056). **A burst of input longer than a few characters is lost** —
-typed slowly the shell reads a whole line, pasted it does not (D-054). A **Qualcomm GENI console driver** and `vbootimg` exist for
+arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: six checks start the kernel under QEMU and read what
-it printed — the scheduler's own verdict, a program's report of its arguments,
+`make test` now boots it: eight checks start the kernel under QEMU and read what
+it printed — including one that pastes a whole line at the shell, because
+feeding one character at a time is exactly the case that always worked (D-058) — the scheduler's own verdict, a program's report of its arguments,
 the pages a finished process gave back. Each was validated by breaking the
 kernel on purpose and watching the right ones go red (D-055). CI has no
 aarch64 QEMU and skips them, so the boot is proved where the kernel is built.

@@ -2027,3 +2027,52 @@ kernel boots, the demonstration completes, the shell reads keys typed at it and
 runs programs, and `make test`'s six boot checks pass. The lost wakeup is the
 one with a visible symptom, and the shell reading input after the change is
 evidence it is not being lost — but not proof it ever was.
+
+## D-058 — Acknowledge the interrupt first, then read the port
+
+A line typed at the shell arrived. A line *pasted* at the shell arrived as its
+first three characters, and then the machine sat there. It was named in D-054
+as a known defect with the ring buffer suspected, which was wrong: the ring is
+256 bytes and was never near full.
+
+`console_interrupt` drained the port and then wrote the acknowledgement:
+
+    while ((c = hw_getc()) >= 0) ring_put(c);
+    reg_write(PL011_ICR, ...);          /* too late */
+
+A character arriving between the last read that found the port empty and that
+write has its interrupt status cleared by it. The character is in the port, no
+interrupt is pending for it, and the reader is asleep waiting for one that will
+never come. Whatever is typed next wakes it and the earlier bytes appear late —
+or, if nothing else is typed, never.
+
+**Acknowledging first can only cost a spurious interrupt with nothing to read**,
+which the drain loop handles by finding the port empty. That is the whole fix,
+and it is two lines moved.
+
+It was worth isolating which change did it. The receive FIFO was also turned on
+in the same session — `LCR_H`'s FEN bit had never been set, so the port held
+exactly one character and `IFLS`, set to "raise at 1/8 full", was an eighth of
+nothing. That is a real defect too. But tested on its own, **the ordering fix
+alone is sufficient and FEN alone would only have made the window smaller**. A
+fix that hides a bug is worse than no fix, and the two are recorded apart so
+nobody later concludes the FIFO was the answer.
+
+Changing `LCR_H` requires the UART disabled and the transmitter idle first, or
+the character in flight is mangled. QEMU does not enforce that; real hardware
+does, which is the sort of difference discovered on a board rather than here.
+
+### The check, and why this one is allowed to exist
+
+`make test` now boots the shell initrd, waits for the prompt, writes a whole
+line in one go, and asserts that `argv[3]` arrives. Feeding one character at a
+time is exactly the case that always worked, so the line has to go in at once
+or the check tests nothing.
+
+D-038 says a check that is only sometimes right is worse than none, so it was
+run three times before being kept: 174, 174, 174. With the acknowledgement moved
+back after the drain it reports 173 passed, 1 failed. It waits for the prompt
+and for the answer rather than sleeping a fixed time, which is what keeps the
+number steady.
+
+173 → 174 checks.
