@@ -20,6 +20,9 @@ static long syscall3(long n, long a, long b, long c) {
 }
 static long read_(char *b, unsigned long n)  { return syscall3(63, 0, (long)b, (long)n); }
 static long write_(const char *s, unsigned long n) { return syscall3(64, 1, (long)s, (long)n); }
+static long close_(int fd)              { return syscall3(57, fd, 0, 0); }
+static long pipe_(int fds[2])           { return syscall3(59, (long)fds, 0, 0); }
+static long dup3_(int old, int newfd)   { return syscall3(24, old, newfd, 0); }
 static long getpid(void)          { return syscall3(172, 0, 0, 0); }
 static long fork_(void)           { return syscall3(220, 0, 0, 0); }
 static long exec_(const char *p, char *const *av) { return syscall3(221, (long)p, (long)av, 0); }
@@ -60,6 +63,23 @@ static int split(char *line, char *words[], int max) {
     return n;
 }
 
+/* Resolve a command name to a path in the initrd and become it. Only returns
+ * when exec failed, and then the process must not carry on being a copy of the
+ * shell — a second prompt from a forked child is a shell nobody can quit. */
+static void run_or_die(char *path, unsigned long size, char **argv) {
+    path[0] = '/';
+    unsigned long i = 0;
+    for (; i < size - 2 && argv[0][i]; i++) path[i + 1] = argv[0][i];
+    path[i + 1] = 0;
+    /* argv[0] is the name as typed, not the path we resolved — which is what
+     * every shell does, and what a program printing its own name expects. */
+    exec_(path, argv);
+    say("  vsh: could not run ");
+    say(argv[0]);
+    say("\n");
+    exit_(127);
+}
+
 int main_loop(void) {
     char line[128];
     char path[130];
@@ -77,39 +97,64 @@ int main_loop(void) {
         int nw = split(line, words, MAX_WORDS);
         if (nw < 0) { say("  vsh: too many words\n"); continue; }
         if (nw == 0) continue;
-        char *cmd = words[0];
 
-        if (same(cmd, "exit")) { say("  bye\n"); return 0; }
-        if (same(cmd, "pid"))  { say("  I am process "); say_num(getpid()); say("\n"); continue; }
-        if (same(cmd, "help")) {
+        if (same(words[0], "exit")) { say("  bye\n"); return 0; }
+        if (same(words[0], "pid"))  { say("  I am process "); say_num(getpid()); say("\n"); continue; }
+        if (same(words[0], "help")) {
             say("  built in: help, pid, exit\n");
             say("  anything else is looked for in the initrd and run,\n");
-            say("  with the rest of the line as its arguments\n");
+            say("  with the rest of the line as its arguments.\n");
+            say("  a | b  runs both, b reading what a writes\n");
             continue;
         }
 
-        /* Not a built-in: it must be a program. */
-        path[0] = '/';
-        unsigned long i = 0;
-        for (; i < sizeof path - 2 && cmd[i]; i++) path[i + 1] = cmd[i];
-        path[i + 1] = 0;
+        /* Split at the first | into two argument vectors. One pipe, not a
+         * chain: two programs is what proves the descriptors are real, and
+         * arbitrarily many is a loop around the same three system calls. */
+        char **left = words, **right = 0;
+        for (int i = 0; i < nw; i++)
+            if (same(words[i], "|")) { words[i] = 0; right = &words[i + 1]; break; }
+        if (right && !*right) { say("  vsh: nothing after |\n"); continue; }
 
-        long child = fork_();
-        if (child == 0) {
-            /* argv[0] is the name as typed, not the path we resolved — which is
-             * what every shell does, and what a program printing its own name
-             * expects to see. */
-            exec_(path, words);
-            /* Only reached when exec failed: the kernel has already said why. */
-            say("  vsh: could not run ");
-            say(cmd);
-            say("\n");
-            exit_(127);
+        int pfd[2] = { -1, -1 };
+        if (right && pipe_(pfd) < 0) { say("  vsh: cannot make a pipe\n"); continue; }
+
+        long a = fork_();
+        if (a == 0) {
+            /* The left-hand side writes into the pipe instead of the console.
+             * dup3 puts the write end at fd 1, and then both original
+             * descriptors are closed — the program must not inherit a spare
+             * copy of the read end, because a pipe with a reader still open
+             * never reports end of file and the right-hand side never
+             * finishes. */
+            if (right) {
+                dup3_(pfd[1], 1);
+                close_(pfd[0]); close_(pfd[1]);
+            }
+            run_or_die(path, sizeof path, left);
         }
-        if (child < 0) { say("  vsh: cannot fork\n"); continue; }
+        if (a < 0) {
+            if (right) { close_(pfd[0]); close_(pfd[1]); }
+            say("  vsh: cannot fork\n"); continue;
+        }
+
+        long b = -1;
+        if (right) {
+            b = fork_();
+            if (b == 0) {
+                dup3_(pfd[0], 0);
+                close_(pfd[0]); close_(pfd[1]);
+                run_or_die(path, sizeof path, right);
+            }
+        }
+        /* And the shell closes its own ends, for the same reason: while it
+         * holds the write end, the reader is still waiting for it. */
+        if (right) { close_(pfd[0]); close_(pfd[1]); }
+        if (right && b < 0) { say("  vsh: cannot fork\n"); }
 
         int status = 0;
         wait_(&status);
+        if (right && b >= 0) wait_(&status);      /* the right-hand code wins */
         int code = (status >> 8) & 0xff;
         if (code) { say("  ["); say_num(code); say("]\n"); }
     }

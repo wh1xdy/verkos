@@ -18,6 +18,7 @@
 #include "cpio.h"
 
 extern void syscall_set_archive(uint64_t addr, uint64_t size);
+extern void syscall_open_stdio(void);
 
 extern void enter_user(uint64_t entry, uint64_t stack_top);
 
@@ -97,6 +98,10 @@ static void initrd_program(void *a) {
     if (!stack || map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
         kprintf("  [kernel] no stack for the program\n"); return;
     }
+    /* Three descriptors, before anything runs. A program that finds fd 1
+     * closed does not check; it writes anyway, is told -EBADF, and carries on
+     * into whatever it does when its output has silently gone nowhere. */
+    syscall_open_stdio();
     kprintf("  [kernel] %s enters at 0x%llx in its own address space\n",
             thread_current()->name, (unsigned long long)entry);
     enter_user(entry, USER_STACK_VA + PAGE_SIZE);

@@ -11,6 +11,7 @@
  */
 #include "console.h"
 #include "sched.h"
+#include "file.h"
 #include "lock.h"
 #include "vm.h"
 #include "mmu.h"
@@ -36,19 +37,30 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_WRITE   64
 #define SYS_EXIT    93
 #define SYS_GETPID 172
+#define SYS_CLOSE   57
+#define SYS_PIPE2   59        /* aarch64 Linux has no plain pipe; pipe2 does both */
+#define SYS_DUP     23
+#define SYS_DUP3    24        /* and no dup2 either; dup3 covers it */
 
 #define EFAULT ((uint64_t)-14)
 
+/* A descriptor names an object now, and the object decides what writing means.
+ * `write(1, ...)` reaching the console is a fact about this process's table,
+ * not about the number 1 — which is exactly what makes `a | b` possible. */
+static file_t *fd_get(uint64_t fd) {
+    if (fd >= NFD) return 0;
+    return thread_current()->fd[fd];
+}
+
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
-    if (fd != 1 && fd != 2) return (uint64_t)-9;        /* -EBADF */
+    file_t *f = fd_get(fd);
+    if (!f) return (uint64_t)-9;                        /* -EBADF */
     /* The buffer address came from a program. Without this the call
      * `write(1, kernel_address, n)` printed kernel memory, and an unmapped one
      * faulted at EL1 — which is not a program being killed but the machine
      * stopping. */
     if (!vm_user_ok(buf, len, 0)) return EFAULT;
-    const char *p = (const char *)(uintptr_t)buf;
-    for (uint64_t i = 0; i < len; i++) kputc(p[i]);
-    return len;
+    return (uint64_t)file_write(f, (const char *)(uintptr_t)buf, len);
 }
 
 /* fork. The frame is passed in because the child needs a copy of it — this is
@@ -210,55 +222,30 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     return 0;
 }
 
-/* A line from the console, with the editing a person expects: characters are
- * echoed as they arrive, backspace removes one, and the line is delivered when
- * Return is pressed. Doing this in the kernel is what a terminal driver is
- * for — a program should not have to know that a backspace is three bytes to
- * undo on screen.
- *
- * It waits by yielding, because nothing wakes a thread on input yet. */
 static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
-    if (fd != 0) return (uint64_t)-9;                        /* -EBADF */
+    file_t *f = fd_get(fd);
+    if (!f) return (uint64_t)-9;                             /* -EBADF */
     if (!len) return 0;
     /* Checked before a character is waited for, not after: a read that will
      * fail should fail now rather than after blocking a person at a prompt. */
     if (!vm_user_ok(buf, len, 1)) return EFAULT;
-    /* Somebody is reading from the console, so somebody is sitting at it. */
-    kquiet(1);
-    char *out = (char *)(uintptr_t)buf;
-    uint64_t n = 0;
-    for (;;) {
-        /* Masked from before the buffer is examined until after this thread is
-         * marked blocked. A character arriving in that gap would otherwise find
-         * nobody waiting for it, wake nobody, and leave the reader asleep with
-         * its wakeup already spent — a prompt that ignores the key you pressed.
-         * The window is a handful of instructions, which is exactly the size of
-         * bug that survives a long time. */
-        uint64_t f = irq_save();
-        int c = kgetc();
-        if (c < 0) {
-            /* Sleep if the port can wake us; otherwise there is nothing to do
-             * but give way and look again. */
-            if (console_is_interrupt_driven()) {
-                thread_block_on_console();      /* returns with the mask held */
-                irq_restore(f);
-            } else {
-                irq_restore(f);
-                thread_yield();
-            }
-            continue;
-        }
-        irq_restore(f);
-        if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return n; }
-        if (c == 0x7f || c == 8) {           /* backspace */
-            if (n) { n--; kputs("\b \b"); }
-            continue;
-        }
-        if (c < 32 || c > 126) continue;     /* ignore what we cannot show */
-        if (n + 1 >= len) continue;          /* full: stop accepting, keep the line */
-        kputc((char)c);
-        out[n++] = (char)c;
-    }
+    return (uint64_t)file_read(f, (char *)(uintptr_t)buf, len);
+}
+
+/* Give a process the three descriptors every program assumes it was started
+ * with. A program that finds fd 1 closed does not check; it writes anyway and
+ * the message goes nowhere. */
+void syscall_open_stdio(void) {
+    thread_t *t = thread_current();
+    for (int i = 0; i < 3; i++)
+        if (!t->fd[i]) t->fd[i] = file_console();
+}
+
+static int fd_alloc(file_t *f) {
+    thread_t *t = thread_current();
+    for (int i = 0; i < NFD; i++)
+        if (!t->fd[i]) { t->fd[i] = f; return i; }
+    return -1;
 }
 
 static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void *frame) {
@@ -269,6 +256,49 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
                                       (char *const *)(uintptr_t)b, frame);
     case SYS_WRITE:  return sys_write(a, b, c);
     case SYS_GETPID: return (uint64_t)thread_current()->id;
+    case SYS_CLOSE: {
+        if (a >= NFD || !thread_current()->fd[a]) return (uint64_t)-9;
+        file_close(thread_current()->fd[a]);
+        thread_current()->fd[a] = 0;
+        return 0;
+    }
+    case SYS_DUP: {
+        file_t *f = fd_get(a);
+        if (!f) return (uint64_t)-9;
+        int n = fd_alloc(file_ref(f));
+        if (n < 0) { file_close(f); return (uint64_t)-24; }   /* -EMFILE */
+        return (uint64_t)n;
+    }
+    case SYS_DUP3: {
+        /* dup3(old, new, flags): new becomes another name for old. Closing
+         * what was at `new` first is the whole point — this is how a shell
+         * makes a pipe be a program's standard output without the program
+         * knowing. Duplicating onto itself is an error in dup3, unlike dup2,
+         * and refusing is better than the alternative: closing `old` and then
+         * duplicating a descriptor that no longer exists. */
+        file_t *f = fd_get(a);
+        if (!f || b >= NFD) return (uint64_t)-9;
+        if (a == b) return (uint64_t)-22;                     /* -EINVAL */
+        file_ref(f);
+        if (thread_current()->fd[b]) file_close(thread_current()->fd[b]);
+        thread_current()->fd[b] = f;
+        return b;
+    }
+    case SYS_PIPE2: {
+        if (!vm_user_ok(a, 2 * sizeof(int), 1)) return EFAULT;
+        file_t *r = 0, *w = 0;
+        if (file_pipe(&r, &w) != 0) return (uint64_t)-24;     /* -EMFILE */
+        int rf = fd_alloc(r);
+        int wf = rf >= 0 ? fd_alloc(w) : -1;
+        if (rf < 0 || wf < 0) {
+            if (rf >= 0) { thread_current()->fd[rf] = 0; }
+            file_close(r); file_close(w);
+            return (uint64_t)-24;
+        }
+        int *out = (int *)(uintptr_t)a;
+        out[0] = rf; out[1] = wf;
+        return 0;
+    }
     case SYS_WAIT4: {
         /* Validated before waiting, so a bad pointer is an error rather than a
          * child collected and its status thrown at an address nobody owns. */

@@ -685,22 +685,24 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
         # machine died inside fdt_init, before there were vectors to report it:
         # no output at all. -mstrict-align is what stops that.
         #
-        # Checked in the instructions rather than in the flags, because the flag
-        # is what we asked for and this is what we got. A 64-bit str can only
-        # encode an 8-aligned offset, so any unaligned one has to become a stur
-        # — which makes "a stur with a 64-bit register at an offset that is not
-        # a multiple of 8" exactly the instruction that cost the boot.
-        if command -v "${STAM_CROSS}objdump" >/dev/null 2>&1 && [ -f pkg/stam/stam.elf ]; then
-            nun=$("${STAM_CROSS}objdump" -d pkg/stam/stam.elf 2>/dev/null |
-                  grep -oE '(stur|ldur)[[:space:]]+x[0-9]+, \[x[0-9]+, #-?[0-9]+\]' |
-                  grep -oE '#-?[0-9]+' | tr -d '#' |
-                  awk '$1 % 8 != 0' | wc -l | tr -d ' ')
-            if [ "${nun:-0}" -eq 0 ]; then
-                ok "stam has no unaligned 64-bit access (it runs before the MMU)"
-            else
-                bad "stam has $nun unaligned 64-bit access(es) — fatal before the MMU is on"
-            fi
-        fi
+        # This was first written to scan the disassembly for a `stur` of a
+        # 64-bit register at an offset that is not a multiple of 8, on the
+        # reasoning that a 64-bit `str` can only encode an aligned offset. The
+        # reasoning is right about the instruction and wrong about the check:
+        # the displacement is measured from whatever the base register holds,
+        # and the compiler routinely points the base into the middle of a
+        # struct. `ldur x2, [x1, #44]` in thread_wake_pipe was reported as a
+        # defect when x1 was already `&threads[i].state`, making the real
+        # offset 64. A test that reports a defect that is not there is worse
+        # than no test, because the next person deletes it — D-028, learned
+        # again.
+        #
+        # The flag is what can actually be checked. It has to be in COMMON so
+        # that both builds get it, which is the trap CLAUDE.md names: the two
+        # have drifted before and a defect existed on one path and not the
+        # other.
+        check "-mstrict-align is in COMMON, so both builds get it" \
+              "awk '/^COMMON/,/[^\\\\]\$/' pkg/stam/Makefile | grep -q -- -mstrict-align"
         # The same kernel must also build as a UEFI application, because that
         # is how our own bootloader starts it.
         if ( cd pkg/stam && make CROSS="$STAM_CROSS" stam.efi >/dev/null 2>&1 ) && [ -f pkg/stam/stam.efi ]; then
@@ -808,16 +810,46 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                         sleep 1
                         grep -aq 'vsh —' "$SD/out.log" 2>/dev/null && break
                     done
-                    printf 'hello one two three\n' > "$SD/p.in" 2>/dev/null
+                    # One open, held across both lines. Each `> fifo` is an
+                    # open and a close, and the close is EOF on QEMU's input —
+                    # after which the second line may never be read at all.
+                    # That, not the timing, is why this was flaky.
+                    exec 9> "$SD/p.in"
+                    printf 'hello one two three\n' >&9
                     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
                         sleep 1
                         grep -aq 'argv\[3\]' "$SD/out.log" 2>/dev/null && break
                     done
+                    # Then a pipeline. `upper` reads standard input and writes
+                    # it back in capitals, and knows nothing about where either
+                    # is attached — so capitals appearing is the descriptor
+                    # having been redirected, not the program behaving
+                    # differently. It also proves end of file: upper only stops
+                    # when the last writer closes, so a result at all means the
+                    # pipe reported EOF rather than hanging.
+                    # Longer than the others on purpose: a pipeline is two
+                    # forks, two execs and a buffer that is only flushed when
+                    # the writer exits, so its answer arrives later than an
+                    # unpiped command's. Fifteen seconds was enough two runs in
+                    # three, which is the worst possible amount (D-038).
+                    printf 'hello world | upper\n' >&9
+                    for _ in $(seq 1 40); do
+                        sleep 1
+                        grep -aq 'ARGV\[1\]' "$SD/out.log" 2>/dev/null && break
+                    done
+                    exec 9>&-
                     kill "$(cat "$SD/qpid")" 2>/dev/null
                     kill "$(cat "$SD/cpid")" 2>/dev/null
                     wait "$(cat "$SD/qpid")" 2>/dev/null
                     check "a line pasted at stam's shell arrives whole" \
                           "grep -aq 'argv\[3\] = \"three\"' $SD/out.log"
+                    check "a | b sends one program's output to the other" \
+                          "grep -aq 'ARGV\[1\] = \"WORLD\"' $SD/out.log"
+                    # The unpiped run must still reach the console in lower
+                    # case, or the check above would also pass on a shell that
+                    # simply capitalised everything.
+                    check "the same program unpiped still writes to the console" \
+                          "grep -aq 'argv\[1\] = \"one\"' $SD/out.log"
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

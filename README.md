@@ -20,7 +20,7 @@ depend on what it reports: a boot menu entry naming a flag nothing implemented, 
 kernel printing "time running" with no timer, an installer that "succeeded" every
 time while producing an unbootable disk. So this file distinguishes what has been
 booted from what has only been written. The reasoning behind every choice is in
-[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-058.
+[`docs/DECISIONS.md`](docs/DECISIONS.md), D-001 to D-059.
 
 ---
 
@@ -126,9 +126,9 @@ What it does today, each verified by running it:
 - Preemptive round-robin scheduling driven from the timer interrupt, with the
   kernel in the high half (TTBR1) and every process holding its own low half
   (D-037, D-042, D-043).
-- Seven system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
-  `wait4` — using Linux's aarch64 numbers, because the numbering is the cheapest
-  part of an ABI to agree with (D-039). **Every pointer they are given is
+- Eleven system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
+  `wait4`, `close`, `dup`, `dup3`, `pipe2` — using Linux's aarch64 numbers,
+  because the numbering is the cheapest part of an ABI to agree with (D-039). **Every pointer they are given is
   checked** against the caller's own page tables before it is dereferenced: the
   MMU stops a program reaching kernel memory, but says nothing about the kernel
   reaching it on the program's behalf (D-056).
@@ -136,8 +136,12 @@ What it does today, each verified by running it:
   speaks, both readers ours (D-040, D-047).
 - `fork`, `exec`, `wait4`, zombie reaping and pages that come back — a process
   that exits returns every page of its address space (D-046, D-048).
+- **File descriptors, and a pipe.** A descriptor names a refcounted object, the
+  table belongs to the process, and `fork` duplicates it — so `a | b` is two
+  programs that each believe they are talking to a terminal. End of file is the
+  last writer letting go (D-059).
 - **A shell**, `vsh`: prompt, read a line, split it, fork, exec with arguments,
-  wait. That is the evidence, not the feature — being able to write a shell as
+  wait — and `a | b`. That is the evidence, not the feature — being able to write a shell as
   an ordinary program with no privileges and nothing the kernel knows about it
   is what shows the interface underneath is real (D-049, D-054).
 - An interrupt-driven console with a line discipline, and a machine that actually
@@ -148,7 +152,7 @@ Named rather than hidden: **no SMP.** Everything shared with an interrupt
 handler is protected by masking that interrupt, which is sufficient on one CPU
 and not on two — the sections are marked, so the day there is a second core the
 work is finding them rather than finding the races (D-057). No copy-on-write;
-`fork` copies outright. No pipes, no redirection, no filesystem beyond the initrd. No FP/SIMD
+`fork` copies outright. No filesystem beyond the initrd. No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for

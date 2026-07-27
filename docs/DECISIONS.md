@@ -2076,3 +2076,68 @@ and for the answer rather than sleeping a fixed time, which is what keeps the
 number steady.
 
 173 → 174 checks.
+
+## D-059 — A descriptor names an object
+
+`read` meant the console and `write` meant the console, and the number in front
+of them was checked only to reject anything unexpected. A shell cannot be
+written that way: `a | b` is two programs that both believe they are talking to
+a terminal, and the whole trick is that neither of them knows otherwise.
+
+So the number names an object, the object is refcounted, and the table belongs
+to the process. `fork` duplicates the table and each object gains a holder,
+which is what lets both halves of a pipeline close the end they do not use
+without taking it from the other. `exit` closes what is left, and **that is
+where end-of-file comes from** — a reader is released when the last writer lets
+go, not when the first does. A pipe that never reports EOF is a shell that
+hangs after every command.
+
+Fixed pools rather than an allocator: eight pipes of one page each, thirty-two
+file objects. A machine that wants more wants a different kernel, and saying so
+with `-EMFILE` is better than discovering it as a failed page allocation
+somewhere unrelated.
+
+Five calls added, all with Linux's aarch64 numbers: `close`, `dup`, `dup3`,
+`pipe2`. There is no `pipe` or `dup2` on aarch64 — `pipe2` and `dup3` are the
+whole interface, and adopting that rather than inventing friendlier names is
+D-030's principle again.
+
+**`upper` is the evidence.** It reads standard input, writes it back in
+capitals, and knows nothing about where either is attached:
+
+    verk$ hello world | upper
+      [HELLO] ARGV[1] = "WORLD"
+    verk$ hello plain
+      [hello] argv[1] = "plain"
+
+Same program, same binary, same argv. The capitals are the descriptor having
+been redirected rather than the program behaving differently — which is why the
+unpiped case is also checked. A shell that simply capitalised everything would
+pass the first assertion and fail the second.
+
+### Two checks that were wrong before they were right
+
+**The alignment check from D-053 was reporting a defect that was not there.**
+It scanned for a `stur` of a 64-bit register at an offset that is not a
+multiple of 8, on the reasoning that a 64-bit `str` can only encode an aligned
+offset. The reasoning is right about the instruction and wrong about the check:
+the displacement is measured from whatever the base register holds, and the
+compiler routinely points the base into the middle of a struct.
+`ldur x2, [x1, #44]` in `thread_wake_pipe` was flagged while `x1` was already
+`&threads[i].state`, making the real offset 64 and perfectly aligned.
+
+D-028 said it in as many words: *a test that reports a defect that is not there
+is worse than no test, because the next person deletes it.* It has now been
+learned twice. The check is the flag's presence in `COMMON` — which is what
+would have caught the original defect anyway, since the flag was simply absent.
+D-053's claim that only the disassembly check could catch it was wrong.
+
+**And the pipeline check was flaky, for a reason that was not timing.** It
+failed roughly one run in three and survived a longer timeout unchanged. Each
+`printf ... > "$SD/p.in"` opens the fifo and closes it, and that close is
+end-of-file on QEMU's input — after which the second line may never be read at
+all. Holding one descriptor open across both writes made it 176/176 four times
+running. The instinct to blame timing for an intermittent test is the thing to
+distrust; the first fix attempted was a longer wait, and it changed nothing.
+
+174 → 176 checks.

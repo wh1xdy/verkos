@@ -39,7 +39,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o syscall.o userprog.o main.o
+OBJS = boot.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -80,7 +80,7 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
@@ -129,6 +129,12 @@ progs/init.elf: progs/init.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Reads standard input and writes it back in capitals: the right-hand side of
+# a pipe, and identical whether that is a terminal or another program.
+progs/upper.elf: progs/upper.c
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -144,7 +150,7 @@ progs/vsh.elf: progs/vsh.c
 # A second archive whose /init is the shell. Kept separate so the automatic
 # demonstration still ends by itself: a shell waits for a person, and a test
 # that waits for a person never finishes.
-progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf progs/badptr.elf
+progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twice.elf progs/badptr.elf progs/upper.elf
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/sroot && mkdir -p progs/sroot
@@ -153,6 +159,7 @@ progs/initrd-shell.cpio: progs/vsh.elf progs/hello.elf progs/forky.elf progs/twi
 	@cp progs/forky.elf progs/sroot/forky
 	@cp progs/twice.elf progs/sroot/twice
 	@cp progs/badptr.elf progs/sroot/badptr
+	@cp progs/upper.elf progs/sroot/upper
 	( cd progs/sroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.elf
@@ -166,7 +173,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
-       progs/badptr.elf \
+       progs/badptr.elf progs/upper.elf \
        progs/initrd.cpio progs/initrd-shell.cpio
 
 run-prog: stam.img progs/hello.elf

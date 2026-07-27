@@ -14,6 +14,8 @@
  */
 #include "console.h"
 #include "fdt.h"
+#include "sched.h"
+#include "lock.h"
 
 extern size_t strlen(const char *);
 
@@ -194,6 +196,41 @@ int kgetc(void) {
 }
 
 int console_is_interrupt_driven(void) { return interrupt_driven; }
+
+long console_read_line(char *out, uint64_t len) {
+    if (!len) return 0;
+    /* Somebody is reading from the console, so somebody is sitting at it. */
+    kquiet(1);
+    uint64_t n = 0;
+    for (;;) {
+        /* Masked from before the buffer is examined until after this thread is
+         * marked blocked. A character arriving in that gap would otherwise find
+         * nobody waiting for it, wake nobody, and leave the reader asleep with
+         * its wakeup already spent — a prompt that ignores the key you pressed. */
+        uint64_t f = irq_save();
+        int c = kgetc();
+        if (c < 0) {
+            if (interrupt_driven) {
+                thread_block_on_console();      /* returns with the mask held */
+                irq_restore(f);
+            } else {
+                irq_restore(f);
+                thread_yield();
+            }
+            continue;
+        }
+        irq_restore(f);
+        if (c == '\r' || c == '\n') { kputc('\n'); out[n++] = '\n'; return (long)n; }
+        if (c == 0x7f || c == 8) {           /* backspace */
+            if (n) { n--; kputs("\b \b"); }
+            continue;
+        }
+        if (c < 32 || c > 126) continue;     /* ignore what we cannot show */
+        if (n + 1 >= len) continue;          /* full: stop accepting, keep the line */
+        kputc((char)c);
+        out[n++] = (char)c;
+    }
+}
 
 /* Ask the port to raise an interrupt when something arrives. Until this is
  * called a reader has to poll, which works and wastes a time slice each time

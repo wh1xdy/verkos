@@ -81,8 +81,10 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->parent      = current ? current->id : -1;
     t->status      = 0;
     t->wait_reason = 0;
+    t->wait_object = 0;
     t->stack_low   = 0;
     t->sp          = 0;
+    for (int i = 0; i < NFD; i++) t->fd[i] = 0;
 }
 
 /* The frame cpu_switch will pop the first time this thread is resumed. The
@@ -126,6 +128,11 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
     if (!stack) { t->state = THREAD_FREE; return 0; }
 
     slot_init(t, "child", space);
+    /* The descriptors are duplicated and the objects behind them gain a
+     * holder. That is what lets both halves of `a | b` close the end they do
+     * not use without taking it from the other. */
+    for (int i = 0; i < NFD; i++)
+        t->fd[i] = current ? file_ref(current->fd[i]) : 0;
     t->stack_low = (uint64_t)(uintptr_t)stack;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
@@ -212,6 +219,14 @@ void thread_exit(int status) {
     current->space = 0;
     irq_restore(f);
 
+    /* Letting go of the descriptors is what tells the other end of a pipe that
+     * this process is finished — a reader waiting on a command that has exited
+     * is released here, and nowhere else. */
+    for (int i = 0; i < NFD; i++) {
+        file_close(current->fd[i]);
+        current->fd[i] = 0;
+    }
+
     if (space) vm_free_space(space);
 
     /* Waking the parent is a search-then-write over slots the console
@@ -243,6 +258,28 @@ void thread_block_on_console(void) {
     current->wait_reason = WAIT_CONSOLE;
     current->state = THREAD_BLOCKED;
     schedule();
+}
+
+/* Wait for a pipe to change. Both ends block here for opposite reasons — a
+ * reader for bytes, a writer for room — so the wakeup is by object and wakes
+ * everyone. Each re-tests its own condition in a loop, which is what makes a
+ * shared wakeup safe: a thread woken for the wrong reason simply blocks again.
+ *
+ * Call with interrupts masked, holding the mask from before the condition was
+ * tested. Same lost-wakeup shape as the console, and the same fix. */
+void thread_block_on_pipe(const void *object) {
+    current->wait_reason = WAIT_PIPE;
+    current->wait_object = object;
+    current->state = THREAD_BLOCKED;
+    schedule();
+}
+
+void thread_wake_pipe(const void *object) {
+    for (int i = 0; i < n_threads; i++)
+        if (threads[i].state == THREAD_BLOCKED &&
+            threads[i].wait_reason == WAIT_PIPE &&
+            threads[i].wait_object == object)
+            threads[i].state = THREAD_RUNNABLE;
 }
 
 /* Called from the interrupt, so it does the least it can: mark them runnable
