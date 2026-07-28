@@ -510,11 +510,11 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* Not slept on. Three attempts: D-086 tried it, D-087 gave it a floor, and
-     * D-088 made the machine say what it looked like when it stopped. The
-     * fourth thing the machine said is in D-089 — next_runnable *does* return a
-     * runnable thread and no switch happens anyway, which puts the defect
-     * between choosing and switching and nowhere near this file.
+    /* Not slept on. Four attempts now: D-086 tried it, D-087 gave it a floor,
+     * D-088 made the machine say what it looked like when it stopped, D-089
+     * asked the chooser, and D-090 asked which way the chooser went. The last
+     * answer is the strangest and is where this continues — it is not in this
+     * file, and has not been since D-088.
      *
      * What all of it left behind: this wait runs with interrupts enabled, so
      * the timer ticks and the console is read while the device works.

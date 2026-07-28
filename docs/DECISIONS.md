@@ -3916,3 +3916,38 @@ driver polls with interrupts enabled, which is where D-086 left it.
 Print, from inside `schedule_locked` on the path where it does *not* switch,
 which of its four early returns it took. There are exactly four and one of them
 is being taken; naming it is a line of code and ends this.
+
+## D-090 — the chooser's answer, and where this stops for now
+
+**2026-07-28.** D-089 promised one line: record which of `schedule_locked`'s
+four exits is taken on a machine that has stopped. It was written, and the
+answer was **0** — none of them. The variable was never assigned, which on a
+machine that has booted and switched threads thousands of times cannot be true
+of the function they all live in.
+
+So either `schedule()` returns before reaching `schedule_locked`, or the
+variable being read is not the one being written. Both are testable and neither
+was tested: the instrumentation itself made `make test` unstable — two runs in a
+row failed different SMP checks — and a diagnostic that changes what it
+diagnoses is the second time that happened today (D-088). It was reverted.
+
+### Where this stands, honestly
+
+Four entries have now been written about a disk sleep that does not work on one
+processor, and the useful part of all four is that the problem is **not in the
+driver**:
+
+| | |
+|---|---|
+| D-086 | the sleep hangs a single-processor boot; no timeout to bound it |
+| D-087 | a bounded sleep did not help — so the thread is not in the sleep |
+| D-088 | no thread switch at all, with two threads runnable |
+| D-089 | `next_runnable` *does* name a runnable thread |
+| D-090 | and `schedule_locked` appears never to reach any of its exits |
+
+Each step was a real narrowing and each was bought by asking the machine rather
+than reasoning. What is left is one question with two candidate answers, and it
+belongs in a session with room to test them rather than at the end of one.
+
+The disk driver polls, with interrupts enabled. `make test` is 253 checks and
+green. Nothing in the tree depends on the sleep.
