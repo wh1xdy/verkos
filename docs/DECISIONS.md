@@ -3951,3 +3951,58 @@ belongs in a session with room to test them rather than at the end of one.
 
 The disk driver polls, with interrupts enabled. `make test` is 253 checks and
 green. Nothing in the tree depends on the sleep.
+
+## D-091 — `started` is being cleared, and nothing writes it
+
+**2026-07-28.** D-090 ended with `last_exit == 0`: `schedule_locked` appeared
+never to run. The disassembly settles it, and the answer is not about the
+scheduler.
+
+`sched_idle_loop` inlines `schedule()`, and there is exactly one path through it
+that reaches `wfi` again without calling `schedule_locked`:
+
+```
+40085c88:  ldr  w0, [x27, #12]
+40085c8c:  cbz  w0, 40085c70      <- back to wfi, schedule_locked skipped
+40085c90:  mrs  x21, daif          <- otherwise: take the lock and schedule
+```
+
+And `sched_init` writes that same word:
+
+```
+40085b34:  str  w1, [x6, #12]      x6 == x27
+```
+
+So `[x27, #12]` is `started`, and **`started` is zero** on a machine that has
+booted and run thousands of threads. Nothing in the kernel writes it except
+`sched_init`, and that writes 1.
+
+### Which makes this a memory bug, not a scheduler bug
+
+`started` is a `static int` in `sched.c` with `switches` four bytes after it.
+Something is writing over them. That is a much better explanation of today than
+five separate scheduler theories were:
+
+- a disk sleep that hangs on one processor and not two (D-086)
+- a bounded sleep that changed nothing (D-087)
+- a machine with runnable threads and no switch (D-088)
+- a chooser that names a thread nobody takes (D-089)
+- and a function that appears never to run (D-090)
+
+All five are what a cleared `started` looks like from five angles.
+
+### What to do with it
+
+Two checks already exist and neither covers this: the kernel stack canary
+(D-084) has never fired, and the freed-page marker (D-084) has never fired. So
+the writer is neither a stack overflow nor a use-after-free of a whole page — it
+is an out-of-bounds write into `sched.c`'s statics, most likely past the end of
+an array near them.
+
+The cheapest next step is the same one that worked five times today: **make the
+program say it.** A canary word placed either side of `started` in the same
+translation unit, checked where `started` is read, names the moment. After that
+the writer is found by which arrays neighbour it in the object file.
+
+The disk sleep is not the bug and never was. It is the workload that made the
+corruption reachable.
