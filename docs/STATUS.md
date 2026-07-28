@@ -4,7 +4,7 @@ Written 2026-07-26, as a handover. The point of this file is to let a new
 session start without reading the whole history: what is proved, what is
 merely written, and what is known to be wrong.
 
-`make test` — 248 checks, all passing, run in the `verkbuild` container on
+`make test` — 252 checks, all passing, run in the `verkbuild` container on
 2026-07-28; the SMP and signal-handler checks have passed three
 consecutive runs and the 226 older ones twelve. The number is host-dependent: some checks are skipped without a
 network or a cross toolchain, so a Mac host reports fewer and fails several on
@@ -47,6 +47,12 @@ reads nothing but GPT will not find it.
 
 ## Known-wrong or fragile
 
+- **stam's block driver polls, with interrupts masked.** The machine stands
+  still for the whole of every sector, so a boot that creates and removes a
+  handful of files takes minutes. `make test` allows seven of them for the
+  disk-only boot. Interrupt-driven I/O is the fix and is not written; a first
+  attempt at yielding inside the wait made things worse and was reverted
+  (D-085).
 - **The stam script boot is occasionally slow enough to be killed.** `make test`
   waits 180 seconds for the shell to say `bye`; under a loaded host — another
   QEMU left running, for instance — it sometimes does not, and three checks go

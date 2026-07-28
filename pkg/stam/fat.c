@@ -157,9 +157,19 @@ static int fat_set(uint32_t c, uint32_t v) {
  * trusting a hint that may be stale is how two files come to share a cluster,
  * so it is written and not read. */
 static uint32_t clus_alloc(void) {
+    /* A sector holds 128 entries. Reading it once per entry was reading it a
+     * hundred and twenty-eight times for the same 512 bytes, through a driver
+     * that polls — which is not a wrong answer, it is the same answer paid for
+     * over and over, and it made a boot that does a few file creations take
+     * minutes rather than seconds. */
+    uint64_t cached = (uint64_t)-1;
     for (uint32_t c = 2; c < total_clus; c++) {
         uint64_t off = (uint64_t)c * 4;
-        if (rd_sec(fat_start + off / 512, secbuf) != 0) return 0;
+        uint64_t sec = fat_start + off / 512;
+        if (sec != cached) {
+            if (rd_sec(sec, secbuf) != 0) return 0;
+            cached = sec;
+        }
         if ((rd32(secbuf + (off % 512)) & 0x0fffffffu) != 0) continue;
         if (fat_set(c, 0x0ffffff8u) != 0) return 0;
         /* A fresh cluster still holds whatever was there. For a directory that

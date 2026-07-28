@@ -3698,3 +3698,63 @@ turns it into a line of output at the moment it happens.
 
 `make test`: 248 checks, unchanged — this fixes a defect nothing was catching,
 which is worth saying plainly rather than counting.
+
+## D-085 — directories, and three programs that only use the calls
+
+**2026-07-28.** `stam` can list, make and remove directories on the medium:
+
+```
+verk$ mkdir /adir
+verk$ ls /
+  diskprog
+  note.txt
+  vboot.conf
+  init
+  hello
+  upper
+  rc
+  OUT.TXT
+  ADIR/
+verk$ rm /gone.txt
+```
+
+`getdents64`, `mkdirat` and `unlinkat`, with Linux's numbers. `ls`, `mkdir` and
+`rm` are ordinary programs with no privileges and nothing the kernel knows about
+them — the same argument as the shell in D-049. A builtin would have proved
+nothing about the interface.
+
+`dirfd` is accepted only as `AT_FDCWD` and anything else is refused. There is no
+working directory yet, so every path is absolute; ignoring the argument silently
+would be a call that looks like it supports relative-to-a-directory and does not.
+
+`rm` takes a file or an **empty** directory. Removing a tree means walking it,
+and a walk that stopped half way would leave clusters belonging to a directory
+that no longer exists — lost until something recounts the whole table.
+
+A directory that fills up now grows by a cluster. Without that, the eighth file
+in a root of sixteen slots failed with "no such file" — a true error code about
+entirely the wrong thing.
+
+### The bug this work found was not in this work
+
+Three commits of it were spent chasing `elf_load` faulting on addresses the
+program owned. That was D-084 — a variable the whole machine shared, introduced
+by D-078, on main since then, and invisible until something spent long enough
+between two page mappings to be preempted. The directory work found it by being
+slow.
+
+### The other thing that was slow
+
+`clus_alloc` read a FAT sector **per cluster examined**. A sector holds a
+hundred and twenty-eight entries, so it was paying for the same 512 bytes a
+hundred and twenty-eight times, through a driver that polls. Not a wrong answer
+— the same answer bought over and over — and it turned a boot that creates a few
+files from seconds into minutes.
+
+It is cached across the scan now, and the disk-only boot's check in `make test`
+is given seven minutes rather than three. **That number is a driver limitation
+and it is written down as one**: every sector is polled with interrupts masked,
+so the machine stands still for the whole of every transfer. Interrupt-driven
+block I/O is what removes it and is not written.
+
+`make test`: 252 checks, was 248.
