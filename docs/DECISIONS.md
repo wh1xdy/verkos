@@ -4103,3 +4103,47 @@ them the instrument lying about itself. The useful residue:
 **A diagnostic is code.** Four were wrong today, and the one that finally said
 something trustworthy was the one built to contradict itself if it were lying.
 That is worth more than the bug it is still chasing.
+
+## D-094 — not the GOT either, and that is five
+
+**2026-07-28.** D-093 proposed that `sched_calls` and `sched_exit` resolve to two
+different addresses — the trap of D-037, D-039, D-076 and D-081 in a new shape.
+It is checkable with `objdump` and it is wrong.
+
+Both sides compute the same base:
+
+```
+schedule_locked:   adrp x20, 40091000 ; add x19, x20, #0xee0
+                   str  w0, [x19, #8]      <- sched_calls  (0x40091ee8)
+                   add  x20, x20, #0xee0
+                   str  w1, [x20, #12]     <- sched_exit   (0x40091eec)
+sched_idle_loop:   adrp x8,  40091000 ; add x27, x8,  #0xee0
+```
+
+`nm` agrees: `sched_calls` at `0x40091ee8`, `sched_exit` at `0x40091eec`. One
+address each, computed the same way in both functions. No GOT, no second copy.
+
+So the contradiction in D-093 — twelve thousand calls, exit never set — is real
+and unexplained, and the explanation offered for it was wrong.
+
+### That is five wrong answers in a row about one thing
+
+D-088's report counted the wrong thing. D-088's second version changed what it
+measured. D-090's counter read a value it could not have. D-091 inferred a
+memory bug from it and D-092 withdrew that. D-093 inferred a relocation bug and
+this withdraws that.
+
+The measurement in D-093 is the only part still standing, and it stands because
+it was built to contradict itself if it lied. Everything built *on top of* it
+has been wrong, which is its own lesson: **a trustworthy measurement does not
+make the next inference trustworthy.**
+
+### Where a session with room should start
+
+Not with another theory. With the four instructions between `sched_calls++` and
+the first `sched_exit =`, read in the disassembly — there are not many, and one
+of them returns. The report's own loads are at offsets 4 and 20 of the same
+base, which are neither counter, so what the `kprintf` actually reads has not
+been established either and should be, first.
+
+`make test`: 253 checks, green, with none of this in the kernel.
