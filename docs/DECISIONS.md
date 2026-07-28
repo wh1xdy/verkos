@@ -4408,3 +4408,53 @@ applies to every other output: *what does this print when the thing it describes
 did not happen?* The answer was "exactly the same", and nobody asked.
 
 `make test`: 253 checks, green.
+
+## D-100 — twenty readers, one survivor, and a defect found while latent
+
+**2026-07-28.** Four independent readings of the same question — locking, the
+run queue, the wake-up path, and the diagnostic itself — with every candidate
+they produced handed to a refuter told to disprove it against the source.
+Twenty agents, sixteen candidates, **one survivor**:
+
+> `switches` was declared, read three times, and never incremented, so "switches
+> stopped changing" is not evidence of anything.
+
+Which is D-099, reached independently and by a different route: a whole-tree
+grep and `git log -S "switches++"`, where this session reached it by counting
+each exit separately. Two paths to the same fact is worth more than one, and it
+is the first thing all day that two independent methods agreed on.
+
+The reading that found it also settled what the other evidence meant:
+
+- `exit_n[4]` climbing says the machine **is** switching, roughly three thousand
+  times in those five seconds — the opposite of a stopped machine
+- `next_runnable` naming a runnable thread is not a paradox: `sched_idle_loop`
+  calls `schedule()` on the line after the report, and switches to exactly that
+  thread
+
+### The defect the refuters found on the way
+
+One candidate — that `thread_exit`'s `THREAD_ZOMBIE` is overwritten by the disk
+sleep — was refuted as an explanation of the hang, correctly: the hang is at the
+*first write*, in `file_open`, long before any descriptor is closed. But the
+refutation ends:
+
+> The unconditional state write in `thread_block_on_pipe_until` is a real latent
+> hazard, but it cannot be this bug.
+
+It is. `thread_exit` marks itself `THREAD_ZOMBIE`, releases the lock, and *then*
+closes its descriptors — and closing a written file on the disk calls
+`fat_sync`, which does I/O, which is a path that can block. With the sleep
+enabled, `current->state = THREAD_BLOCKED` would write over `THREAD_ZOMBIE`:
+the parent's `wait` never finds a zombie, and the thread comes back RUNNABLE for
+ever.
+
+All three block helpers now refuse to put a thread to sleep unless it is
+`THREAD_RUNNING`. The caller re-tests its own condition either way, which it has
+to do regardless.
+
+**A defect found while still latent**, by a reader with no stake in the theory it
+was refuting. That is what the fan-out bought that a sixth attempt by me would
+not have.
+
+`make test`: 253 checks, green.

@@ -501,6 +501,15 @@ void thread_exit(int status) {
  * schedule() masks again on the way in and restores this thread's own value on
  * the way out, so the caller's mask is still held when this returns. */
 void thread_block_on_console(void) {
+    /* Only a thread that is actually running may be put to sleep.
+     *
+     * thread_exit marks itself THREAD_ZOMBIE, releases the lock, and only then
+     * closes its descriptors — and closing a written file on the disk does I/O,
+     * which is a path that can block. Writing THREAD_BLOCKED over THREAD_ZOMBIE
+     * there would resurrect a process its parent is waiting to collect: the
+     * wait never finds a zombie, and the thread comes back RUNNABLE for ever.
+     * Found by an independent reading while it was still latent (D-100). */
+    if (current->state != THREAD_RUNNING) return;
     current->wait_reason = WAIT_CONSOLE;
     current->state = THREAD_BLOCKED;
     schedule_locked();
@@ -514,6 +523,15 @@ void thread_block_on_console(void) {
  * Call with interrupts masked, holding the mask from before the condition was
  * tested. Same lost-wakeup shape as the console, and the same fix. */
 void thread_block_on_pipe(const void *object) {
+    /* Only a thread that is actually running may be put to sleep.
+     *
+     * thread_exit marks itself THREAD_ZOMBIE, releases the lock, and only then
+     * closes its descriptors — and closing a written file on the disk does I/O,
+     * which is a path that can block. Writing THREAD_BLOCKED over THREAD_ZOMBIE
+     * there would resurrect a process its parent is waiting to collect: the
+     * wait never finds a zombie, and the thread comes back RUNNABLE for ever.
+     * Found by an independent reading while it was still latent (D-100). */
+    if (current->state != THREAD_RUNNING) return;
     current->wait_reason = WAIT_PIPE;
     current->wait_object = object;
     current->wake_at = 0;
@@ -522,6 +540,15 @@ void thread_block_on_pipe(const void *object) {
 }
 
 void thread_block_on_pipe_until(const void *object, uint64_t ticks) {
+    /* Only a thread that is actually running may be put to sleep.
+     *
+     * thread_exit marks itself THREAD_ZOMBIE, releases the lock, and only then
+     * closes its descriptors — and closing a written file on the disk does I/O,
+     * which is a path that can block. Writing THREAD_BLOCKED over THREAD_ZOMBIE
+     * there would resurrect a process its parent is waiting to collect: the
+     * wait never finds a zombie, and the thread comes back RUNNABLE for ever.
+     * Found by an independent reading while it was still latent (D-100). */
+    if (current->state != THREAD_RUNNING) return;
     current->wait_reason = WAIT_PIPE;
     current->wait_object = object;
     /* At least one, so a deadline set in the same tick it is read does not
