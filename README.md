@@ -185,6 +185,13 @@ What it does today, each verified by running it:
   (D-079, D-080). Four tools, no shared line between any two, each checking the
   others against the on-disk format rather than against a shared assumption
   about it. Read-only, and read whole rather than mapped.
+- **PCI**, enumerated through ECAM: base address registers sized and placed
+  where nothing has placed them, capabilities walked, and the virtio device
+  found by its class rather than by an id that names the legacy card it stands
+  in for. Which means the circle closes **through real firmware** — UEFI starts
+  vboot, vboot builds a tree out of ACPI with the PCI bridge from MCFG, and the
+  kernel it starts reads back the very configuration file vboot parsed to start
+  it, off the disk it was booted from (D-081).
 
 Named rather than hidden: **one lock** covers the scheduler, the pipes and the
 console, because those three block on each other's state and separate locks

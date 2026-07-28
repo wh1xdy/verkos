@@ -385,6 +385,55 @@ void mmu_drop_low_half(void) {
  * drops it immediately. */
 uint64_t mmu_identity_table(void) { return kva_to_phys(l1); }
 
+/* A window onto a physical address the straight one cannot reach.
+ *
+ * The kernel's half is 512 GiB of TTBR1, mapped one gigabyte-block per L1
+ * entry, physical address P at P + KVA_OFFSET, with no exceptions to remember.
+ * That is worth keeping and it has exactly one hole: a physical address at or
+ * above 512 GiB has no entry, and the arithmetic wraps to a different block
+ * instead of failing. It found us as a PCI region at 0x8000004000 — the 64-bit
+ * prefetchable window on this machine begins at exactly 512 GiB — read as
+ * physical 0x4000, which is a page of firmware and answers every question
+ * wrongly rather than not at all (D-081).
+ *
+ * So the top two blocks of the kernel's half are not part of the straight
+ * window; they map wherever this is asked to point them. Two, because one
+ * device may have its registers and its notification page in different
+ * gigabytes, and a number chosen so the exhaustion is visible rather than
+ * silent.
+ *
+ * The alternative is a four-level walk and a 48-bit kernel half, which is the
+ * right answer for a kernel that has to map many such regions and is a rewrite
+ * of everything above for one that has to map one. */
+#define DEVWIN_FIRST  510
+static unsigned devwin_next = DEVWIN_FIRST;
+
+uint64_t mmu_map_device(uint64_t phys, uint64_t *out) {
+    /* Inside the straight window: nothing to do, and saying so rather than
+     * consuming a block means a machine that needs none never runs out. */
+    if (phys < (uint64_t)DEVWIN_FIRST * GIB) { *out = phys_to_kva(phys); return 0; }
+
+    uint64_t base = phys & ~(GIB - 1);
+    /* Already mapped by an earlier call: several capability structures of one
+     * device live in one region, and each asks for its own address. */
+    for (unsigned i = DEVWIN_FIRST; i < devwin_next; i++)
+        if ((l1_high[i] & 0x0000fffffffff000ul) == base) {
+            *out = KVA_OFFSET + (uint64_t)i * GIB + (phys - base);
+            return 0;
+        }
+    if (devwin_next >= 512) {
+        kprintf("  mmu       no device window left for 0x%llx\n",
+                (unsigned long long)phys);
+        return (uint64_t)-1;
+    }
+    unsigned i = devwin_next++;
+    l1_high[i] = block(base, ATTR_DEVICE, 0);
+    dcache_clean_to_memory(l1_high, PAGE_SIZE);
+    __asm__ volatile("dsb ish\n tlbi vmalle1\n dsb ish\n isb" ::: "memory");
+    *out = KVA_OFFSET + (uint64_t)i * GIB + (phys - base);
+    return 0;
+}
+
 uint64_t mmu_user_table(void)  { return kva_to_phys(l1_user); }
 uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }
 

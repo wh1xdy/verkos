@@ -1327,6 +1327,23 @@ if [ "$STAM_CROSS" != none ] && [ -n "$SFW" ] && \
               "grep -aq 'the kernel can preempt' $S/log"
         check "the initrd vboot published reaches stam" \
               "grep -aq 'initrd collected from the loader' $S/log"
+        # --- the circle, through firmware -------------------------------
+        # vboot builds the PCI node out of ACPI's MCFG, which is the one thing
+        # about the bus that is not AML; stam enumerates with it and uses the
+        # regions the firmware already assigned. Without the node it reports
+        # no disk, which is a different string.
+        check "vboot publishes the PCI bridge it found in MCFG" \
+              "grep -aq 'pci       ECAM at' $S/log"
+        check "stam finds the disk over PCI on the firmware path" \
+              "grep -aq 'disk      virtio-blk over pci' $S/log"
+        # The whole chain in one line: vpart wrote the table, vmkfs formatted
+        # the partition, vboot parsed this file to start this kernel, and the
+        # kernel read it back off the same medium. The entry count comes from
+        # the bytes read, so a kernel that read nothing cannot print it.
+        check "stam reads the loader's own configuration off the disk it booted from" \
+              "grep -aq 'gpt       EFI system partition' $S/log &&
+               grep -aq 'fat       FAT32 \"VERKESP\"' $S/log &&
+               grep -aq \"read the loader's own vboot.conf off this disk\" $S/log"
     else
         bad "stam.efi or vboot did not build for the boot test"
     fi

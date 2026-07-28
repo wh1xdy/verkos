@@ -23,6 +23,10 @@ int      mmu_init(uint64_t ram_base, uint64_t ram_size);
 void     mmu_go_high(void);
 uint64_t mmu_user_table(void);
 uint64_t mmu_identity_table(void);   /* the low map, for a starting processor */
+/* A kernel address for a physical one the straight window cannot reach — which
+ * is anything at or above 510 GiB. Returns 0 and writes *out; -1 if there is no
+ * window left. Inside the straight window it is phys_to_kva and costs nothing. */
+uint64_t mmu_map_device(uint64_t phys, uint64_t *out);
 void     mmu_set_user_table(uint64_t table);
 void     mmu_drop_low_half(void);
 void     mmu_note_high(void);

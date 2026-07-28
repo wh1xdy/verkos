@@ -3449,3 +3449,80 @@ teaching stam to enumerate PCI. Both are real work and neither is done, and
 saying so is better than a diagram with a line that is not there.
 
 `make test`: 238 checks, was 236, three consecutive runs.
+
+## D-081 — through the firmware, and the circle is closed
+
+**2026-07-28.** D-080 ended by naming the line that was not there: on the path a
+real machine takes — UEFI, ACPI, a tree vboot builds out of it — `stam` found no
+disk, because the only transport it understood was one that a hypervisor's
+device tree lists and ACPI does not describe. It does now:
+
+```
+  stam: started as an EFI application
+  stam: device tree found, leaving boot services
+  pci       ECAM at 0x4010000000, no window in the tree — using the regions firmware placed
+  disk      virtio-blk over pci, 139264 sectors (68 MiB)
+  gpt       EFI system partition 1: 131072 sectors at LBA 2048
+  fat       FAT32 "VERKESP", 1 sectors per cluster, 129010 clusters
+  boot      read the loader's own vboot.conf off this disk: 109 bytes, 1 entries
+```
+
+Firmware started `vboot`, `vboot` parsed that file to decide what to start, and
+the kernel it started read the same file back off the same medium — through a
+partition table `vpart` wrote and a filesystem `vmkfs` formatted, over a bus it
+enumerated itself.
+
+### MCFG is the part that is not AML
+
+D-072 says why vboot does not emit a PCI node: the routing lives in the DSDT as
+AML, and emitting it would mean an interpreter inside a bootloader. That is true
+of `ranges` and not of the base address. **MCFG** gives ECAM's address in a
+fixed-format table, and with it a kernel can enumerate.
+
+A node with `reg` and no `ranges` is not a half-truth. It says where
+configuration space is and says nothing about routing, which is exactly what is
+known. Firmware has already assigned every region by the time it hands over, so
+nothing needs the routing: `pci_bar_assign` uses what is there and refuses to
+place anything when there is no window, rather than writing an address the
+bridge does not forward — an access that goes nowhere and reads back all ones,
+which is indistinguishable from a device that is absent.
+
+On the `-kernel` path nothing has assigned anything, and QEMU's own tree has the
+window. Both paths work and neither is the special case.
+
+### Three wrong answers
+
+**A table of function pointers is taking the address of a symbol from C.** The
+two transports were behind a `transport_t` of eight function pointers, which is
+how anyone would write it. A static initialiser holding a function's address is
+a relocation; this kernel applies none; the entries held link-time addresses. It
+presented as an instruction fetch at `0x40088e20` with the kernel running at
+`0xffffff8040088e20`.
+
+D-037 found this as a thread, D-039 as a user program, D-076 as a second
+processor. **This is the fourth, and the first where the trap wore the shape of
+a design pattern rather than of one variable** — which is why the rule in
+CLAUDE.md did not fire when I wrote it. The dispatch is a branch on an `int`
+now: less elegant, and the same two calls either way.
+
+**The device id names the legacy device, not the modern one.** Searching
+1af4:1000–107f found `1af4:1000`, which is the network card QEMU adds by
+default. The base class byte says "mass storage" whichever generation the card
+is, and that is what identifies it.
+
+**The kernel's window ends exactly where the region begins.** The high half is
+512 GiB of straight mapping, physical P at P + KVA_OFFSET, and this machine's
+64-bit prefetchable PCI window starts at 0x8000000000 — 512 GiB precisely. The
+arithmetic did not fail; it wrapped, and physical `0x8000004000` was read as
+`0x4000`, a page of firmware that answers every question wrongly rather than not
+at all.
+
+The top two gigabyte-blocks of the kernel's half are now not part of the
+straight window: `mmu_map_device` points them wherever it is asked to. Two,
+because one device may have its registers and its notification page in different
+gigabytes, and a number small enough that running out is visible. The right
+answer for a kernel that must map many such regions is a four-level walk and a
+48-bit kernel half; that is a rewrite of everything above `mmu_go_high` for a
+kernel that must map one.
+
+`make test`: 241 checks, was 238, three consecutive runs.

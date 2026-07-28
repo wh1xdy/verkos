@@ -640,6 +640,35 @@ static int vb_gtdt_timer_ppi(unsigned ppi[4]) {
     return 1;
 }
 
+/* MCFG says where PCI configuration space is mapped.
+ *
+ * This is the one thing about the bus that is *not* AML. The routing — which
+ * addresses the bridge forwards to which device — lives in the DSDT's _CRS,
+ * and emitting that would mean an interpreter inside a bootloader. But ECAM's
+ * base address is a 64-bit field in a fixed-format table, and with it a kernel
+ * can enumerate the bus and use the regions firmware has already assigned.
+ * Which is all stam needs: it is not placing anything, it is finding what is
+ * there (D-081).
+ *
+ * The first allocation entry only. A machine with several PCI segments has
+ * several, and a bootloader that picked one of them arbitrarily would be
+ * making a decision it has no basis for — so the count is checked and anything
+ * beyond one segment is left alone rather than guessed at.
+ */
+static int vb_mcfg(UINT64 *ecam, unsigned *bus_start, unsigned *bus_end) {
+    unsigned char *t = vb_acpi_table("MCFG");
+    if (!t) return 0;
+    UINT32 len = vb_le32(t + 4);
+    /* 36 bytes of header, 8 reserved, then 16 per allocation. */
+    if (len < 44 + 16) return 0;
+    if ((len - 44) / 16 != 1) return 0;
+    unsigned char *a = t + 44;
+    *ecam = (UINT64)vb_le32(a) | ((UINT64)vb_le32(a + 4) << 32);
+    *bus_start = a[10];
+    *bus_end   = a[11];
+    return *ecam != 0;
+}
+
 /* ACPI's SPCR table says where the console serial port is and what kind it is.
  * That is the only reason we look at ACPI at all here: on a machine described
  * purely by ACPI there is no other way to find the console, and a kernel with
@@ -787,6 +816,36 @@ static int vb_install_dtb(void) {
                 fg_prop_str(&g, "clock-output-names", "clk24mhz");
                 fg_prop_u32(&g, "phandle", VB_PH_CLK);
             fg_end_node(&g);
+        }
+
+        /* The PCI host bridge, out of MCFG. Deliberately without `ranges`:
+         * that property says which addresses the bridge forwards, and the
+         * answer is in the DSDT as AML. A node with `reg` and no `ranges` is
+         * not a lie — it says where configuration space is and says nothing
+         * about routing, which is exactly what is known. stam enumerates with
+         * it and uses the regions firmware assigned; a kernel that needed to
+         * assign one would find no window and say so rather than write an
+         * address the bridge does not route.
+         *
+         * device_type is what makes a reader treat this as a bus rather than
+         * as a device with a large register block. */
+        {
+            UINT64 ecam = 0; unsigned bus_lo = 0, bus_hi = 0;
+            if (vb_mcfg(&ecam, &bus_lo, &bus_hi)) {
+                fg_node(&g, "pci");
+                    fg_prop_str(&g, "compatible", "pci-host-ecam-generic");
+                    fg_prop_str(&g, "device_type", "pci");
+                    fg_prop_u32(&g, "#address-cells", 3);
+                    fg_prop_u32(&g, "#size-cells", 2);
+                    fg_prop_reg(&g, ecam, (UINT64)(bus_hi - bus_lo + 1) << 20);
+                    {
+                        unsigned char br[8];
+                        fg_be32(br,     bus_lo);
+                        fg_be32(br + 4, bus_hi);
+                        fg_prop(&g, "bus-range", br, 8);
+                    }
+                fg_end_node(&g);
+            }
         }
 
         /* Processors and the interrupt controller, out of ACPI's MADT. */

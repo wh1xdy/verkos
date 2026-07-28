@@ -37,6 +37,7 @@
 #include "mmu.h"
 #include "console.h"
 #include "lock.h"
+#include "pci.h"
 #include <stdint.h>
 
 /* The MMIO register block. */
@@ -119,7 +120,27 @@ struct blk_req {
 #define O_AVAIL    (O_DESC + 16 * QSIZE)
 #define O_USED     ((O_AVAIL + 6 + 2 * QSIZE + QALIGN - 1) & ~(QALIGN - 1))
 
-static volatile uint8_t *base;       /* the device's registers */
+/* The two ways the same device appears.
+ *
+ * MMIO is what a hypervisor's device tree lists; PCI is what firmware
+ * describes, and what a machine with real slots in it has. The block logic
+ * below does not know which it is talking to.
+ *
+ * A table of function pointers is the obvious way to write that, and it does
+ * not work here. A static initialiser holding the address of a function is a
+ * relocation, this kernel applies none, and the entries hold the addresses the
+ * image had when it was linked — the same trap as D-037, D-039 and D-076, this
+ * time wearing the shape of a design pattern rather than of one variable. It
+ * presented as an instruction fetch at 0x40088e20 with the kernel running at
+ * 0xffffff8040088e20.
+ *
+ * So the dispatch is a branch on a variable. Less elegant, and it is the same
+ * two calls either way.
+ */
+static int   use_pci;
+static const char *vt_name;
+
+static volatile uint8_t *base;       /* the MMIO device's registers */
 static uint8_t          *ring;       /* its one queue, in the high half  */
 static struct vring_desc  *vq_desc;
 static struct vring_avail *vq_avail;
@@ -172,51 +193,205 @@ static volatile uint8_t *find_blk(const fdt_t *f) {
     return 0;
 }
 
-int virtio_blk_init(const fdt_t *f) {
-    base = find_blk(f);
-    if (!base) {
-        /* Says which of the three it was: no transports in the tree at all, or
-         * transports with nothing plugged into them, or devices that are not
-         * block devices. "No disk" covers all three and distinguishes none. */
-        kprintf("  disk      none: %u virtio-mmio slots, %u occupied, no block device\n",
-                slots_seen, blk_seen);
+static uint32_t mmio_version;
+
+static void     mmio_status_set(uint8_t s) { wr(R_STATUS, s); }
+static uint8_t  mmio_status_get(void)      { return (uint8_t)rd(R_STATUS); }
+static uint32_t mmio_features_hi(void)     { wr(R_DEVICE_FEAT_SEL, 1); return rd(R_DEVICE_FEAT); }
+static void     mmio_features_set(uint32_t hi) {
+    wr(R_DRIVER_FEAT_SEL, 1); wr(R_DRIVER_FEAT, hi);
+    wr(R_DRIVER_FEAT_SEL, 0); wr(R_DRIVER_FEAT, 0);
+    wr(R_DEVICE_FEAT_SEL, 0);
+}
+static uint64_t mmio_capacity(void) {
+    return (uint64_t)*(volatile uint32_t *)(base + R_CONFIG)
+         | ((uint64_t)*(volatile uint32_t *)(base + R_CONFIG + 4) << 32);
+}
+static void mmio_notify(void)  { wr(R_QUEUE_NOTIFY, 0); }
+static void mmio_irq_ack(void) { wr(R_INT_ACK, rd(R_INT_STATUS)); }
+static int  mmio_queue_setup(uint64_t desc, uint64_t avail, uint64_t used) {
+    wr(R_QUEUE_SEL, 0);
+    if (rd(R_QUEUE_NUM_MAX) < QSIZE) return -1;
+    wr(R_QUEUE_NUM, QSIZE);
+    if (mmio_version == 1) {
+        wr(R_GUEST_PAGE_SZ, PAGE_SIZE);
+        wr(R_QUEUE_ALIGN, QALIGN);
+        wr(R_QUEUE_PFN, (uint32_t)(desc / PAGE_SIZE));
+    } else {
+        wr(R_QUEUE_DESC_LO,  (uint32_t)desc);
+        wr(R_QUEUE_DESC_HI,  (uint32_t)(desc >> 32));
+        wr(R_QUEUE_AVAIL_LO, (uint32_t)avail);
+        wr(R_QUEUE_AVAIL_HI, (uint32_t)(avail >> 32));
+        wr(R_QUEUE_USED_LO,  (uint32_t)used);
+        wr(R_QUEUE_USED_HI,  (uint32_t)(used >> 32));
+        wr(R_QUEUE_READY, 1);
+    }
+    return 0;
+}
+
+
+/* ---- virtio over PCI ---------------------------------------------------
+ *
+ * The same device, described by capabilities in configuration space rather
+ * than by a fixed register block. Each capability says which base address
+ * register the structure is in and where inside it — so nothing here is at a
+ * known address, and everything is where the device said. */
+#define VIRTIO_PCI_CAP        0x09
+#define CFG_COMMON  1
+#define CFG_NOTIFY  2
+#define CFG_ISR     3
+#define CFG_DEVICE  4
+
+static pci_dev_t         vpci;
+static volatile uint8_t *pci_common, *pci_notify, *pci_isr, *pci_devcfg;
+static uint32_t          notify_mult;
+
+static uint16_t c_rd16(unsigned o) { return *(volatile uint16_t *)(pci_common + o); }
+static void     c_wr16(unsigned o, uint16_t v) { *(volatile uint16_t *)(pci_common + o) = v; }
+static uint32_t c_rd32(unsigned o) { return *(volatile uint32_t *)(pci_common + o); }
+static void     c_wr32(unsigned o, uint32_t v) { *(volatile uint32_t *)(pci_common + o) = v; }
+
+static void     pcit_status_set(uint8_t s) { *(volatile uint8_t *)(pci_common + 0x14) = s; }
+static uint8_t  pcit_status_get(void)      { return *(volatile uint8_t *)(pci_common + 0x14); }
+static uint32_t pcit_features_hi(void)     { c_wr32(0x00, 1); return c_rd32(0x04); }
+static void     pcit_features_set(uint32_t hi) {
+    c_wr32(0x08, 1); c_wr32(0x0c, hi);
+    c_wr32(0x08, 0); c_wr32(0x0c, 0);
+}
+static uint64_t pcit_capacity(void) {
+    return (uint64_t)*(volatile uint32_t *)(pci_devcfg)
+         | ((uint64_t)*(volatile uint32_t *)(pci_devcfg + 4) << 32);
+}
+static void pcit_notify(void)  { *(volatile uint16_t *)pci_notify = 0; }
+static void pcit_irq_ack(void) { (void)*(volatile uint8_t *)pci_isr; }   /* reading clears it */
+static int  pcit_queue_setup(uint64_t desc, uint64_t avail, uint64_t used) {
+    c_wr16(0x16, 0);                                   /* queue_select    */
+    if (c_rd16(0x18) < QSIZE) return -1;               /* queue_size      */
+    c_wr16(0x18, QSIZE);
+    *(volatile uint64_t *)(pci_common + 0x20) = desc;
+    *(volatile uint64_t *)(pci_common + 0x28) = avail;
+    *(volatile uint64_t *)(pci_common + 0x30) = used;
+    /* Where to kick this particular queue. The multiplier is the device's, and
+     * a driver that assumes zero writes to the wrong address on any device that
+     * uses a non-zero one — silently, because a write to a valid page that
+     * means nothing does nothing. */
+    uint16_t off = c_rd16(0x1e);
+    pci_notify += (uint64_t)off * notify_mult;
+    c_wr16(0x1c, 1);                                   /* queue_enable    */
+    return 0;
+}
+/* The dispatch. Every one is the same shape on purpose: a reader checking that
+ * the two transports are used consistently should not have to read eight
+ * different arrangements of the same branch. */
+static void     vt_status_set(uint8_t s)  { if (use_pci) pcit_status_set(s); else mmio_status_set(s); }
+static uint8_t  vt_status_get(void)       { return use_pci ? pcit_status_get() : mmio_status_get(); }
+static uint32_t vt_features_hi(void)      { return use_pci ? pcit_features_hi() : mmio_features_hi(); }
+static void     vt_features_set(uint32_t h) { if (use_pci) pcit_features_set(h); else mmio_features_set(h); }
+static uint64_t vt_capacity(void)         { return use_pci ? pcit_capacity() : mmio_capacity(); }
+static void     vt_notify(void)           { if (use_pci) pcit_notify(); else mmio_notify(); }
+static void     vt_irq_ack(void)          { if (use_pci) pcit_irq_ack(); else mmio_irq_ack(); }
+static int      vt_queue_setup(uint64_t d, uint64_t a, uint64_t u) {
+    return use_pci ? pcit_queue_setup(d, a, u) : mmio_queue_setup(d, a, u);
+}
+
+/* Place a capability's structure: assign the BAR it names and add the offset
+ * inside it. */
+static volatile uint8_t *cap_region(unsigned cap) {
+    unsigned bar = pci_cfg_read8(&vpci, cap + 4);
+    uint32_t off = pci_cfg_read32(&vpci, cap + 8);
+    uint64_t at  = pci_bar_assign(&vpci, bar);
+    if (!at) return 0;
+    /* Not phys_to_kva. Firmware puts a 64-bit prefetchable region wherever it
+     * likes, and on this machine that is 0x8000004000 — past the end of the
+     * kernel's straight window, where the arithmetic wraps to a block that
+     * exists and holds something else (D-081). */
+    uint64_t va = 0;
+    if (mmu_map_device(at + off, &va) != 0) return 0;
+    return (volatile uint8_t *)(uintptr_t)va;
+}
+
+static int find_pci_blk(void) {
+    if (!pci_present()) return -1;
+    /* 0x1042 is a modern virtio block device and 0x1001 the transitional one.
+     * Both are accepted, because a transitional device carries the modern
+     * capability structures as well and QEMU produces one by default — a driver
+     * that only took 0x1042 would work on the command line that says
+     * disable-legacy=on and nowhere else.
+     *
+     * What decides is not the id but whether the four capabilities are there.
+     * A device that has them is driven through them; one that does not is left
+     * alone rather than half driven, and says so. */
+    /* Silent when there is none: this is the first of two transports to try,
+     * and a machine that has the other is not a machine with a problem. The
+     * line that reports the outcome is the one at the end of virtio_blk_init,
+     * which names whichever was used. */
+    if (pci_find(0x1af4, 0x1000, 0x107f, 0x01 /* mass storage */, &vpci) != 0) return -1;
+
+    unsigned cap = 0;
+    while ((cap = pci_find_cap(&vpci, VIRTIO_PCI_CAP, cap)) != 0) {
+        switch (pci_cfg_read8(&vpci, cap + 3)) {
+        case CFG_COMMON: pci_common = cap_region(cap); break;
+        case CFG_NOTIFY: pci_notify = cap_region(cap);
+                         notify_mult = pci_cfg_read32(&vpci, cap + 16); break;
+        case CFG_ISR:    pci_isr    = cap_region(cap); break;
+        case CFG_DEVICE: pci_devcfg = cap_region(cap); break;
+        default: break;
+        }
+    }
+    if (!pci_common || !pci_notify || !pci_isr || !pci_devcfg) {
+        kprintf("  disk      pci %04x:%04x has no modern capability structures "
+                "(common %d notify %d isr %d config %d)\n",
+                vpci.vendor, vpci.device, pci_common != 0, pci_notify != 0,
+                pci_isr != 0, pci_devcfg != 0);
         return -1;
     }
+    return 0;
+}
 
-    uint32_t version = rd(R_VERSION);
+int virtio_blk_init(const fdt_t *f) {
+    /* PCI first. It is the transport that exists on a machine booted by
+     * firmware, and preferring the one that only a hypervisor's device tree
+     * lists would mean the tested path and the real path are different paths. */
+    if (pci_init(f) == 0 && find_pci_blk() == 0) {
+        use_pci = 1; vt_name = "pci";
+    } else {
+        base = find_blk(f);
+        if (!base) {
+            /* Says which of the three it was: no transports in the tree at all,
+             * or transports with nothing plugged into them, or devices that are
+             * not block devices. "No disk" covers all three and distinguishes
+             * none. */
+            kprintf("  disk      none: %u virtio-mmio slots, %u occupied, no block device\n",
+                    slots_seen, blk_seen);
+            return -1;
+        }
+        mmio_version = rd(R_VERSION);
+        use_pci = 0; vt_name = mmio_version == 1 ? "mmio v1" : "mmio v2";
+    }
 
     /* The handshake, in the order the specification requires: acknowledge,
      * claim to be a driver, agree the features, and only then say the device
      * may be used. Setting DRIVER_OK before the queue exists is a device that
      * may start writing into memory nothing has told it about. */
-    wr(R_STATUS, 0);
-    wr(R_STATUS, S_ACK);
-    wr(R_STATUS, S_ACK | S_DRIVER);
+    vt_status_set(0);
+    vt_status_set(S_ACK);
+    vt_status_set(S_ACK | S_DRIVER);
 
     /* Nothing is negotiated except VIRTIO_F_VERSION_1, and only where it is
      * offered: every optional block feature here is one the driver would then
      * have to honour, and a driver that accepts a feature it ignores is worse
      * than one that refuses it. */
-    wr(R_DEVICE_FEAT_SEL, 1);
-    uint32_t hi = rd(R_DEVICE_FEAT);
-    wr(R_DRIVER_FEAT_SEL, 1);
-    wr(R_DRIVER_FEAT, hi & 1u);          /* bit 32 of the feature space */
-    wr(R_DEVICE_FEAT_SEL, 0);
-    wr(R_DRIVER_FEAT_SEL, 0);
-    wr(R_DRIVER_FEAT, 0);
-    if (version >= 2) {
-        wr(R_STATUS, S_ACK | S_DRIVER | S_FEAT_OK);
-        if (!(rd(R_STATUS) & S_FEAT_OK)) {
+    uint32_t hi = vt_features_hi();
+    vt_features_set(hi & 1u);              /* bit 32 of the feature space */
+    if (use_pci || mmio_version >= 2) {
+        vt_status_set(S_ACK | S_DRIVER | S_FEAT_OK);
+        if (!(vt_status_get() & S_FEAT_OK)) {
             kprintf("  disk      the device refused the features we offered\n");
             return -1;
         }
     }
 
-    /* Capacity is the first field of the device configuration space, in
-     * 512-byte sectors, and it is read as two halves because the register block
-     * is 32 bits wide. */
-    capacity = (uint64_t)*(volatile uint32_t *)(base + R_CONFIG)
-             | ((uint64_t)*(volatile uint32_t *)(base + R_CONFIG + 4) << 32);
+    capacity = vt_capacity();
 
     /* One page for the ring, one for the three staging buffers. */
     ring = alloc_page();
@@ -234,32 +409,15 @@ int virtio_blk_init(const fdt_t *f) {
     status_phys = kva_to_phys(status);
     data_phys   = kva_to_phys(data);
 
-    wr(R_QUEUE_SEL, 0);
-    if (rd(R_QUEUE_NUM_MAX) < QSIZE) {
+    if (vt_queue_setup(q_phys, q_phys + O_AVAIL, q_phys + O_USED) != 0) {
         kprintf("  disk      the device's queue is smaller than the driver needs\n");
         return -1;
     }
-    wr(R_QUEUE_NUM, QSIZE);
-    if (version == 1) {
-        wr(R_GUEST_PAGE_SZ, PAGE_SIZE);
-        wr(R_QUEUE_ALIGN, QALIGN);
-        wr(R_QUEUE_PFN, (uint32_t)(q_phys / PAGE_SIZE));
-    } else {
-        uint64_t avail = q_phys + O_AVAIL;
-        uint64_t used  = q_phys + O_USED;
-        wr(R_QUEUE_DESC_LO,  (uint32_t)q_phys);
-        wr(R_QUEUE_DESC_HI,  (uint32_t)(q_phys >> 32));
-        wr(R_QUEUE_AVAIL_LO, (uint32_t)avail);
-        wr(R_QUEUE_AVAIL_HI, (uint32_t)(avail >> 32));
-        wr(R_QUEUE_USED_LO,  (uint32_t)used);
-        wr(R_QUEUE_USED_HI,  (uint32_t)(used >> 32));
-        wr(R_QUEUE_READY, 1);
-    }
-    wr(R_STATUS, S_ACK | S_DRIVER | S_FEAT_OK | S_DRIVER_OK);
+    vt_status_set(S_ACK | S_DRIVER | S_FEAT_OK | S_DRIVER_OK);
 
     present = 1;
-    kprintf("  disk      virtio-blk v%u, %llu sectors (%llu MiB)\n",
-            version, (unsigned long long)capacity,
+    kprintf("  disk      virtio-blk over %s, %llu sectors (%llu MiB)\n",
+            vt_name, (unsigned long long)capacity,
             (unsigned long long)(capacity / 2048));
     return 0;
 }
@@ -308,7 +466,7 @@ int virtio_blk_read(uint64_t sector, void *out) {
     vq_avail->idx++;
     __asm__ volatile("dsb st" ::: "memory");
 
-    wr(R_QUEUE_NOTIFY, 0);
+    vt_notify();
 
     /* Bounded, because a device that never answers must produce an error and
      * not a machine that stops. */
@@ -325,7 +483,7 @@ int virtio_blk_read(uint64_t sector, void *out) {
     }
     __asm__ volatile("dsb sy" ::: "memory");
     last_used = vq_used->idx;
-    wr(R_INT_ACK, rd(R_INT_STATUS));
+    vt_irq_ack();
 
     int ok = (*status == 0);
     if (ok) { uint8_t *o = out; for (int i = 0; i < 512; i++) o[i] = data[i]; }
