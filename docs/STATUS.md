@@ -10,6 +10,14 @@ two suites running at once fail each other's timeouts. The count is also
 host-dependent — some checks are skipped without a network or a cross toolchain,
 so a Mac host reports fewer and fails several on missing headers.
 
+**Start here next time:** the scheduler question below. `schedule_locked`
+appears not to run where it must, and the two candidate answers are that
+`schedule()` returns before reaching it, or that the variable read is not the
+one written. Settle it by **disassembling** `schedule` and `sched_idle_loop` —
+instrumenting it is what made the last attempt unstable, and the loop is already
+inlined, so the call is visible in the object file. When it is settled, the disk
+sleep of D-086 can go back in and the driver becomes interrupt-driven.
+
 ---
 
 ## The two halves
