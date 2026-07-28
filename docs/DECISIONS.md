@@ -4006,3 +4006,48 @@ the writer is found by which arrays neighbour it in the object file.
 
 The disk sleep is not the bug and never was. It is the workload that made the
 corruption reachable.
+
+## D-092 — D-091 was wrong, and the guards say so
+
+**2026-07-28.** D-091 concluded that `started` was being cleared by an
+out-of-bounds write, and named that as the explanation for five earlier entries.
+The recommended next step was to put a guard word on each side of it and see.
+
+That was done. **Neither guard was ever disturbed**, and the machine still
+stopped in the same place. So `started` is not being overwritten and D-091's
+conclusion is withdrawn.
+
+What it was really built on was `last_exit == 0`, and that reading is now the
+suspect — the third diagnostic today to have been wrong about the thing it was
+watching (D-088 twice, this once). The disassembly in D-091 is still correct
+about *where* the only skip is; what is not established is that the skip is
+being taken.
+
+### Six entries, and what they have actually ruled out
+
+| | |
+|---|---|
+| D-086 | the sleep hangs a single-processor boot |
+| D-087 | a bounded sleep changes nothing — the thread is not in the sleep |
+| D-088 | no thread switch at all, while two threads stand runnable |
+| D-089 | `next_runnable` names one of them |
+| D-090 | an exit counter reads as though `schedule_locked` never runs |
+| D-091 | the only path that skips it needs `started` to be zero |
+| D-092 | and `started` is not being written over |
+
+Every one of these was bought by asking the machine. Five were useful. Two of
+the answers — D-090's counter and D-091's inference from it — were the
+instrument lying, and both cost more than they returned.
+
+### The lesson that is worth more than the bug
+
+**A diagnostic is code, and today four of them were wrong**: an idle report that
+counted the wrong thing, one that changed what it measured, an exit counter that
+read zero when it could not have been, and an inference built on top of it. The
+project's rule is *ask the machine rather than reason about it* — and the
+correction is that a machine can only answer for what the instrument actually
+measures, which is itself a thing to be checked.
+
+Nothing here is committed to the kernel. `make test` is 253 checks and green
+without any of it; the driver polls with interrupts enabled. The next session
+starts from a clean tree and this list of what is ruled out.

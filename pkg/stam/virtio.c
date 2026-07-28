@@ -510,14 +510,9 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* Not slept on. Four attempts now: D-086 tried it, D-087 gave it a floor,
-     * D-088 made the machine say what it looked like when it stopped, D-089
-     * asked the chooser, and D-090 asked which way the chooser went. The last
-     * answer is the strangest and is where this continues — it is not in this
-     * file, and has not been since D-088.
-     *
-     * What all of it left behind: this wait runs with interrupts enabled, so
-     * the timer ticks and the console is read while the device works.
+    /* Not slept on; see D-086 through D-092 for six attempts and what each one
+     * ruled out. The wait below runs with interrupts enabled, which is what all
+     * of it left behind.
      */
 
     /* Bounded, because a device that never answers must produce an error and
