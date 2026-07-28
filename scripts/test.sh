@@ -1294,6 +1294,28 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                               "grep -qE '[0-9]+ files, [0-9]+/[0-9]+ clusters' $T/fsck.out"
                     fi
 
+                    # --- directories ------------------------------------
+                    # ls prints what getdents64 gave it, so the names come from
+                    # the medium rather than from anything the kernel was told.
+                    # A directory prints with a trailing slash, which is how
+                    # mkdir's result is told from a file of the same name.
+                    check "ls lists the directory off the disk" \
+                          "grep -aq 'vboot.conf' $SL && grep -aq 'diskprog' $SL"
+                    check "mkdir makes a directory and ls sees it as one" \
+                          "grep -aq 'ADIR/' $SL"
+                    # The same listing, after rm, without the file in it. Both
+                    # halves matter: a check that only looked for the absence
+                    # would pass on an ls that printed nothing at all.
+                    # Both halves: the name is there before and gone after. A
+                    # check that only looked for the absence would pass on an
+                    # ls that printed nothing at all, which is why the listing
+                    # is counted against a name that never moves.
+                    check "rm removes a file and the listing no longer has it" \
+                          "grep -aq 'GONE.TXT' $SL &&
+                           [ \"\$(grep -ac 'GONE.TXT' $SL)\" -lt \"\$(grep -ac 'vboot.conf' $SL)\" ]"
+                    check "rm removes an empty directory too" \
+                          "[ \"\$(grep -ac 'ADIR/' $SL)\" -lt \"\$(grep -ac 'vboot.conf' $SL)\" ]"
+
                     # --- no initrd at all -------------------------------
                     # The same disk carries /init, and the kernel is started
                     # with no -initrd. Everything the userland is comes off the

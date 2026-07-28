@@ -14,6 +14,7 @@
 #include "mmu.h"
 #include "console.h"
 #include "lock.h"
+#include "smp.h"
 
 /* The page allocator's own lock. It is a leaf — nothing here calls the
  * scheduler — so it may be taken while the scheduler lock is held and never the
@@ -136,15 +137,29 @@ int page_count(uint64_t pa) {
     return refs[i] ? refs[i] + 1 : 1;
 }
 
+/* A word the free list writes and the allocator checks.
+ *
+ * A page that is handed back while something still holds it is the quietest
+ * corruption there is: it is reused, two owners write it, and the failure
+ * appears somewhere with no relation to either. Nothing here can tell whether a
+ * caller had the right to free a page — but it can tell whether anybody wrote
+ * to it afterwards, which is the same defect seen from the other end and costs
+ * one store and one comparison. */
+#define PAGE_FREE_MAGIC 0x46524545504147ull        /* "FREEPAG" */
+static unsigned free_after_use;
+
 void free_page(void *p) {
     if (!p) return;
     uint64_t f = spin_lock_irq(&pmm_lock);
     uint64_t *page = p;
     *page = free_list;
+    page[1] = PAGE_FREE_MAGIC;
     free_list = (uint64_t)(uintptr_t)p;
     pages_returned++;
     spin_unlock_irq(&pmm_lock, f);
 }
+
+unsigned pmm_free_after_use(void) { return free_after_use; }
 
 unsigned pmm_pages_free_listed(void) { return pages_returned; }
 
@@ -158,9 +173,14 @@ void *alloc_page(void) {
     uint64_t f = spin_lock_irq(&pmm_lock);
     if (free_list) {
         uint64_t *page = (uint64_t *)(uintptr_t)free_list;
+        int touched = (page[1] != PAGE_FREE_MAGIC);
         free_list = *page;
         pages_returned--;
+        if (touched) free_after_use++;
         spin_unlock_irq(&pmm_lock, f);
+        if (touched)
+            kprintf("  [kernel] page 0x%llx was written after it was freed\n",
+                    (unsigned long long)kva_to_phys(page));
         for (unsigned i = 0; i < PAGE_SIZE / 8; i++) page[i] = 0;
         return page;
     }
@@ -437,16 +457,28 @@ uint64_t mmu_map_device(uint64_t phys, uint64_t *out) {
 uint64_t mmu_user_table(void)  { return kva_to_phys(l1_user); }
 uint64_t mmu_user_table_kva(void) { return (uint64_t)(uintptr_t)l1_user; }
 
-static uint64_t cur_user_kva;
-uint64_t mmu_current_user_table_kva(void) { return cur_user_kva ? cur_user_kva : (uint64_t)(uintptr_t)l1_user; }
+/* Per processor, in the cpu_t that TPIDR_EL1 points at.
+ *
+ * A global here survived D-078 because nothing in the scheduler names it: it is
+ * read by map_user_page and vm_cow_fault, which are called deep inside execve
+ * and the fault handler and never mention a CPU. The symptom was elf_load
+ * faulting on an address the program was entitled to — sometimes a permission
+ * fault, sometimes a translation fault, depending on which of the two cores had
+ * written last — and it only showed on the paths that spend long enough between
+ * mappings to be preempted, which is why reading an executable off a disk found
+ * it and reading one out of memory did not. */
+uint64_t mmu_current_user_table_kva(void) {
+    uint64_t v = this_cpu()->user_table_kva;
+    return v ? v : (uint64_t)(uintptr_t)l1_user;
+}
 
 /* Change which table map_user_page writes into, without touching the hardware.
  * Copying an address space needs exactly this: build into the child's tables
  * while still running with the parent's installed. */
-void mmu_set_current_user_table_kva(uint64_t l1_kva) { cur_user_kva = l1_kva; }
+void mmu_set_current_user_table_kva(uint64_t l1_kva) { this_cpu()->user_table_kva = l1_kva; }
 
 void mmu_switch_user(uint64_t l1_kva) {
-    cur_user_kva = l1_kva;
+    this_cpu()->user_table_kva = l1_kva;
     mmu_set_user_table(kva_to_phys((const void *)(uintptr_t)l1_kva));
 }
 

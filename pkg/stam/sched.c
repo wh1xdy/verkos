@@ -134,6 +134,7 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->pending     = 0;
     t->blocked     = 0;
     t->home        = -1;         /* any processor may run it */
+    t->user_table  = 0;
     t->last_cpu    = -1;         /* nothing has run it yet     */
     t->ran_on      = 0;
     for (int i = 0; i < NSIG; i++) t->sigact[i].handler = t->sigact[i].restorer =
@@ -299,6 +300,12 @@ static void schedule_locked(void) {
          * after this one is still reported. */
         *(uint64_t *)(uintptr_t)prev->stack_low = STACK_CANARY;
     }
+    /* The table each was filling in goes with it. Leaving it on the processor
+     * is what D-084 was: two cores in execve at once, each writing its pages
+     * into whichever table the other had named last. */
+    prev->user_table = this_cpu()->user_table_kva;
+    this_cpu()->user_table_kva = next->user_table;
+
     if (prev->state == THREAD_RUNNING) prev->state = THREAD_RUNNABLE;
     next->state = THREAD_RUNNING;
     /* Where it has been, not only where it is. "Spread over N processors"

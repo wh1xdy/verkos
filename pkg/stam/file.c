@@ -104,18 +104,36 @@ int file_open(const char *name, int mode, file_t **out) {
      * should be able to say rather than have decided for it. */
     int absolute = (name[0] == '/');
     name = skip_slash(name);
+
+    /* The disk, before the lock and not under it.
+     *
+     * Looking a name up on the medium is a directory scan, and creating one is
+     * that plus an allocation and a cluster to clear — hundreds of polled
+     * sector reads, every one of them with interrupts masked if this were
+     * inside the section. That is the timer not ticking and the console not
+     * being read for the duration, which showed as a boot that sometimes did
+     * not finish rather than as anything pointing here. Nothing else can reach
+     * an open file that does not exist yet, so there is nothing to guard. */
+    fat_file_t ff;
+    int fat_kind = 0;                 /* 0 none, FILE_FAT, or FILE_FATDIR */
+    int fat_write_open = 0;
+    if (fat_mounted()) {
+        if (mode != OPEN_READ && absolute) {
+            int have = (fat_open(name, &ff) == 0 && !ff.is_dir);
+            if (!have && fat_create(name, &ff) != 0) return -2;
+            if (have && mode == OPEN_WRITE && fat_truncate(&ff) != 0) return -5;
+            fat_kind = FILE_FAT;
+            fat_write_open = 1;
+        } else if (mode == OPEN_READ) {
+            /* Looked up now, used only if the memory files and the initrd have
+             * nothing by this name — the order in D-079, unchanged. */
+            if (fat_open(name, &ff) == 0) fat_kind = ff.is_dir ? FILE_FATDIR : FILE_FAT;
+        }
+    }
+
     uint64_t s = sched_lock_irq();
 
-    /* The disk write path releases the lock around the device, and holding it
-     * across fat_create would mean holding it across a scan of the directory.
-     * Nothing else can reach this open file yet, so there is nothing to guard. */
-    if (mode != OPEN_READ && absolute && fat_mounted()) {
-        fat_file_t ff;
-        int have = (fat_open(name, &ff) == 0 && !ff.is_dir);
-        if (!have && fat_create(name, &ff) != 0) { sched_unlock_irq(s); return -2; }
-        if (have && mode == OPEN_WRITE && fat_truncate(&ff) != 0) {
-            sched_unlock_irq(s); return -5;                   /* -EIO */
-        }
+    if (fat_write_open) {
         struct file *df = file_alloc(FILE_FAT, 0);
         if (!df) { sched_unlock_irq(s); return -24; }
         df->fat      = ff;
@@ -172,9 +190,8 @@ int file_open(const char *name, int mode, file_t **out) {
          * initrd is what the machine was started with and the disk is what it
          * found, and a boot that silently preferred the disk would be a boot
          * whose behaviour depends on what is plugged in. */
-        fat_file_t ff;
-        if (fat_mounted() && fat_open(name, &ff) == 0) {
-            struct file *df = file_alloc(ff.is_dir ? FILE_FATDIR : FILE_FAT, 0);
+        if (fat_kind) {
+            struct file *df = file_alloc(fat_kind, 0);
             if (!df) { sched_unlock_irq(s); return -24; }
             df->fat = ff;
             df->ro_len = ff.size;
