@@ -1126,6 +1126,10 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                            "$T/vmkfs-host" --copy "$T/esp.img" pkg/stam/progs/hello.elf /diskprog >/dev/null 2>&1 &&
                            "$T/vmkfs-host" --copy "$T/esp.img" "$T/note.txt"   /note.txt   >/dev/null 2>&1 &&
                            "$T/vmkfs-host" --copy "$T/esp.img" "$T/vboot.conf" /vboot.conf >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/esp.img" pkg/stam/progs/vsh.elf   /init  >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/esp.img" pkg/stam/progs/hello.elf /hello >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/esp.img" pkg/stam/progs/upper.elf /upper >/dev/null 2>&1 &&
+                           "$T/vmkfs-host" --copy "$T/esp.img" pkg/stam/progs/rc        /rc    >/dev/null 2>&1 &&
                            "$T/vpart-host" "$T/stam.disk" --esp 48 >/dev/null 2>&1; then
                             dd if="$T/esp.img" of="$T/stam.disk" bs=1M seek=1 conv=notrunc status=none
                             DISK="-drive file=$T/stam.disk,if=none,format=raw,id=hd0 -device virtio-blk-device,drive=hd0"
@@ -1288,6 +1292,32 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                               "! grep -viE 'fsck.fat [0-9]|Free cluster summary|files, [0-9]+/[0-9]+ clusters|^$' $T/fsck.out | grep -q ."
                         check "fsck.fat counts the file among the volume's contents" \
                               "grep -qE '[0-9]+ files, [0-9]+/[0-9]+ clusters' $T/fsck.out"
+                    fi
+
+                    # --- no initrd at all -------------------------------
+                    # The same disk carries /init, and the kernel is started
+                    # with no -initrd. Everything the userland is comes off the
+                    # medium. A boot that had quietly found an archive would
+                    # print a different line, and the /rc it runs is the one on
+                    # the disk — so reaching `bye` is that script having run.
+                    if [ -n "$DISK" ]; then
+                        NL=$T/noinitrd.log
+                        # shellcheck disable=SC2086
+                        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                            -display none -serial "file:$NL" -no-reboot $DISK \
+                            -kernel pkg/stam/stam.img \
+                            </dev/null >/dev/null 2>&1 & echo $! > "$T/npid" )
+                        for _ in $(seq 1 180); do
+                            sleep 1
+                            grep -aq 'bye' "$NL" 2>/dev/null && break
+                        done
+                        kill "$(cat "$T/npid")" 2>/dev/null
+                        wait "$(cat "$T/npid")" 2>/dev/null
+
+                        check "stam boots with no initrd and takes /init off the disk" \
+                              "grep -aq 'no initrd; /init comes off the disk' $NL"
+                        check "the shell from the disk runs the script from the disk" \
+                              "grep -aq 'bye' $NL"
                     fi
                 fi
             else

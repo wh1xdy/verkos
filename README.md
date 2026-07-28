@@ -187,7 +187,9 @@ What it does today, each verified by running it:
   about it. It **writes** too — an absolute path means the medium, a relative
   one still means memory — and `make test` settles whether it worked by reading
   the image back with mtools and `fsck.fat`, neither of which is ours (D-082).
-  Executables are read whole rather than mapped.
+  Executables are read whole rather than mapped. And with the userland on the
+  medium it boots with **no initrd at all**: `/init` comes off the disk, and so
+  does every program the shell runs and the script that runs them (D-083).
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands

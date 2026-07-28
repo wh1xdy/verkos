@@ -3600,3 +3600,45 @@ on-disk checks are skipped entirely when the shell never said `bye`**: judging a
 volume the kernel was killed in the middle of writing is judging the kill.
 
 `make test`: 246 checks, was 241.
+
+## D-083 — no initrd
+
+**2026-07-28.** `stam` boots with nothing handed to it but itself:
+
+```
+  initrd    none
+  [kernel] no initrd; /init comes off the disk, 71608 bytes
+verk$ hello world | upper
+  [HELLO] ARGV[1] = "WORLD"
+verk$ hello written-by-the-kernel > /out.txt
+verk$ upper < /out.txt
+  [HELLO] ARGV[1] = "WRITTEN-BY-THE-KERNEL"
+  bye
+```
+
+Every program in that session came off the medium, and so did the script that
+ran them. The kernel was started with `-kernel` and no `-initrd` at all.
+
+This is what "booting from a disk" finally means. vboot has always *fetched* the
+kernel from one — that is what a bootloader does — and until today the kernel
+then depended on an archive the loader had put in memory for it. A kernel that
+finds its userland by reading the medium is a different thing, and it is the
+thing every step since D-079 was for.
+
+The order is unchanged where both exist: the initrd wins. It is what the machine
+was *started with*, and the disk is what it *found*; a boot whose behaviour
+depended on what happened to be plugged in would be worse than either.
+
+The image is read whole and the staging pages are returned once the loader has
+copied it, the same as `execve` (D-079). Demand paging an executable needs a
+page cache and a fault handler that can block, and neither exists.
+
+### The check, and what it would catch
+
+`make test` boots the same disk twice: once with the script initrd, and once
+with no `-initrd` argument. The second asserts the line above — a boot that had
+quietly found an archive prints something else — and then that the shell reached
+`bye`, which is the `/rc` **on the disk** having run, because the vsh that read
+it also came from there.
+
+`make test`: 248 checks, was 246, three consecutive runs.

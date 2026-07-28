@@ -90,14 +90,44 @@ static void initrd_program(void *a) {
      * was before there was an archive. */
     uint64_t img = boot.initrd_start, len = boot.initrd_end - boot.initrd_start;
     uint64_t f = 0, flen = 0;
-    if (cpio_find(img, len, "init", &f, &flen) == 0) {
+    unsigned char *from_disk = 0;
+    unsigned disk_pages = 0;
+
+    if (len && cpio_find(img, len, "init", &f, &flen) == 0) {
         img = f; len = flen;
+    } else if (!len && fat_mounted()) {
+        /* No initrd at all: the disk is the only place a first program can come
+         * from, and the kernel can read it now. This is what "booting from a
+         * disk" finally means — not a kernel that was fetched from one, which
+         * vboot has always done, but one that finds its userland there.
+         *
+         * Read whole and freed once the loader has copied it, the same as
+         * execve does (D-079). */
+        fat_file_t ff;
+        if (fat_open("/init", &ff) != 0 || ff.is_dir || !ff.size) {
+            kprintf("  [kernel] no initrd, and no /init on the disk either\n");
+            return;
+        }
+        disk_pages = (unsigned)((ff.size + PAGE_SIZE - 1) / PAGE_SIZE);
+        from_disk = alloc_pages(disk_pages);
+        if (!from_disk) { kprintf("  [kernel] no memory to read /init\n"); return; }
+        if (fat_read(&ff, 0, from_disk, ff.size) != (long)ff.size) {
+            kprintf("  [kernel] /init is %u bytes and could not be read whole\n", ff.size);
+            return;
+        }
+        img = (uint64_t)(uintptr_t)from_disk;
+        len = ff.size;
+        kprintf("  [kernel] no initrd; /init comes off the disk, %u bytes\n", ff.size);
     }
+
     if (elf_load(img, len, &entry) != 0) {
-        kprintf("  [kernel] the initrd holds nothing I can run; it contains:\n");
-        cpio_list(boot.initrd_start, boot.initrd_end - boot.initrd_start);
+        kprintf("  [kernel] nothing I can run; the initrd contains:\n");
+        if (boot.initrd_end > boot.initrd_start)
+            cpio_list(boot.initrd_start, boot.initrd_end - boot.initrd_start);
         return;
     }
+    if (from_disk)
+        for (unsigned p = 0; p < disk_pages; p++) free_page(from_disk + p * PAGE_SIZE);
     unsigned char *stack = alloc_page();
     if (!stack || map_user_page(USER_STACK_VA, (uint64_t)(uintptr_t)stack, 0)) {
         kprintf("  [kernel] no stack for the program\n"); return;
@@ -306,15 +336,16 @@ void kmain_high(void) {
         /* If a program was handed to us, run that too — a real ELF, built by
          * the compiler rather than carried inside the kernel. */
         kprintf("\n  --- 3. can it run a program the compiler built? ---\n");
-        if (boot.initrd_end > boot.initrd_start) {
-            syscall_set_archive(boot.initrd_start, boot.initrd_end - boot.initrd_start);
+        if (boot.initrd_end > boot.initrd_start || fat_mounted()) {
+            syscall_set_archive(boot.initrd_start,
+                                boot.initrd_end - boot.initrd_start);
             thread_create("initrd", initrd_program, 0);
             while (threads_alive() > 1) { thread_yield(); __asm__ volatile("wfi"); }
             kprintf("  it ran and exited. yes.\n");
             kprintf("  memory returned to the free list: %llu pages\n",
                     (unsigned long long)pmm_pages_free_listed());
         } else {
-            kprintf("  no initrd was handed to us, so there is nothing to run.\n");
+            kprintf("  no initrd and no disk, so there is nothing to run.\n");
         }
 
         if (boot.initrd_end > boot.initrd_start) {
