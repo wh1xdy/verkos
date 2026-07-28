@@ -102,8 +102,6 @@ work as equals.
   clean build there would also prove nothing done here is aarch64-specific.
 - **The rootfs is 958 MB**; a live ISO would be ~1.3 GB. About 250 MB of the
   medium is the compiler.
-- **`full-userland` is one block with no inner marks**, so any failure inside it
-  rebuilds bzip2, file, m4, binutils and gcc from the start.
 - **An interrupted `make install` of GCC leaves the system unable to rebuild
   itself.** Recovery depended on the cross toolchain still existing, which is
   luck rather than design.
@@ -140,5 +138,7 @@ run, after three entries of reasoning had each been plausibly wrong.
 2. **Boot it on real hardware** — everything else is simulation.
 3. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
-4. **Give `full-userland` inner marks**, so a failure does not restart the
-   compiler.
+4. **Verify the full-userland stamps by using them** — sixteen inner marks were
+   added on 2026-07-28 and only the generated script's syntax was checked. The
+   thing they change shows on the second run after a failure, which no test
+   reaches.
