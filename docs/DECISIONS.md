@@ -4296,3 +4296,57 @@ called from there and from `thread_wait`, `thread_block_on_console` and
 in a thread whose `TTBR0` is a different user space. `sched_exit` is a kernel
 static in TTBR1, which is shared. It should not matter. It has not been checked
 that it does not.
+
+## D-098 — the exit counter reads 4, and four entries fall
+
+**2026-07-28.** The test D-097 called for was a write in the same basic block as
+the counter — a value nothing else produces, placed where it cannot be skipped:
+
+```c
+static void schedule_locked(void) {
+    sched_calls++;
+    sched_exit = 7;      /* if this is not visible, it is not the same memory */
+```
+
+The answer:
+
+```
+    chooser: calls 3085 exit 4  (7 = only the top ran)
+```
+
+**Four.** Not zero, not seven. `schedule_locked` runs, reaches its switching
+exit, and `switches++` runs with it.
+
+So D-090's `last_exit == 0` was wrong about the build it was read from, and
+**D-091, D-093, D-096 and D-097 were all reasoning about a phantom.** Two of
+them withdrew earlier conclusions; all four withdraw now. The disassembly in
+D-096 and D-097 is still correct — `cpu_switch` really is complete, the stores
+really do precede the call — it was simply answering a question that did not
+need asking.
+
+### What is actually true, and what it leaves
+
+The idle report fires — five hundred passes with `switches` unchanged — while
+`sched_exit` reads 4 from a switch that did happen. Those two are not
+contradictory the way the last four entries assumed: 4 is the *last* exit taken,
+not a recent one.
+
+Which means the thing to explain is much narrower than "the scheduler does not
+run". It is: **what state does the machine reach where `schedule_locked` is
+called three thousand times and `switches` stops changing**, with `next_runnable`
+still naming a runnable thread. That is a question about the four early returns
+and the values feeding them, and it needs the counter read *per exit* rather
+than as a last-value.
+
+### The lesson, and it is the day's
+
+This is the fifth wrong answer in a chain, and every one of them was
+**reasoning built on a measurement I had not re-taken.** D-090's zero was read
+once and then treated as ground truth through four entries of increasingly
+careful analysis of increasingly irrelevant code. The analysis was good. It was
+analysis of nothing.
+
+Re-taking the measurement cost one run and ended four entries. *Ask the machine*
+is not enough on its own — **ask it again** is the other half.
+
+`make test`: 253 checks, green, with none of this in the kernel.
