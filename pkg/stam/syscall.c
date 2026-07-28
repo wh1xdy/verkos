@@ -42,6 +42,9 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_SETPGID 154
 #define SYS_GETPGID 155
 #define SYS_IOCTL   29
+#define SYS_GETDENTS64 61
+#define SYS_MKDIRAT    34
+#define SYS_UNLINKAT   35
 #define SYS_RT_SIGACTION 134
 #define SYS_RT_SIGRETURN 139
 #define TIOCGPGRP  0x540F
@@ -434,6 +437,31 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
          * The mask a handler runs under is the signal itself, which sig_deliver
          * adds regardless. */
         return (uint64_t)(int64_t)sig_action((int)a, b, c, 0);
+    }
+    case SYS_GETDENTS64: {
+        if (!vm_user_ok(b, c, 1)) return EFAULT;
+        file_t *f = fd_get((int)a);
+        if (!f) return (uint64_t)-9;                        /* -EBADF */
+        return (uint64_t)(int64_t)file_getdents(f, (char *)(uintptr_t)b, c);
+    }
+    case SYS_MKDIRAT:
+    case SYS_UNLINKAT: {
+        /* dirfd is accepted and ignored: there is no working directory yet, so
+         * every path is absolute and AT_FDCWD is the only value that could be
+         * meant. Ignoring it silently would be a call that looks like it
+         * supports relative-to-a-directory and does not, so anything else is
+         * refused. */
+        if ((int)a != -100) return (uint64_t)-22;           /* AT_FDCWD, or -EINVAL */
+        long n = vm_user_strlen(b, 127);
+        if (n < 0) return EFAULT;
+        char path[128];
+        const char *src = (const char *)(uintptr_t)b;
+        for (long i = 0; i < n; i++) path[i] = src[i];
+        path[n] = 0;
+        if (!fat_mounted()) return (uint64_t)-30;           /* -EROFS: no disk */
+        int rc = (nr == SYS_MKDIRAT) ? fat_mkdir(path) : fat_unlink(path);
+        if (rc == 0) fat_sync();
+        return rc == 0 ? 0 : (uint64_t)-2;                  /* -ENOENT */
     }
     case SYS_RT_SIGRETURN:
         return sig_return(frame);

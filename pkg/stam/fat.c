@@ -501,7 +501,9 @@ int fat_create(const char *path, fat_file_t *out) {
      * here", so writing into one must leave the next slot zero — which it does,
      * because clus_alloc hands out cleared clusters and a directory that has
      * never been written past this point is already zero. */
+    uint32_t last_c = dir;
     for (uint32_t c = dir; c; c = fat_next(c)) {
+        last_c = c;
         for (uint32_t s = 0; s < sec_per_clus; s++) {
             if (rd_sec(clus_sector(c) + s, dirbuf) != 0) return -1;
             for (int i = 0; i < 512; i += 32) {
@@ -520,5 +522,155 @@ int fat_create(const char *path, fat_file_t *out) {
             }
         }
     }
-    return -1;                                      /* the directory is full */
+
+    /* Full: give it another cluster. A directory that cannot grow is one where
+     * the eighth file in a root of sixteen slots fails with "no such file",
+     * which is what it did — a true error code about the wrong thing.
+     * clus_alloc hands out a cleared cluster, so every slot in it reads as
+     * 0x00 and the first is free. */
+    uint32_t nc = clus_alloc();
+    if (!nc || fat_set(last_c, nc) != 0) return -1;
+    if (rd_sec(clus_sector(nc), dirbuf) != 0) return -1;
+    for (int k = 0; k < 32; k++) dirbuf[k] = 0;
+    for (int k = 0; k < 11; k++) dirbuf[k] = name83[k];
+    dirbuf[11] = 0x20;
+    if (wr_sec(clus_sector(nc), dirbuf) != 0) return -1;
+    out->cluster = 0;
+    out->size    = 0;
+    out->is_dir  = 0;
+    out->dir_sec = clus_sector(nc);
+    out->dir_off = 0;
+    return 0;
+}
+
+/* ---- directories as things a program can look at ------------------------ */
+
+/* The n-th name in a directory, skipping long-name parts, deleted slots and the
+ * volume label. Returns 0, or -1 when there is no n-th.
+ *
+ * By index and not by a cursor, because a program's position in a directory is
+ * a number it holds across system calls and a cursor here would be state the
+ * kernel keeps per open file about a structure it re-reads anyway. The cost is
+ * that reading a whole directory is quadratic in its length, which for a
+ * directory small enough to print is not a cost.
+ */
+int fat_dirent(const fat_file_t *dir, uint32_t index,
+               char name[261], uint32_t *size, int *is_dir) {
+    if (!mounted || !dir->is_dir) return -1;
+    uint32_t start = dir->cluster ? dir->cluster : root_clus;
+    uint32_t seen = 0;
+    char lfn[261];
+    int  lfn_len = 0;
+
+    for (uint32_t c = start; c; c = fat_next(c)) {
+        for (uint32_t s = 0; s < sec_per_clus; s++) {
+            if (rd_sec(clus_sector(c) + s, dirbuf) != 0) return -1;
+            for (int i = 0; i < 512; i += 32) {
+                const uint8_t *e = dirbuf + i;
+                if (e[0] == 0x00) return -1;
+                if (e[0] == 0xe5) { lfn_len = 0; continue; }
+                if ((e[11] & 0x0f) == 0x0f) {
+                    int seq = (e[0] & 0x3f);
+                    if (seq >= 1 && seq <= 20) {
+                        char part[13];
+                        lfn_chars(e, part);
+                        int at = (seq - 1) * 13;
+                        for (int k = 0; k < 13; k++) lfn[at + k] = part[k];
+                        if (at + 13 > lfn_len) lfn_len = at + 13;
+                        lfn[260] = 0;
+                    }
+                    continue;
+                }
+                if (e[11] & 0x08) { lfn_len = 0; continue; }   /* volume label */
+
+                if (seen++ == index) {
+                    int n = 0;
+                    if (lfn_len) {
+                        for (int k = 0; k < lfn_len && k < 260 && lfn[k]; k++) name[n++] = lfn[k];
+                    }
+                    if (!n) { short_name(e, name); }
+                    else    { name[n] = 0; }
+                    *size   = rd32(e + 28);
+                    *is_dir = (e[11] & 0x10) ? 1 : 0;
+                    return 0;
+                }
+                lfn_len = 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/* A directory: an entry with the directory bit, one cluster, and the two names
+ * every FAT directory has. Without "." and ".." other readers call it corrupt
+ * — they are ordinary entries and nothing else creates them. */
+int fat_mkdir(const char *path) {
+    fat_file_t d;
+    if (fat_create(path, &d) != 0) return -1;
+
+    uint32_t c = clus_alloc();
+    if (!c) return -1;
+
+    /* The parent, so ".." can name it. A directory in the root names cluster 0
+     * there, which is the convention and not an oversight. */
+    uint32_t parent = root_clus;
+    {
+        const char *p = path;
+        while (*p == '/') p++;
+        const char *last = p;
+        for (const char *q = p; *q; q++) if (*q == '/') last = q + 1;
+        if (last != p) {
+            char pn[128]; unsigned n = 0;
+            for (const char *q = p; q < last - 1 && n < 127; q++) pn[n++] = *q;
+            pn[n] = 0;
+            fat_file_t pf;
+            if (fat_open(pn, &pf) == 0 && pf.is_dir) parent = pf.cluster;
+        }
+    }
+
+    for (int i = 0; i < 512; i++) dirbuf[i] = 0;
+    for (int k = 0; k < 11; k++) dirbuf[k] = ' ';
+    dirbuf[0] = '.';  dirbuf[11] = 0x10;
+    wr16(dirbuf + 20, (uint16_t)(c >> 16));
+    wr16(dirbuf + 26, (uint16_t)(c & 0xffff));
+    for (int k = 0; k < 11; k++) dirbuf[32 + k] = ' ';
+    dirbuf[32] = '.'; dirbuf[33] = '.'; dirbuf[32 + 11] = 0x10;
+    uint32_t pp = (parent == root_clus) ? 0 : parent;
+    wr16(dirbuf + 32 + 20, (uint16_t)(pp >> 16));
+    wr16(dirbuf + 32 + 26, (uint16_t)(pp & 0xffff));
+    if (wr_sec(clus_sector(c), dirbuf) != 0) return -1;
+
+    d.cluster = c;
+    d.is_dir  = 1;
+    if (rd_sec(d.dir_sec, dirbuf) != 0) return -1;
+    dirbuf[d.dir_off + 11] = 0x10;                    /* it is a directory */
+    wr32(dirbuf + d.dir_off + 28, 0);                 /* directories have no size */
+    wr16(dirbuf + d.dir_off + 20, (uint16_t)(c >> 16));
+    wr16(dirbuf + d.dir_off + 26, (uint16_t)(c & 0xffff));
+    return wr_sec(d.dir_sec, dirbuf);
+}
+
+int fat_unlink(const char *path) {
+    fat_file_t f;
+    if (fat_open(path, &f) != 0 || !f.dir_sec) return -1;
+    if (f.is_dir) {
+        /* Only an empty one. Removing a directory with entries in it means
+         * walking the tree, and a partial walk that stopped halfway would leave
+         * clusters allocated to a directory that no longer exists — lost until
+         * something recounts the whole table. */
+        char name[261]; uint32_t sz; int isd;
+        for (uint32_t i = 0; ; i++) {
+            if (fat_dirent(&f, i, name, &sz, &isd) != 0) break;
+            if (name_eq(name, ".") || name_eq(name, "..")) continue;
+            return -1;                                /* -ENOTEMPTY */
+        }
+    }
+    uint32_t c = f.cluster;
+    while (c) { uint32_t n = fat_next(c); if (fat_set(c, 0) != 0) break; c = n; }
+    if (rd_sec(f.dir_sec, dirbuf) != 0) return -1;
+    /* 0xE5 and not 0x00: the first byte being zero means "the directory ends
+     * here", and every entry after it becomes invisible. D-065 found that from
+     * the writing side. */
+    dirbuf[f.dir_off] = 0xe5;
+    return wr_sec(f.dir_sec, dirbuf);
 }

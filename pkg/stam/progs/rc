@@ -17,4 +17,10 @@ diskprog from-the-disk
 upper < /note.txt
 hello written-by-the-kernel > /out.txt
 upper < /out.txt
+mkdir /adir
+ls /
+rm /out.txt
+ls /
+rm /adir
+ls /
 exit

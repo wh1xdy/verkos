@@ -36,6 +36,7 @@ int file_pipe(file_t **read_end, file_t **write_end);
 
 /* Where the initrd is, so `< name` has something to open. Set once at boot,
  * the same archive exec reads from. */
+long file_getdents(file_t *f, char *buf, uint64_t len);
 void file_set_archive(uint64_t addr, uint64_t size);
 
 /* Open a name. Reading finds it in the initrd; writing creates or truncates a
