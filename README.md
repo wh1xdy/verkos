@@ -134,9 +134,10 @@ What it does today, each verified by running it:
 - Preemptive round-robin scheduling driven from the timer interrupt, with the
   kernel in the high half (TTBR1) and every process holding its own low half
   (D-037, D-042, D-043).
-- Twenty system calls — `read`, `write`, `exit`, `getpid`, `clone`, `execve`,
-  `wait4`, `close`, `dup`, `dup3`, `pipe2`, `openat`, `kill`,
-  `setpgid`, `getpgid`, `ioctl`, `rt_sigaction`, `rt_sigreturn` — with `WNOHANG`, `O_APPEND` and `TIOCSPGRP` — using Linux's aarch64 numbers,
+- Twenty-one system calls — `read`, `write`, `exit`, `getpid`, `clone`,
+  `execve`, `wait4`, `close`, `dup`, `dup3`, `pipe2`, `openat`, `kill`,
+  `setpgid`, `getpgid`, `ioctl`, `rt_sigaction`, `rt_sigreturn`, `getdents64`,
+  `mkdirat`, `unlinkat` — with `WNOHANG`, `O_APPEND` and `TIOCSPGRP` — using Linux's aarch64 numbers,
   because the numbering is the cheapest part of an ABI to agree with (D-039). **Every pointer they are given is
   checked** against the caller's own page tables before it is dereferenced: the
   MMU stops a program reaching kernel memory, but says nothing about the kernel
