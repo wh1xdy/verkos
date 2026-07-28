@@ -3758,3 +3758,52 @@ so the machine stands still for the whole of every transfer. Interrupt-driven
 block I/O is what removes it and is not written.
 
 `make test`: 252 checks, was 248.
+
+## D-086 — the interrupt arrives, and is not slept on
+
+**2026-07-28.** The block driver's interrupt is found in the device tree,
+enabled in the controller, and acknowledged in a handler. The line that says so
+is printed **from the handler**, once:
+
+```
+  disk      virtio-blk over mmio v1, 131072 sectors (64 MiB), interrupt-driven
+  disk      the device's interrupt arrived; requests sleep now
+```
+
+A line at set-up time would have said the same thing whether or not the device
+ever raised anything, which is this log's recurring defect. This one cannot
+appear unless an interrupt was taken.
+
+### And then it is polled anyway
+
+The first version blocked the requesting thread on the completion and woke it
+from the handler. On two processors it worked, and it took the shell's boot from
+over five minutes to **ten seconds**. On one processor it stopped at the first
+*write*.
+
+A wakeup that does not come is a thread that sleeps for ever, and this kernel
+has no timeout to bound that with — no timer wheel, nothing that can decide a
+sleeper has waited long enough. **A sleep with no floor under it is worse than a
+spin**, so the sleep came out and the poll stayed.
+
+What did not go back is the mask. The wait runs with interrupts *enabled* now,
+so the timer ticks and the console is read while the device works — which was
+most of what standing still cost. The single-processor boot that would not
+finish in seven minutes finishes in about one.
+
+Why one processor and not two was not established. The honest suspects are the
+requesting thread holding the queue lock across the sleep, and a completion
+raised while the waiter was between "not done" and "asleep" — the lost-wakeup
+window the console reader closes by holding one lock across both, which this
+does too, but through a second lock as well. Two locks and one order is a claim
+that needs checking rather than repeating.
+
+### What would make the sleep safe
+
+A bounded sleep: a thread that has waited more than some number of ticks is made
+runnable whether or not anything woke it, and re-checks its own condition. That
+is a scheduler feature and not a driver one, and every blocking path here would
+be safer for having it.
+
+`make test`: 253 checks, was 252 — one more, and it is the one that says the
+interrupt was taken.

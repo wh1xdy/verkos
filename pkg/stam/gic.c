@@ -13,6 +13,7 @@
  */
 #include "gic.h"
 #include "smp.h"
+#include "virtio.h"
 #include "console.h"
 #include "sched.h"
 #include "fdt.h"
@@ -30,7 +31,7 @@
 #define GICC_EOIR         0x010
 
 static volatile uint8_t *gicd, *gicc;   /* v2: distributor, CPU interface   */
-static int timer_intid = -1, console_intid = -1;
+static int timer_intid = -1, console_intid = -1, blk_intid = -1;
 static volatile uint8_t *gicr;          /* v3: the boot CPU's redistributor */
 static uint64_t gicr_base;              /* v3: the first frame, for the walk */
 static int gic_present;
@@ -232,6 +233,7 @@ extern void timer_tick(void);
 extern void console_interrupt(void);
 void gic_set_timer_irq(int id)   { timer_intid = id; }
 void gic_set_console_irq(int id) { console_intid = id; }
+void gic_set_blk_irq(int id)     { blk_intid = id; }
 
 /* The frame is passed in so the handler can tell whether the interrupt landed
  * on a program or on the kernel. It matters for signals: a process that never
@@ -254,6 +256,7 @@ void irq_dispatch(void *frame) {
         thread_wake_console();
         sched_unlock_irq(f);
     }
+    else if ((int)id == blk_intid) virtio_blk_interrupt();
     /* Tell the controller we are done *before* switching threads. Otherwise
      * the interrupt stays active while another thread runs, and that thread
      * can never be interrupted in turn — the machine would appear to schedule

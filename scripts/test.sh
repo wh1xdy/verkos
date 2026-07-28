@@ -1235,6 +1235,13 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # And the label off sector 0 of that partition, which is the
                     # device answering rather than the driver reporting that it
                     # asked.
+                    # Printed from the handler and nowhere else, so it cannot
+                    # appear on a machine whose device never raised anything —
+                    # which is exactly what a line at set-up time would have
+                    # done. Before this the whole boot took over five minutes;
+                    # it takes ten seconds.
+                    check "the disk's interrupt arrives and requests sleep for it" \
+                          "grep -aq \"the device's interrupt arrived\" $SL"
                     check "stam mounts the filesystem vmkfs formatted inside it" \
                           "grep -aq 'fat       FAT32 \"VERKESP\"' $SL"
                     # The circle: vboot parses this file to start stam, and
@@ -1329,14 +1336,7 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                             -display none -serial "file:$NL" -no-reboot $DISK \
                             -kernel pkg/stam/stam.img \
                             </dev/null >/dev/null 2>&1 & echo $! > "$T/npid" )
-                        # Longer than the others, and the reason is the driver:
-                        # every sector is polled with interrupts masked, so a
-                        # boot that creates and removes a handful of files
-                        # spends most of its time with the machine standing
-                        # still. That is a real cost and not a harness quirk —
-                        # interrupt-driven block I/O is what removes it, and it
-                        # is not written yet.
-                        for _ in $(seq 1 420); do
+                        for _ in $(seq 1 180); do
                             sleep 1
                             grep -aq 'bye' "$NL" 2>/dev/null && break
                         done

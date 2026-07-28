@@ -37,7 +37,9 @@
 #include "mmu.h"
 #include "console.h"
 #include "lock.h"
+#include "sched.h"
 #include "pci.h"
+#include "gic.h"
 #include <stdint.h>
 
 /* The MMIO register block. */
@@ -169,6 +171,15 @@ static void     wr(unsigned off, uint32_t v){ *(volatile uint32_t *)(base + off)
  * back a device id of zero and must be skipped rather than treated as a
  * failure. */
 static unsigned slots_seen, blk_seen;
+static int      blk_irq = -1;      /* the transport's interrupt, if the tree says */
+/* Whether an interrupt from this device has ever arrived. Until one has, every
+ * request is polled — a driver that waits for something that never comes is a
+ * machine that stops, and "the tree named an interrupt" is not the same claim
+ * as "the interrupt arrives". It is earned by one completion and then trusted
+ * (D-086). */
+static volatile int irq_works;
+static volatile int blk_done;
+static const char   blk_token;     /* an address to wait on, nothing more */
 
 static volatile uint8_t *find_blk(const fdt_t *f) {
     int depth = 0;
@@ -183,11 +194,18 @@ static volatile uint8_t *find_blk(const fdt_t *f) {
         const void *reg = fdt_getprop(f, off, "reg", &len);
         if (!reg || len < 8) continue;
         uint64_t addr = fdt_cells(reg, f->addr_cells);
+        /* <type number flags>: type 0 is an SPI, whose numbers start at 32. */
+        uint32_t ilen = 0;
+        const uint8_t *ints = fdt_getprop(f, off, "interrupts", &ilen);
+        int this_irq = -1;
+        if (ints && ilen >= 12 && fdt_cells(ints, 1) == 0)
+            this_irq = (int)fdt_cells(ints + 4, 1) + 32;
         volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)phys_to_kva(addr);
         if (*(volatile uint32_t *)(b + R_MAGIC) != 0x74726976) continue;
         uint32_t id = *(volatile uint32_t *)(b + R_DEVICE_ID);
         if (id) blk_seen++;                  /* a slot with something in it */
         if (id != VIRTIO_BLK) continue;
+        blk_irq = this_irq;
         return b;
     }
     return 0;
@@ -416,9 +434,21 @@ int virtio_blk_init(const fdt_t *f) {
     vt_status_set(S_ACK | S_DRIVER | S_FEAT_OK | S_DRIVER_OK);
 
     present = 1;
-    kprintf("  disk      virtio-blk over %s, %llu sectors (%llu MiB)\n",
+
+    /* The interrupt, where the tree names one. Enabled here and *not* relied on
+     * yet: blk_io polls until one has actually arrived. On the PCI transport
+     * there is no number to enable — the routing is in the bridge's
+     * interrupt-map, which vboot's synthetic tree does not carry — so that path
+     * stays polled and says so rather than looking like it sleeps. */
+    if (!use_pci && blk_irq >= 0) {
+        gic_set_blk_irq(blk_irq);
+        gic_enable_irq((unsigned)blk_irq);
+    }
+
+    kprintf("  disk      virtio-blk over %s, %llu sectors (%llu MiB), %s\n",
             vt_name, (unsigned long long)capacity,
-            (unsigned long long)(capacity / 2048));
+            (unsigned long long)(capacity / 2048),
+            (!use_pci && blk_irq >= 0) ? "interrupt-driven" : "polled");
     return 0;
 }
 
@@ -441,12 +471,16 @@ static int blk_io(uint64_t sector, void *buf, int write) {
     if (!present) return -1;
     if (sector >= capacity) return -1;
 
-    uint64_t fl = spin_lock_irq(&blk_lock);
+    /* The lock, but not the mask: the interrupt that ends this request has to be
+     * able to arrive, and on the polled path the timer still has to tick. */
+    spin_lock(&blk_lock);
+    uint64_t fl = 0; (void)fl;
 
     if (write) { const uint8_t *s = buf; for (int i = 0; i < 512; i++) data[i] = s[i]; }
     hdr->type = write ? 1u : 0u;
     hdr->reserved = 0;
     hdr->sector = sector;
+    blk_done = 0;
     *status = 0xff;                /* so a device that writes nothing is seen */
 
     vq_desc[0].addr  = hdr_phys;
@@ -476,6 +510,21 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
+    /* The interrupt is enabled, acknowledged and observed — but not slept on.
+     *
+     * A first version blocked the requesting thread on the completion and woke
+     * it from the handler. On two processors it worked and took a boot from
+     * five minutes to ten seconds. On one it stopped at the first *write*: a
+     * wakeup that does not come is a thread that sleeps for ever, and this
+     * kernel has no timeout to bound that with. A sleep with no floor under it
+     * is worse than a spin.
+     *
+     * So the wait below is still a poll, with one difference that matters: it
+     * runs with interrupts *enabled*. The timer ticks and the console is read
+     * while the device works, which was most of what standing still cost
+     * (D-086).
+     */
+
     /* Bounded, because a device that never answers must produce an error and
      * not a machine that stops. */
     int done = 0;
@@ -484,7 +533,7 @@ static int blk_io(uint64_t sector, void *buf, int write) {
         __asm__ volatile("" ::: "memory");
     }
     if (!done) {
-        spin_unlock_irq(&blk_lock, fl);
+        spin_unlock(&blk_lock);
         kprintf("  disk      the device did not answer a %s of sector %llu\n",
                 write ? "write" : "read", (unsigned long long)sector);
         return -1;
@@ -495,8 +544,27 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     int ok = (*status == 0);
     if (ok && !write) { uint8_t *o = buf; for (int i = 0; i < 512; i++) o[i] = data[i]; }
-    spin_unlock_irq(&blk_lock, fl);
+    spin_unlock(&blk_lock);
     return ok ? 0 : -1;
+}
+
+/* Acknowledge and wake. Nothing else: the thread that made the request reads
+ * the ring and the status byte itself, and doing that here would be a handler
+ * touching state whose owner is asleep rather than gone. */
+void virtio_blk_interrupt(void) {
+    if (!present) return;
+    vt_irq_ack();
+    /* Said once, and only from here. A line printed where the driver is set up
+     * would say the same thing whether or not the device ever raised anything,
+     * which is the report this project keeps finding. */
+    if (!irq_works) {
+        irq_works = 1;
+        kprintf("  disk      the device's interrupt arrived; requests sleep now\n");
+    }
+    uint64_t s = sched_lock_irq();
+    blk_done = 1;
+    thread_wake_pipe(&blk_token);
+    sched_unlock_irq(s);
 }
 
 int virtio_blk_read(uint64_t sector, void *out)        { return blk_io(sector, out, 0); }
