@@ -55,6 +55,11 @@ static int next_id;              /* process ids: monotonic, never reused      */
  * protects nothing against another core (D-057, and the paragraph in lock.h
  * that said so). */
 static spinlock_t sched_lock = SPINLOCK_INIT;
+/* How many times any processor has switched threads. The idle report below
+ * needs it: counting its own passes says nothing, because every thread that
+ * runs and blocks again returns here, and a busy machine looks identical to a
+ * stopped one from inside this loop. */
+static volatile uint64_t switches;
 
 /* Released by whoever the scheduler switched *to*: the lock is handed across
  * cpu_switch, and a thread that has never run resumes in a trampoline rather
@@ -356,8 +361,38 @@ void schedule(void) {
  * the difference looks like from outside).
  */
 void sched_idle_loop(void) {
+    /* A core with nothing to run when something is still unfinished is a
+     * machine that has stopped, and until now it stopped silently. Counting
+     * consecutive idle passes and printing the table once is the difference
+     * between "it hangs" and a report naming which thread is blocked on what.
+     * Five hundred passes is five seconds at 100 Hz — long enough that an
+     * ordinary quiet moment never reaches it. */
+    unsigned quiet = 0;
+    uint64_t seen = switches;
     for (;;) {
         __asm__ volatile("wfi");
+        /* Reset on any switch anywhere, not on "am I the idle thread" — which
+         * is true every time this loop is reached and says nothing about
+         * whether the machine is doing anything. */
+        if (switches != seen) { seen = switches; quiet = 0; }
+        else if (++quiet == 500) {
+            {
+                uint64_t f = spin_lock_irq(&sched_lock);
+                kprintf("  [kernel] cpu %u has had nothing to run for five seconds:\n",
+                        this_cpu()->index);
+                for (int i = 0; i < n_threads; i++) {
+                    thread_t *t = &threads[i];
+                    if (t->state == THREAD_FREE) continue;
+                    kprintf("    %s state %d reason %d object %llx wake_at %llu now %llu\n",
+                            t->name ? t->name : "?", t->state, t->wait_reason,
+                            (unsigned long long)(uintptr_t)t->wait_object,
+                            (unsigned long long)t->wake_at,
+                            (unsigned long long)timer_ticks());
+                }
+                spin_unlock_irq(&sched_lock, f);
+                quiet = 0;         /* say it again if it is still true */
+            }
+        }
         schedule();
     }
 }

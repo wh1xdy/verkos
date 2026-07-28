@@ -3841,3 +3841,42 @@ this kernel is safer for a floor under it — and it is the thing that made the
 second attempt worth trying rather than a repeat of the first.
 
 `make test`: 253 checks, unchanged.
+
+## D-088 — a machine that has stopped now says so
+
+**2026-07-28.** A core with nothing to run while something is unfinished used to
+stop silently. It prints the thread table instead:
+
+```
+  [kernel] cpu 0 has had nothing to run for five seconds:
+    boot     state 0 reason 3 object ffffff804008f0b0 wake_at 0 now 1081
+    idle-0   state 4 reason 0 object 0                wake_at 0 now 1081
+    initrd   state 2 reason 1 object ffffff804008f0b0 wake_at 0 now 1081
+    child    state 0 reason 3 object ffffff804008f0b0 wake_at 0 now 1081
+```
+
+That is the disk sleep of D-086 and D-087, at last saying something specific:
+**no thread switch for five seconds, with two threads standing runnable.** The
+sleeping thread is not the problem — `boot` and `child` are `THREAD_RUNNABLE`
+and nothing picks them. That points at the scheduler's choice, not at the
+sleep, and it is where this continues.
+
+The sleep stays out until then. What all three attempts did leave behind is the
+mask: the driver's wait runs with interrupts enabled, so the timer ticks and the
+console is read while the device works.
+
+### The report was wrong before it was right
+
+The first version counted its own passes through the idle loop. Every thread
+that runs and blocks again comes back here, so a busy machine and a stopped one
+look identical from inside it — and it duly reported a stopped machine that was
+merely idle between shell commands. **A report that does not depend on what it
+reports**, written while chasing one. It counts thread switches now, anywhere,
+by any processor.
+
+The second version called `threads_alive()` on every timer interrupt to decide
+whether to care. Walking the table sixteen times a second was enough to push the
+shell's boot past the check that waits for it — a diagnostic that changed the
+thing it was diagnosing. It counts first and looks only at the threshold.
+
+`make test`: 253 checks, unchanged.
