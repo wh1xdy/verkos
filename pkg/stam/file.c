@@ -23,7 +23,8 @@
 #define FILE_PIPE_W   3
 #define FILE_INITRD   4        /* read-only, straight out of the cpio archive */
 #define FILE_MEM      5        /* a named buffer that lasts until the reboot  */
-#define FILE_FAT      6        /* read-only, off the disk                     */
+#define FILE_FAT      6        /* off the disk                                */
+#define FILE_FATDIR   7        /* a directory on the disk, only readable as names */
 
 #define NMEM       4
 #define MEM_SIZE   4096
@@ -103,18 +104,36 @@ int file_open(const char *name, int mode, file_t **out) {
      * should be able to say rather than have decided for it. */
     int absolute = (name[0] == '/');
     name = skip_slash(name);
+
+    /* The disk, before the lock and not under it.
+     *
+     * Looking a name up on the medium is a directory scan, and creating one is
+     * that plus an allocation and a cluster to clear — hundreds of polled
+     * sector reads, every one of them with interrupts masked if this were
+     * inside the section. That is the timer not ticking and the console not
+     * being read for the duration, which showed as a boot that sometimes did
+     * not finish rather than as anything pointing here. Nothing else can reach
+     * an open file that does not exist yet, so there is nothing to guard. */
+    fat_file_t ff;
+    int fat_kind = 0;                 /* 0 none, FILE_FAT, or FILE_FATDIR */
+    int fat_write_open = 0;
+    if (fat_mounted()) {
+        if (mode != OPEN_READ && absolute) {
+            int have = (fat_open(name, &ff) == 0 && !ff.is_dir);
+            if (!have && fat_create(name, &ff) != 0) return -2;
+            if (have && mode == OPEN_WRITE && fat_truncate(&ff) != 0) return -5;
+            fat_kind = FILE_FAT;
+            fat_write_open = 1;
+        } else if (mode == OPEN_READ) {
+            /* Looked up now, used only if the memory files and the initrd have
+             * nothing by this name — the order in D-079, unchanged. */
+            if (fat_open(name, &ff) == 0) fat_kind = ff.is_dir ? FILE_FATDIR : FILE_FAT;
+        }
+    }
+
     uint64_t s = sched_lock_irq();
 
-    /* The disk write path releases the lock around the device, and holding it
-     * across fat_create would mean holding it across a scan of the directory.
-     * Nothing else can reach this open file yet, so there is nothing to guard. */
-    if (mode != OPEN_READ && absolute && fat_mounted()) {
-        fat_file_t ff;
-        int have = (fat_open(name, &ff) == 0 && !ff.is_dir);
-        if (!have && fat_create(name, &ff) != 0) { sched_unlock_irq(s); return -2; }
-        if (have && mode == OPEN_WRITE && fat_truncate(&ff) != 0) {
-            sched_unlock_irq(s); return -5;                   /* -EIO */
-        }
+    if (fat_write_open) {
         struct file *df = file_alloc(FILE_FAT, 0);
         if (!df) { sched_unlock_irq(s); return -24; }
         df->fat      = ff;
@@ -171,9 +190,8 @@ int file_open(const char *name, int mode, file_t **out) {
          * initrd is what the machine was started with and the disk is what it
          * found, and a boot that silently preferred the disk would be a boot
          * whose behaviour depends on what is plugged in. */
-        fat_file_t ff;
-        if (fat_mounted() && fat_open(name, &ff) == 0 && !ff.is_dir) {
-            struct file *df = file_alloc(FILE_FAT, 0);
+        if (fat_kind) {
+            struct file *df = file_alloc(fat_kind, 0);
             if (!df) { sched_unlock_irq(s); return -24; }
             df->fat = ff;
             df->ro_len = ff.size;
@@ -318,6 +336,43 @@ long file_read(file_t *f, char *buf, uint64_t len) {
     thread_wake_pipe(p);            /* room for a writer that was waiting */
     sched_unlock_irq(s);
     return (long)n;
+}
+
+/* Names out of a directory, in the layout Linux's getdents64 uses.
+ *
+ * The position is an entry index rather than a byte offset, which is what the
+ * call's d_off field is for — a program that keeps it and hands it back gets
+ * the next name. Every entry is padded to a multiple of eight because the
+ * structure begins with a 64-bit field and the next one follows it directly.
+ */
+long file_getdents(file_t *f, char *buf, uint64_t len) {
+    if (!f || f->kind != FILE_FATDIR) return -20;          /* -ENOTDIR */
+    uint64_t used = 0;
+    for (;;) {
+        char name[261];
+        uint32_t size; int is_dir;
+        if (fat_dirent(&f->fat, (uint32_t)f->pos, name, &size, &is_dir) != 0) break;
+        unsigned n = 0; while (name[n]) n++;
+        uint64_t rec = (19 + n + 1 + 7) & ~7ull;
+        if (used + rec > len) {
+            /* Nothing at all fits: say so rather than return zero, which a
+             * program reads as "the directory ended". */
+            if (used == 0) return -22;                     /* -EINVAL */
+            break;
+        }
+        char *e = buf + used;
+        for (int i = 0; i < 8; i++) e[i] = 0;              /* d_ino: we have none */
+        uint64_t off = f->pos + 1;
+        for (int i = 0; i < 8; i++) e[8 + i] = (char)(off >> (8 * i));
+        e[16] = (char)(rec & 0xff);
+        e[17] = (char)(rec >> 8);
+        e[18] = (char)(is_dir ? 4 : 8);                    /* DT_DIR : DT_REG */
+        for (unsigned i = 0; i <= n; i++) e[19 + i] = name[i];
+        for (uint64_t i = 19 + n + 1; i < rec; i++) e[i] = 0;
+        used += rec;
+        f->pos++;
+    }
+    return (long)used;
 }
 
 long file_write(file_t *f, const char *buf, uint64_t len) {

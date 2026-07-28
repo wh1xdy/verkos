@@ -34,4 +34,11 @@ int  fat_truncate(fat_file_t *f);
 /* Recompute FSInfo's free count. Called when a file is closed rather than when
  * a byte is written. */
 void fat_sync(void);
+
+/* The n-th name in a directory, or -1 when there is no n-th. */
+int  fat_dirent(const fat_file_t *dir, uint32_t index,
+                char name[261], uint32_t *size, int *is_dir);
+int  fat_mkdir(const char *path);
+/* A file, or an empty directory. */
+int  fat_unlink(const char *path);
 #endif

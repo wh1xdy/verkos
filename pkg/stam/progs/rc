@@ -17,4 +17,10 @@ diskprog from-the-disk
 upper < /note.txt
 hello written-by-the-kernel > /out.txt
 upper < /out.txt
+mkdir /adir
+hello doomed > /gone.txt
+ls /
+rm /gone.txt
+rm /adir
+ls /
 exit

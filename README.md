@@ -190,6 +190,10 @@ What it does today, each verified by running it:
   Executables are read whole rather than mapped. And with the userland on the
   medium it boots with **no initrd at all**: `/init` comes off the disk, and so
   does every program the shell runs and the script that runs them (D-083).
+- **Directories**: `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir` and
+  `rm` as ordinary programs with no privileges and nothing the kernel knows
+  about them. A directory grows by a cluster when it fills, and `rm` takes a
+  file or an empty one (D-085).
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands

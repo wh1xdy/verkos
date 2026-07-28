@@ -160,6 +160,20 @@ progs/catch.elf: progs/catch.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Three programs that do nothing but use the directory calls, so that the
+# interface is exercised from outside the kernel rather than described in it.
+progs/ls.elf: progs/ls.c progs/syscalls.h
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+progs/mkdir.elf: progs/mkdir.c progs/syscalls.h
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
+progs/rm.elf: progs/rm.c progs/syscalls.h
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -178,7 +192,8 @@ progs/vsh.elf: progs/vsh.c
 # they can be read.
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
                           progs/forky.elf progs/twice.elf progs/badptr.elf \
-                          progs/catch.elf progs/rc
+                          progs/catch.elf progs/ls.elf progs/mkdir.elf \
+                          progs/rm.elf progs/rc
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/scriptroot && mkdir -p progs/scriptroot
@@ -191,6 +206,9 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/twice.elf progs/scriptroot/twice
 	@cp progs/badptr.elf progs/scriptroot/badptr
 	@cp progs/catch.elf progs/scriptroot/catch
+	@cp progs/ls.elf progs/scriptroot/ls
+	@cp progs/mkdir.elf progs/scriptroot/mkdir
+	@cp progs/rm.elf progs/scriptroot/rm
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
