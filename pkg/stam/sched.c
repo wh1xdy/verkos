@@ -383,12 +383,22 @@ void sched_idle_loop(void) {
                 for (int i = 0; i < n_threads; i++) {
                     thread_t *t = &threads[i];
                     if (t->state == THREAD_FREE) continue;
-                    kprintf("    %s state %d reason %d object %llx wake_at %llu now %llu\n",
-                            t->name ? t->name : "?", t->state, t->wait_reason,
+                    kprintf("    slot %d %s state %d home %d reason %d object %llx wake_at %llu now %llu\n",
+                            i,
+                            t->name ? t->name : "?", t->state, t->home, t->wait_reason,
                             (unsigned long long)(uintptr_t)t->wait_object,
                             (unsigned long long)t->wake_at,
                             (unsigned long long)timer_ticks());
                 }
+                /* And what the chooser itself sees, from where it stands. If
+                 * this disagrees with the table above, the disagreement is the
+                 * defect — and reasoning about the loop instead of asking it
+                 * is how three attempts at the disk sleep went (D-088). */
+                thread_t *would = next_runnable(current);
+                kprintf("    chooser: n_threads %d, current is slot %d, "
+                        "next_runnable says %s\n",
+                        n_threads, (int)(current - threads),
+                        would ? (would->name ? would->name : "?") : "(nobody)");
                 spin_unlock_irq(&sched_lock, f);
                 quiet = 0;         /* say it again if it is still true */
             }

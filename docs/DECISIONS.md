@@ -3880,3 +3880,39 @@ shell's boot past the check that waits for it — a diagnostic that changed the
 thing it was diagnosing. It counts first and looks only at the threshold.
 
 `make test`: 253 checks, unchanged.
+
+## D-089 — the chooser chooses, and nothing moves
+
+**2026-07-28.** D-088's report said no thread switch happened for five seconds
+while two threads stood runnable. The obvious suspect was `next_runnable` — so
+the report now asks it directly, from inside the same locked section, and prints
+what it says:
+
+```
+    slot 0 boot   state 0 home -1 ...
+    slot 1 idle-0 state 4 home  0 ...
+    slot 7 child  state 0 home -1 ...
+    chooser: n_threads 11, current is slot 1, next_runnable says child
+```
+
+**It says `child`.** A runnable thread, found, named — and no switch happens.
+
+That is worth more than three theories: the defect is not in choosing. It is
+between the choice and `cpu_switch`, or in `cpu_switch` itself, or in the
+`switches` counter that reports it — and it is nowhere near the disk driver
+that three entries have now been written about.
+
+Asking the loop instead of reasoning about it took one run. Reasoning about it
+took three (D-086, D-087, D-088), and each was wrong in a way that looked
+plausible. This project's own note says the cheapest next step when a thing does
+not work is almost never to test one explanation — it is to make the program say
+where it got to (D-071, D-081).
+
+The disk sleep stays out. `make test` is 253 checks and green without it; the
+driver polls with interrupts enabled, which is where D-086 left it.
+
+### What the next session should do
+
+Print, from inside `schedule_locked` on the path where it does *not* switch,
+which of its four early returns it took. There are exactly four and one of them
+is being taken; naming it is a line of code and ends this.

@@ -510,14 +510,14 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* Not slept on. D-086 tried it, D-087 gave it a floor, and a
-     * single-processor boot still stops — with the idle report now saying why
-     * it looks stopped: no thread switch for five seconds while two threads
-     * stand runnable. That points at the scheduler's choice and not at the
-     * sleep, and it is where the next session starts (D-088).
+    /* Not slept on. Three attempts: D-086 tried it, D-087 gave it a floor, and
+     * D-088 made the machine say what it looked like when it stopped. The
+     * fourth thing the machine said is in D-089 — next_runnable *does* return a
+     * runnable thread and no switch happens anyway, which puts the defect
+     * between choosing and switching and nowhere near this file.
      *
-     * What stays from all of it: this wait runs with interrupts enabled, so the
-     * timer ticks and the console is read while the device works.
+     * What all of it left behind: this wait runs with interrupts enabled, so
+     * the timer ticks and the console is read while the device works.
      */
 
     /* Bounded, because a device that never answers must produce an error and
