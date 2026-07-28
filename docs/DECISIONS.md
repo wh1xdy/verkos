@@ -4147,3 +4147,38 @@ base, which are neither counter, so what the `kprintf` actually reads has not
 been established either and should be, first.
 
 `make test`: 253 checks, green, with none of this in the kernel.
+
+## D-095 — and then it was run
+
+**2026-07-28.** D-094's companion commit added sixteen stamps inside
+`full-userland` and said plainly that it had not been verified by running,
+because a full build is hours. Asked why not, the answer was that the expensive
+part is not the part that changed.
+
+So it was run, in the scenario the stamps exist for:
+
+1. remove the outer `full-userland` stamp from the aarch64 rootfs
+2. start the block; in two minutes it built and stamped bzip2, file, m4 and
+   binutils and entered gcc
+3. **kill it there** — a failure part way through, which is the case
+4. start it again
+
+```
+:: fu-bzip2 already built, skipping
+:: fu-file already built, skipping
+:: fu-m4 already built, skipping
+:: fu-binutils already built, skipping
+```
+
+Straight to gcc. Before this, that re-run began at bzip2.
+
+The rootfs was put back as it was found: the inner stamps removed, the outer one
+restored, and the stamp set compared against a copy taken beforehand.
+
+### The point
+
+"A full build is hours" was true and it was not a reason. The change was to
+control flow, the control flow is exercised in the first four packages, and the
+four small ones take two minutes. **The cost of the whole was being used as the
+cost of the part**, which is how a thing goes untested for a reason that sounds
+like one.

@@ -138,7 +138,4 @@ run, after three entries of reasoning had each been plausibly wrong.
 2. **Boot it on real hardware** — everything else is simulation.
 3. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
-4. **Verify the full-userland stamps by using them** — sixteen inner marks were
-   added on 2026-07-28 and only the generated script's syntax was checked. The
-   thing they change shows on the second run after a failure, which no test
-   reaches.
+4. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
