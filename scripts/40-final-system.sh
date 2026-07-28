@@ -280,8 +280,18 @@ fi
 # coreutils/bash/etc. in the rootfs; a compiler isn't needed at runtime), and it
 # is by far the slowest, most failure-prone part. Skip it by default to reach
 # first boot fast; set VERK_FULL_USERLAND=1 to build the complete userland.
+# Every package inside has its own stamp as well as the block's.
+#
+# It was one stamp for the whole thing, which meant a failure anywhere in it —
+# and it is the most failure-prone part of the build — rebuilt bzip2, file, m4,
+# binutils and gcc from the beginning. That cost several hours during the LUKS
+# work, every time, for a fix in a package near the end.
+#
+# The outer stamp stays: it is what makes a finished block cost nothing at all,
+# rather than sixteen stat calls and a message per package.
 if [ "${VERK_FULL_USERLAND:-0}" = "1" ] && need full-userland; then
 # bzip2 (LFS recipe: shared lib + binaries)
+if need fu-bzip2; then
 say "bzip2 ${BZIP2_VERSION}"
 d=$(unpack bzip2-${BZIP2_VERSION}.tar.gz); cd "$d"
 # Clean first, not just between the two builds. unpack reuses an existing
@@ -307,16 +317,24 @@ ln -sfv bzip2 /usr/bin/bzcat
 ln -sfv bzip2 /usr/bin/bunzip2
 rm -f /usr/lib/libbz2.a
 cd /sources
+mark fu-bzip2; fi
+
 
 # file (native)
+if need fu-file; then
 say "file ${FILE_VERSION}"
 d=$(unpack file-${FILE_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr; make; make install; cd /sources
+mark fu-file; fi
+
 
 # m4 (native)
+if need fu-m4; then
 say "m4 ${M4_VERSION}"
 d=$(unpack m4-${M4_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr; make; make install; cd /sources
+mark fu-m4; fi
+
 
 # zlib, before anything that asks for a system one.
 #
@@ -333,6 +351,7 @@ if [ ! -f /usr/include/zlib.h ]; then
 fi
 
 # binutils (final, native)
+if need fu-binutils; then
 say "binutils ${BINUTILS_VERSION} (final)"
 d=$(unpack binutils-${BINUTILS_VERSION}.tar.xz); cd "$d"
 mkdir -p build && cd build
@@ -345,8 +364,11 @@ mkdir -p build && cd build
 make MAKEINFO=true tooldir=/usr; make MAKEINFO=true tooldir=/usr install
 rm -fv /usr/lib/lib{bfd,ctf,ctf-nobfd,opcodes,sframe}.a
 cd /sources
+mark fu-binutils; fi
+
 
 # gcc (final, native) — gmp/mpfr/mpc bundled in-tree
+if need fu-gcc; then
 say "gcc ${GCC_VERSION} (final)"
 d=$(unpack gcc-${GCC_VERSION}.tar.xz); cd "$d"
 # Clear any graft from an earlier attempt: mv would otherwise move the new
@@ -388,17 +410,25 @@ else
     exit 1
 fi
 rm -f /tmp/thrcheck /tmp/thrcheck.cpp
+mark fu-gcc; fi
+
 
 # bison then flex (flex uses bison), then the GNU text/file tools
+if need fu-bison; then
 say "bison ${BISON_VERSION}"
 d=$(unpack bison-${BISON_VERSION}.tar.xz); cd "$d"
 ./configure --prefix=/usr; make; make install; cd /sources
+mark fu-bison; fi
+
+if need fu-flex; then
 say "flex ${FLEX_VERSION}"
 d=$(unpack flex-${FLEX_VERSION}.tar.gz); cd "$d"
 ./configure --prefix=/usr --disable-static
 make; make install
 ln -sfv flex /usr/bin/lex
 cd /sources
+mark fu-flex; fi
+
 
 # sed grep gawk diffutils findutils tar gzip make patch (all: configure/make/install)
 for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
@@ -407,11 +437,13 @@ for spec in "sed:${SED_VERSION}:xz" "grep:${GREP_VERSION}:xz" \
             "gzip:${GZIP_VERSION}:xz" "make:${MAKE_VERSION}:gz" \
             "patch:${PATCH_VERSION}:xz"; do
     name=${spec%%:*}; rest=${spec#*:}; ver=${rest%:*}; ext=${rest##*:}
+    need "fu-$name" || continue
     say "$name $ver"
     d=$(unpack ${name}-${ver}.tar.${ext}); cd "$d"
     ./configure --prefix=/usr
     make; make install
     cd /sources
+    mark "fu-$name"
 done
 mark full-userland
 fi   # end VERK_FULL_USERLAND
