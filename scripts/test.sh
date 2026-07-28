@@ -1336,7 +1336,14 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                             -display none -serial "file:$NL" -no-reboot $DISK \
                             -kernel pkg/stam/stam.img \
                             </dev/null >/dev/null 2>&1 & echo $! > "$T/npid" )
-                        for _ in $(seq 1 180); do
+                        # The slowest check in the suite: a whole second boot,
+                        # with every program and the script itself read off the
+                        # medium through a driver that polls. Three runs in a
+                        # row gave 251, 252 and 253 passes on the same tree, and
+                        # this was the one that moved. Given the time it needs
+                        # rather than the time it usually takes — a check that
+                        # fails on a busy host is a check nobody trusts (D-038).
+                        for _ in $(seq 1 420); do
                             sleep 1
                             grep -aq 'bye' "$NL" 2>/dev/null && break
                         done
