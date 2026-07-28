@@ -303,6 +303,15 @@ static void schedule_locked(void) {
     }
     if (next == prev) return;
 
+    /* The count the idle report below watches for signs of a stopped machine.
+     *
+     * It was declared, read in three places, and **never incremented**. So it
+     * was zero for ever, `quiet` always reached its threshold, and "this core
+     * has had nothing to run for five seconds" printed on any boot that idled
+     * for five seconds — healthy or not. Every entry from D-088 to D-098 rests
+     * on that line of output (D-099). */
+    switches++;
+
     /* RUNNING, not RUNNABLE, for exactly as long as a processor is on it. Two
      * cores reading the same table and both finding one runnable thread would
      * otherwise both take it, and two processors executing one kernel stack is

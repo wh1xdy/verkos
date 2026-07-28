@@ -4350,3 +4350,61 @@ Re-taking the measurement cost one run and ended four entries. *Ask the machine*
 is not enough on its own — **ask it again** is the other half.
 
 `make test`: 253 checks, green, with none of this in the kernel.
+
+## D-099 — the counter was never incremented
+
+**2026-07-28.** `switches` — the count the idle report watches to decide whether
+a processor has stopped — was declared, read in three places, and **never
+incremented**.
+
+```
+62:  static volatile uint64_t switches;
+371:     uint64_t seen = switches;
+377:     if (switches != seen) { seen = switches; quiet = 0; }
+```
+
+Three references. No `switches++` anywhere in the file, and none in the object
+code: `objdump` finds no store to its address in `schedule_locked`. It has been
+zero since D-088 introduced it.
+
+Which means `quiet` always reached its threshold, and
+
+```
+  [kernel] cpu 0 has had nothing to run for five seconds:
+```
+
+**printed on any boot that idled for five seconds — healthy or not.** It was
+never a report about the machine. It was a report about a variable nobody wrote.
+
+### What that costs
+
+D-088 through D-098 — eleven entries — all rest on that line. Every one of them
+took "no thread switch for five seconds" as an observation and reasoned from it:
+a memory bug (withdrawn), a relocation bug (withdrawn), `cpu_switch` (cleared),
+the instrument's addresses (cleared), and finally a per-exit count that showed
+`schedule_locked` taking its switching exit **twelve thousand times** while
+`switches` read zero. That last one is what broke it open — two adjacent
+increments where only one existed.
+
+The disassembly and the eliminations in those entries are still correct. They
+were correct answers to a question that came from a diagnostic reporting a
+variable rather than a machine.
+
+### What is left, unobscured
+
+With the increment in place the false report is gone — and a single-processor
+boot with the disk sleep enabled **still hangs at the first write**. That is the
+real bug, and it never had anything to do with the scheduler. Eleven entries of
+scaffolding fall away from it.
+
+### The lesson, again, and harder
+
+D-098 said *ask the machine, then ask it again*. This is the sharper version:
+**a diagnostic that reads a variable nothing writes reports on the variable.**
+The idle report was reviewed, corrected twice for other faults (D-088), and
+committed — and at no point did anyone check that the thing it compared against
+ever changed. The check that would have caught it is the same one this project
+applies to every other output: *what does this print when the thing it describes
+did not happen?* The answer was "exactly the same", and nobody asked.
+
+`make test`: 253 checks, green.
