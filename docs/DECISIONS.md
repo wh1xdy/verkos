@@ -4237,3 +4237,62 @@ tree — and it took three runs to get there: 243, 252, 253 on the same code,
 with the container still winding down from a build. The suite's boot checks
 are wall-clock checks and the machine has to be idle for them to mean
 anything, which STATUS.md says and which is easy to forget while iterating.
+
+## D-097 — cpu_switch is cleared too, and what that leaves
+
+**2026-07-28.** D-096 named `cpu_switch`'s return address as the candidate that
+fit every observation. It does not survive reading.
+
+```
+cpu_switch:
+    sub  sp, sp, #96
+    stp  x19..x30, [sp]        ; the callee-saved set, AAPCS, complete
+    str  sp, [x0]              ; where we left off
+    mov  sp, x1                ; the other stack
+    ldp  x19..x30, [sp]
+    add  sp, sp, #96
+    ret                        ; into the other thread's saved x30
+```
+
+Correct, and complete. A resumed thread continues exactly after its own call.
+
+And the store that matters happens **before** the call:
+
+```
+400854e4:  str  w1, [x20, #12]     ; sched_exit = 4
+400854e8…: switches++, then cpu_switch
+```
+
+So a switch cannot skip it. And the two branches taken instead — `!next` and
+`next == prev` — both reach stores of their own. **Every path out of
+`schedule_locked` writes `sched_exit`, and `cpu_switch` cannot lose it.**
+
+### What is left
+
+Three candidates were named in D-096. Two are now eliminated by reading the
+object file rather than by running anything:
+
+| | |
+|---|---|
+| 1. `sched_calls++` reached from outside the function | no — it is at `0x40085450`, inside it, and there is one copy |
+| 2. `cpu_switch` returning past the stores | no — the store precedes the call and the restore is complete |
+| 3. the report reading something stale | not asked yet |
+
+Candidate 3 is what is left, and it is not obviously possible on one processor
+with a `volatile` read of a variable written a few lines earlier. Which means
+the honest state is: **an observation that nothing in the compiled code
+explains, with the two plausible explanations eliminated.**
+
+That is a better place than it sounds. It is where a bug stops being a story and
+starts being a fact that has to be accounted for, and every remaining account
+has to survive the same reading these two did not.
+
+### The one assumption never questioned
+
+That the report and `schedule_locked` run in the same address space with the
+same view of memory. The report runs in `sched_idle_loop`; `schedule_locked` is
+called from there and from `thread_wait`, `thread_block_on_console` and
+`thread_block_on_pipe` — and those last three run on a *different kernel stack*,
+in a thread whose `TTBR0` is a different user space. `sched_exit` is a kernel
+static in TTBR1, which is shared. It should not matter. It has not been checked
+that it does not.
