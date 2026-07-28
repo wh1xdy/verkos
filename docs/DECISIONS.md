@@ -4182,3 +4182,54 @@ control flow, the control flow is exercised in the first four packages, and the
 four small ones take two minutes. **The cost of the whole was being used as the
 cost of the part**, which is how a thing goes untested for a reason that sounds
 like one.
+
+## D-096 — the instrument is cleared, and the contradiction is real
+
+**2026-07-28.** D-094 left `calls 12097 exit 0` unexplained and two withdrawn
+theories behind it. This pass read the object file instead of theorising, and
+cleared the instrument:
+
+**Both sides address the right variables.** `nm` gives one `sched_calls`
+(`0x40091ee8`) and one `sched_exit` (`0x40091eec`). The report loads
+`[x27, #8]` and `[x27, #12]` off `adrp 40091000 + 0xee0` — exactly those two.
+There is one `schedule_locked`, not a clone.
+
+**The whole path from the counter to the first exit store is correct code:**
+
+```
+40085450:  str  w0, [x19, #8]      ; sched_calls++      x19 = 0x40091ee0
+40085458:  ldr  w3, [x19, #4]      ; n_threads
+40085484…: the deadline scan, 944 bytes a thread, state==2 and wake_at
+400854c4:  bl   next_runnable
+400854c8:  mov  x19, x0            ; x19 reused as the thread pointer
+400854cc:  cbz  x0, …19c           ; !next     -> a store
+400854d4:  b.eq …1f4               ; next==prev -> a store
+400854d8:  add  x20, x20, #0xee0   ; the base recomputed, not assumed
+400854e4:  str  w1, [x20, #12]     ; sched_exit = 4
+```
+
+Every exit reaches a store. The base is recomputed after `x19` is reused rather
+than assumed still valid — the one thing worth suspecting, and it is handled.
+
+### So the reading stands and it is not an artefact
+
+`schedule_locked` is entered twelve thousand times and no exit store lands.
+Nothing in the compiled code allows that, which means the assumption to attack
+next is not in this function. Candidates, in the order they can be tested
+cheaply:
+
+1. **Is `sched_calls++` reached from somewhere that is not `schedule_locked`?**
+   It is at `0x40085450`, inside it — but a `bl` into the middle of a function
+   is not impossible in a kernel that also switches stacks by hand.
+2. **Does `cpu_switch` return to the right place?** A thread resumed by
+   `cpu_switch` continues after it; if a resumed thread's saved link register
+   pointed *before* the exit stores, the counter would rise and the stores never
+   run. This is the first candidate that fits every observation.
+3. **Is the report itself running on a stale copy of memory?** The read is
+   correct; whether it is coherent across processors is a separate question and
+   has not been asked.
+
+Candidate 2 is the one to take. It also explains why one processor differs from
+two, which nothing else has.
+
+Nothing here is in the kernel. `make test` is 253 and green.
