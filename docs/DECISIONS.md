@@ -3759,6 +3759,13 @@ block I/O is what removes it and is not written.
 
 `make test`: 252 checks, was 248.
 
+> **D-086 to D-098 are a chain of wrong answers, kept as written.** They chase a
+> disk sleep that was never the bug; D-099 shows the diagnostic underneath them
+> reported a variable nobody wrote, and D-101 finds the real defect in `execve`.
+> Read them for the method — each is a measurement, and the four that were
+> withdrawn were withdrawn by a later measurement, not by a better argument. Do
+> not read them for facts about the kernel.
+
 ## D-086 — the interrupt arrives, and is not slept on
 
 **2026-07-28.** The block driver's interrupt is found in the device tree,

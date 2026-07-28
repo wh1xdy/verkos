@@ -191,10 +191,11 @@ What it does today, each verified by running it:
   Executables are read whole rather than mapped. And with the userland on the
   medium it boots with **no initrd at all**: `/init` comes off the disk, and so
   does every program the shell runs and the script that runs them (D-083).
-- The disk's **interrupt** is found, enabled and acknowledged, and `make test`
-  asserts one was taken — from a line the handler prints and nothing else can.
-  Requests still poll for completion, because sleeping on a wakeup the kernel
-  cannot time out is worse than spinning (D-086).
+- The disk is **interrupt-driven**: the requesting thread sleeps for the
+  completion and the handler wakes it, with a deadline underneath so a wakeup
+  that never comes releases it anyway. `make test` asserts an interrupt was
+  actually taken — from a line the handler prints and nothing else can (D-086,
+  D-087, D-101).
 - **Directories**: `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir` and
   `rm` as ordinary programs with no privileges and nothing the kernel knows
   about them. A directory grows by a cluster when it fills, and `rm` takes a
