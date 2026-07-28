@@ -4051,3 +4051,55 @@ measures, which is itself a thing to be checked.
 Nothing here is committed to the kernel. `make test` is 253 checks and green
 without any of it; the driver polls with interrupts enabled. The next session
 starts from a clean tree and this list of what is ruled out.
+
+## D-093 — the instrument lies, and now it is proved
+
+**2026-07-28.** D-092 suspected the exit counter and withdrew a conclusion built
+on it. This time the instrument checks itself: a counter incremented as the
+first statement of `schedule_locked`, beside the one that names which exit it
+took.
+
+```
+    chooser: calls 12097 exit 0  (calls>0 with exit 0 is impossible: the instrument lies)
+```
+
+Twelve thousand calls, and the exit is never set. Every path out of that
+function assigns it. **This is not an inference — it is a contradiction, and it
+was measured.**
+
+So `schedule_locked` runs, and two `static volatile` counters in the same file,
+written by it and read a few lines away, disagree about what happened.
+
+### Which makes it the fourth of its kind
+
+D-037 found a thread starting at a link-time address. D-039 found it again in a
+user program. D-076 found it as a processor started at an address that no longer
+existed. D-081 found it wearing the shape of a table of function pointers. Each
+was the same thing: **this kernel is position-independent and applies no
+relocations, so anything routed through the GOT holds the address the image had
+when it was linked.**
+
+A `static volatile` written in one function and read in another is not obviously
+that. But `-fpic` with hidden visibility does not guarantee the two accesses are
+compiled the same way, and a counter that reads zero after twelve thousand
+increments is exactly what two addresses for one variable looks like.
+
+That is a hypothesis and it is the first one all day with a measured
+contradiction under it rather than a plausible story. It is also checkable
+without running anything: `objdump` the two accesses and compare how each
+computes the address.
+
+### What this cost, and what it bought
+
+Eight entries about a disk sleep that was never the bug. Six theories, two of
+them the instrument lying about itself. The useful residue:
+
+- the driver's wait no longer masks interrupts, which took a boot from minutes
+  to about a minute
+- the scheduler has a bounded sleep, which every blocking path is safer for
+- a core that has stopped prints the thread table
+- and `make test` is 253 checks and green with none of the chase in it
+
+**A diagnostic is code.** Four were wrong today, and the one that finally said
+something trustworthy was the one built to contradict itself if it were lying.
+That is worth more than the bug it is still chasing.

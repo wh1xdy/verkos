@@ -510,10 +510,8 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* Not slept on; see D-086 through D-092 for six attempts and what each one
-     * ruled out. The wait below runs with interrupts enabled, which is what all
-     * of it left behind.
-     */
+    /* Not slept on; D-086 through D-093. The wait below runs with interrupts
+     * enabled, which is what all of it left behind. */
 
     /* Bounded, because a device that never answers must produce an error and
      * not a machine that stops. */
