@@ -10,13 +10,12 @@ two suites running at once fail each other's timeouts. The count is also
 host-dependent — some checks are skipped without a network or a cross toolchain,
 so a Mac host reports fewer and fails several on missing headers.
 
-**Start here next time:** the scheduler question below. `schedule_locked`
-appears not to run where it must, and the two candidate answers are that
-`schedule()` returns before reaching it, or that the variable read is not the
-one written. Settle it by **disassembling** `schedule` and `sched_idle_loop` —
-instrumenting it is what made the last attempt unstable, and the loop is already
-inlined, so the call is visible in the object file. When it is settled, the disk
-sleep of D-086 can go back in and the driver becomes interrupt-driven.
+**The scheduler question is closed** (D-099 to D-101). It was never the
+scheduler: `execve` set the address space and the table it fills in nineteen
+lines apart, and a preemption in that window resumed a thread with TTBR0 on the
+old space. The disk driver's sleep merely put a guaranteed blocking point in the
+middle of it. The block driver is interrupt-driven now, on one processor and on
+two.
 
 ---
 
@@ -65,6 +64,7 @@ Nothing below is inference. Each was checked by running a system.
 | **A disk** | virtio-blk over **MMIO and PCI**, the GPT `vpart` wrote, the FAT32 `vmkfs` formatted — read *and written*, with mtools and `fsck.fat` judging the result (D-079…D-082) |
 | **The circle** | through real firmware: UEFI starts vboot, vboot builds a tree from ACPI with the PCI bridge out of MCFG, and the kernel it starts reads back the very `vboot.conf` vboot parsed to start it (D-081) |
 | **No initrd** | with the userland on the medium, `/init` comes off the disk and so does every program the shell runs (D-083) |
+| **Interrupt-driven disk** | the device's interrupt is found, enabled, acknowledged and **slept on** — a line printed from the handler says one arrived, and `make test` asserts it (D-086, D-101) |
 | **Directories** | `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir`, `rm` as ordinary programs (D-085) |
 
 ---
@@ -84,14 +84,11 @@ work as equals.
 
 ## Known-wrong or fragile
 
-- **stam's disk sleep does not work on one processor**, and after five entries
-  the useful conclusion is that the problem is not in the driver. D-086 through
-  D-090: the sleep hangs a single-processor boot; a bounded sleep did not help,
-  so the thread is not in the sleep; no thread switch happens at all while two
-  threads stand runnable; `next_runnable` does name one; and the exit counter in
-  `schedule_locked` reads as though the function never runs. Two candidate
-  answers remain and neither has been tested. **The driver polls instead**, with
-  interrupts enabled, and nothing in the tree depends on the sleep.
+- **A diagnostic reported a variable nobody wrote, for eleven entries.**
+  `switches` was declared, read three times and never incremented, so "this core
+  has had nothing to run for five seconds" printed on any idle boot, healthy or
+  not — and D-088 through D-098 all reasoned from it. Fixed (D-099); the shape
+  is the one to watch for.
 - **A diagnostic changed what it diagnosed, twice in one day.** An idle-core
   report that counted its own loop passes called a busy machine stopped; a
   version that walked the thread table on every tick pushed a boot past the
