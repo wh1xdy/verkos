@@ -47,6 +47,13 @@ reads nothing but GPT will not find it.
 
 ## Known-wrong or fragile
 
+- **The stam script boot is occasionally slow enough to be killed.** `make test`
+  waits 180 seconds for the shell to say `bye`; under a loaded host — another
+  QEMU left running, for instance — it sometimes does not, and three checks go
+  red together. The on-disk checks are skipped in that case (D-082), but the
+  two that read the boot log are not. It is a harness limit, not a kernel
+  defect, and it has not been separated from one by anything better than
+  re-running it on an idle machine.
 - **x86_64 has none of this.** The Proxmox VM is many months of work behind:
   no verkmod, vlogin, vmkfs, vinstall, viso, e2fsprogs, cryptsetup, no native
   GCC, and none of the sixteen tool fixes. A clean build there would also prove
