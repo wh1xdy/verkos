@@ -51,8 +51,9 @@ reads nothing but GPT will not find it.
   The device's interrupt is found, enabled and acknowledged — `make test`
   asserts one was taken — but sleeping on it stopped a single-processor boot at
   the first write, and the kernel has no timeout to bound a sleep that is never
-  woken. The fix is a bounded sleep in the scheduler, which every blocking path
-  would be safer for (D-086).
+  woken. A bounded sleep was then added to the scheduler — and the disk's sleep
+  still stopped a single-processor boot at the first write, which means the
+  thread is not in the sleep at all and the cause has not been found (D-087).
 - **The stam script boot is occasionally slow enough to be killed.** `make test`
   waits 180 seconds for the shell to say `bye`; under a loaded host — another
   QEMU left running, for instance — it sometimes does not, and three checks go

@@ -510,19 +510,19 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* The interrupt is enabled, acknowledged and observed — but not slept on.
+    /* The interrupt is enabled, acknowledged and observed — and still not slept
+     * on. See D-086 for the first attempt and D-087 for the second.
      *
-     * A first version blocked the requesting thread on the completion and woke
-     * it from the handler. On two processors it worked and took a boot from
-     * five minutes to ten seconds. On one it stopped at the first *write*: a
-     * wakeup that does not come is a thread that sleeps for ever, and this
-     * kernel has no timeout to bound that with. A sleep with no floor under it
-     * is worse than a spin.
+     * The second added the thing the first was missing: a bounded sleep, so a
+     * wakeup that never comes releases the thread anyway. It made no
+     * difference. A single-processor boot still stops at the first write, which
+     * means the thread is not in the sleep — the deadline would have ended it —
+     * and the cause is somewhere this has not looked. Saying that is better
+     * than shipping a driver that sleeps on two processors and stops on one.
      *
-     * So the wait below is still a poll, with one difference that matters: it
-     * runs with interrupts *enabled*. The timer ticks and the console is read
-     * while the device works, which was most of what standing still cost
-     * (D-086).
+     * What the work did leave behind is the mask: the wait below runs with
+     * interrupts enabled, so the timer ticks and the console is read while the
+     * device works. That was most of what standing still cost.
      */
 
     /* Bounded, because a device that never answers must produce an error and

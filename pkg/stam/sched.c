@@ -17,6 +17,7 @@
 #include "console.h"
 #include "lock.h"
 #include "smp.h"
+#include "timer.h"
 
 extern void cpu_switch(uint64_t *save_sp_here, uint64_t resume_sp);
 extern uint64_t thread_entry_point(void);
@@ -127,6 +128,7 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->status      = 0;
     t->wait_reason = 0;
     t->wait_object = 0;
+    t->wake_at     = 0;
     /* A new process joins its parent's group, which is what makes a pipeline
      * one job: the shell puts the first child in a group of its own and every
      * later one inherits it. */
@@ -272,6 +274,18 @@ static thread_t *next_runnable(thread_t *after) {
  * not a race — it is the machine stopping, and it stopped exactly once before
  * this comment was written. */
 static void schedule_locked(void) {
+    /* Anyone whose sleep has run out, first. Every scheduling decision passes
+     * through here, and an idle core reaches it on every timer interrupt, so a
+     * deadline is never more than a tick late. */
+    uint64_t now = timer_ticks();
+    for (int i = 0; i < n_threads; i++) {
+        thread_t *t = &threads[i];
+        if (t->state == THREAD_BLOCKED && t->wake_at && now >= t->wake_at) {
+            t->wake_at = 0;
+            t->state = THREAD_RUNNABLE;
+        }
+    }
+
     thread_t *prev = current;
     thread_t *next = next_runnable(prev);
 
@@ -448,6 +462,17 @@ void thread_block_on_console(void) {
 void thread_block_on_pipe(const void *object) {
     current->wait_reason = WAIT_PIPE;
     current->wait_object = object;
+    current->wake_at = 0;
+    current->state = THREAD_BLOCKED;
+    schedule_locked();
+}
+
+void thread_block_on_pipe_until(const void *object, uint64_t ticks) {
+    current->wait_reason = WAIT_PIPE;
+    current->wait_object = object;
+    /* At least one, so a deadline set in the same tick it is read does not
+     * expire before the thread has slept at all. */
+    current->wake_at = timer_ticks() + (ticks ? ticks : 1);
     current->state = THREAD_BLOCKED;
     schedule_locked();
 }
@@ -456,8 +481,10 @@ void thread_wake_pipe(const void *object) {
     for (int i = 0; i < n_threads; i++)
         if (threads[i].state == THREAD_BLOCKED &&
             threads[i].wait_reason == WAIT_PIPE &&
-            threads[i].wait_object == object)
+            threads[i].wait_object == object) {
+            threads[i].wake_at = 0;
             threads[i].state = THREAD_RUNNABLE;
+        }
 }
 
 /* Raise a signal. Delivery is not done here — this runs from the console

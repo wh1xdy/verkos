@@ -3807,3 +3807,37 @@ be safer for having it.
 
 `make test`: 253 checks, was 252 — one more, and it is the one that says the
 interrupt was taken.
+
+## D-087 — a floor under a sleep, and the thing it did not fix
+
+**2026-07-28.** D-086 took the disk's sleep out because a wakeup that never
+comes is a thread that is lost, and this kernel had nothing to bound that with.
+It has now: `thread_block_on_pipe_until(object, ticks)` sets a deadline, and
+`schedule_locked` makes any blocked thread runnable once its deadline has
+passed, whether or not anything woke it. The thread re-tests its own condition
+either way, which it had to do regardless.
+
+The wake-up scan lives in `schedule_locked` because every scheduling decision
+passes through it, and an idle core reaches it on every timer interrupt — so a
+deadline is never more than a tick late, without a timer wheel or a sorted list
+to keep honest.
+
+`thread_wake_pipe` clears the deadline when it wakes someone, so a thread that
+was woken properly does not carry a stale one into its next sleep.
+
+### And it did not fix the disk
+
+With the floor under it, the driver's sleep was put back. **A single-processor
+boot still stops at the first write.** Which settles one thing: the thread is
+not in the sleep, because the deadline would have ended it. The cause is
+somewhere this has not looked, and two processors do not show it.
+
+So the sleep came out again and the poll stayed. Shipping a driver that sleeps
+on two processors and stops on one would be worse than one that spins on both,
+and "it works on my machine" is a claim about the machine.
+
+The bounded sleep stays. It is right on its own terms — every blocking path in
+this kernel is safer for a floor under it — and it is the thing that made the
+second attempt worth trying rather than a repeat of the first.
+
+`make test`: 253 checks, unchanged.

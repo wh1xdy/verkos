@@ -35,6 +35,12 @@ typedef struct thread {
                              /* terminal is addressed to                     */
     int         pending;     /* signals raised and not yet acted on          */
     const void *wait_object; /* which pipe, when wait_reason is WAIT_PIPE   */
+    /* The tick at which it becomes runnable whether or not anything woke it,
+     * or 0 for "sleep until woken". A sleep with no floor under it is a thread
+     * that is lost when a wakeup does not arrive, and the thing that goes wrong
+     * is never the sleeping — it is whatever was supposed to do the waking
+     * (D-087). */
+    uint64_t    wake_at;
     uint64_t    blocked;     /* signals held off while a handler runs        */
     /* Where a caught signal goes. Index by signal number; handler 0 means the
      * default action, which is to die of it. */
@@ -108,6 +114,10 @@ void      thread_wake_console(void);
  * which is bookkeeping for a case that does not exist yet. Call with
  * interrupts masked, for the reason in thread_block_on_console. */
 void      thread_block_on_pipe(const void *object);
+/* The same, with a floor: woken by thread_wake_pipe, or after `ticks` timer
+ * interrupts, whichever comes first. The caller re-tests its own condition
+ * either way, which it has to do anyway. */
+void      thread_block_on_pipe_until(const void *object, uint64_t ticks);
 void      thread_wake_pipe(const void *object);
 thread_t *thread_current(void);
 thread_t *thread_at(int i);
