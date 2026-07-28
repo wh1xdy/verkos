@@ -211,19 +211,22 @@ What it does today, each verified by running it:
 Named rather than hidden: **one lock** covers the scheduler, the pipes and the
 console, because those three block on each other's state and separate locks
 would be taken in more than one order by paths that already exist. It is correct
-and it is coarse. The disk is read-only and the reader walks each cluster chain
-from the beginning, which is quadratic and fine at seventeen pages. No FP/SIMD
+and it is coarse. The FAT reader walks each cluster chain from the beginning,
+which is quadratic and fine at seventeen pages, and long file names are vmkfs's
+job — a name that does not fit 8.3 is refused here by name rather than written
+with a checksum this code would be the only thing computing (D-082). No FP/SIMD
 for EL0, so programs are built `-mgeneral-regs-only` — without it the compiler
 reaches for a `q` register unprompted and a program dies on a line containing no
 arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: nine checks start the kernel under QEMU and read what
-it printed — including one that pastes a whole line at the shell, because
-feeding one character at a time is exactly the case that always worked (D-058) — the scheduler's own verdict, a program's report of its arguments,
-the pages a finished process gave back. Each was validated by breaking the
-kernel on purpose and watching the right ones go red (D-055). CI has no
+`make test` now boots it: **43 checks** start the kernel under QEMU and read what
+it printed — the scheduler's own verdict, a program's report of its arguments,
+the pages a finished process gave back, a file written to the disk and then read
+back by mtools and `fsck.fat`, and a second boot with no initrd at all. Each of
+the early ones was validated by breaking the kernel on purpose and watching the
+right ones go red (D-055). CI has no
 aarch64 QEMU and skips them, so the boot is proved where the kernel is built.
 
 **stam is not in any image.** It is built by `pkg/stam/Makefile` and shape-checked
