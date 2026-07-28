@@ -214,11 +214,29 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     uint64_t space = vm_new_space();
     if (!space) { DROP_DISK(); return (uint64_t)-12; }
     uint64_t saved = mmu_current_user_table_kva();
+    uint64_t saved_space = thread_current()->space;
+
+    /* The two together, always.
+     *
+     * mmu_switch_user says which table this processor is filling in;
+     * thread->space is what schedule_locked reprograms TTBR0 from when this
+     * thread is resumed. Setting the first here and the second nineteen lines
+     * later left a window across the whole of elf_load in which a preemption
+     * restored the *old* space — so map_user_page wrote into the new table
+     * while the hardware translated through the old one, and the loader's own
+     * store to a page it had just mapped took a permission fault at a user
+     * address it owned.
+     *
+     * It needed a preemption inside that window, which is why it appeared when
+     * the disk driver gained a blocking point in exactly the code execve uses
+     * to read the image, and not while it polled (D-101). */
     mmu_switch_user(space);
+    thread_current()->space = space;
 
     uint64_t entry = 0;
     if (elf_load(file, len, &entry) != 0) {
         mmu_switch_user(saved);
+        thread_current()->space = saved_space;
         DROP_DISK();
         return (uint64_t)-8;                                /* -ENOEXEC */
     }
@@ -226,6 +244,7 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     uint64_t stack_va = 0x7f00100000ul;
     if (!stack || map_user_page(stack_va, (uint64_t)(uintptr_t)stack, 0)) {
         mmu_switch_user(saved);
+        thread_current()->space = saved_space;
         DROP_DISK();
         return (uint64_t)-12;
     }

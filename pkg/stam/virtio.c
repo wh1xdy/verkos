@@ -510,8 +510,11 @@ static int blk_io(uint64_t sector, void *buf, int write) {
 
     vt_notify();
 
-    /* Not slept on; D-086 through D-093. The wait below runs with interrupts
-     * enabled, which is what all of it left behind. */
+    if (irq_works) {
+        uint64_t s = sched_lock_irq();
+        if (!blk_done) thread_block_on_pipe_until(&blk_token, 2);
+        sched_unlock_irq(s);
+    }
 
     /* Bounded, because a device that never answers must produce an error and
      * not a machine that stops. */

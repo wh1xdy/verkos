@@ -4458,3 +4458,63 @@ was refuting. That is what the fan-out bought that a sixth attempt by me would
 not have.
 
 `make test`: 253 checks, green.
+
+## D-101 — execve set the table and the space nineteen lines apart
+
+**2026-07-28.** The bug. It was never the scheduler, never the driver, and never
+the sleep.
+
+`do_execve` did:
+
+```c
+    uint64_t saved = mmu_current_user_table_kva();
+    mmu_switch_user(space);          /* line 217: which table we fill in */
+    ...
+    elf_load(file, len, &entry);     /* maps and writes every segment  */
+    ...
+    thread_current()->space = space; /* line 236: what a resume restores */
+```
+
+`mmu_switch_user` says which table this processor is filling in.
+`thread->space` is what `schedule_locked` reprograms TTBR0 from when the thread
+is resumed. Nineteen lines apart, with the whole of `elf_load` between them.
+
+**A preemption in that window resumed the thread with TTBR0 pointing at the old
+address space** while `map_user_page` kept writing into the new one. The loader
+then stored into a page it had just mapped, through a translation that was still
+the parent's — copy-on-write, read-only — and took a permission fault at a user
+address the process owned.
+
+```
+  cause     data abort (bad load or store) (EC 0x25)
+  reason    permission fault
+  address   0x3f3677
+```
+
+They are set together now, and the two failure paths restore both.
+
+### Why it hid behind eleven entries
+
+It needs a preemption *inside* that window. While the disk driver polled, execve
+read the image with interrupts enabled but no blocking point, and the window
+almost never caught one. The moment the driver gained a sleep — in exactly the
+code execve uses to read the image off the disk — the window acquired a
+guaranteed blocking point in the middle of itself.
+
+So the symptom appeared with the sleep and vanished without it, and the sleep
+took the blame through D-086, D-087, D-090, D-091, D-093, D-096, D-097 and
+D-098. It is the same shape as D-084 — two things that must agree about an
+address space, updated at different times — and D-042 is the entry that named
+that shape in the first place.
+
+### What it bought
+
+With the fix the disk driver **sleeps for its completion** on one processor and
+on two:
+
+```
+  disk      the device's interrupt arrived; requests sleep now
+```
+
+`make test`: 253 checks, green, with the sleep enabled. The block driver is
+interrupt-driven, which is where D-086 was trying to go eight entries ago.
