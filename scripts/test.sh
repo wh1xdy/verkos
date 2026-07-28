@@ -1139,8 +1139,15 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                         -initrd pkg/stam/progs/initrd-script.cpio \
                         </dev/null >/dev/null 2>&1 & echo $! > "$T/spid" )
                     # The script ends with `exit`, so the shell says bye. Wait
-                    # for that rather than for a fixed time.
-                    for _ in $(seq 1 90); do
+                    # for that rather than for a fixed time — and long enough
+                    # that a slow first run does not get killed part way. On
+                    # 2026-07-28 three checks failed exactly once and passed
+                    # seven runs afterwards: the script had grown two commands,
+                    # the wait had not, and QEMU was killed between writing
+                    # /out.txt and reading it back. mtools then found a file
+                    # with no contents, which is a true report about a machine
+                    # that was stopped, and says nothing about the kernel.
+                    for _ in $(seq 1 180); do
                         sleep 1
                         grep -aq 'bye' "$SL" 2>/dev/null && break
                     done
@@ -1243,6 +1250,45 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # openat and read, up the same path a pipe uses.
                     check "a program reads a file off the disk through openat" \
                           "grep -aq 'A FILE THE KERNEL READ OFF A DISK OUR OWN FORMATTER WROTE' $SL"
+                    # And writing. The shell redirected a program's output to an
+                    # absolute path, which puts it on the medium rather than in
+                    # a memory file, and then read it back — but reading back
+                    # what we wrote proves only that we are consistent with
+                    # ourselves.
+                    check "the kernel writes a file to the disk and reads it back" \
+                          "grep -aq 'ARGV\[1\] = \"WRITTEN-BY-THE-KERNEL\"' $SL"
+                    # What settles it is a reader that is not ours, on the image
+                    # after the machine has stopped. mtools must find the file
+                    # and its contents, and fsck.fat must find nothing wrong
+                    # with the directory, the chain or either FAT copy. A kernel
+                    # that wrote a plausible-looking file into a filesystem it
+                    # had corrupted would pass the check above and fail these.
+                    # Judging the filesystem only if the machine finished. A
+                    # volume the kernel was killed in the middle of writing is
+                    # a judgement on the kill.
+                    if ! grep -aq 'bye' "$SL" 2>/dev/null; then
+                        DISK=""
+                        log "the script did not finish; skipping the on-disk checks"
+                    fi
+                    if [ -n "$DISK" ] && command -v mdir >/dev/null 2>&1; then
+                        check "mtools finds the file the kernel wrote" \
+                              "mdir -i $T/stam.disk@@1M :: 2>/dev/null | grep -q 'OUT *TXT'"
+                        check "and its contents are what the program printed" \
+                              "mtype -i $T/stam.disk@@1M ::/out.txt 2>/dev/null |
+                               grep -q 'argv\[1\] = \"written-by-the-kernel\"'"
+                    fi
+                    if [ -n "$DISK" ] && command -v fsck.fat >/dev/null 2>&1; then
+                        dd if="$T/stam.disk" of="$T/esp-after.img" bs=1M skip=1 count=48 status=none
+                        fsck.fat -n "$T/esp-after.img" > "$T/fsck.out" 2>&1 || true
+                        # "Free cluster summary uninitialized" is expected and
+                        # deliberate (D-082): the field is a hint, and keeping
+                        # it true costs a scan of the whole table on every
+                        # close. Anything else fsck has to say is a defect.
+                        check "fsck.fat finds nothing wrong with what the kernel wrote" \
+                              "! grep -viE 'fsck.fat [0-9]|Free cluster summary|files, [0-9]+/[0-9]+ clusters|^$' $T/fsck.out | grep -q ."
+                        check "fsck.fat counts the file among the volume's contents" \
+                              "grep -qE '[0-9]+ files, [0-9]+/[0-9]+ clusters' $T/fsck.out"
+                    fi
                 fi
             else
                 bad "stam's initrd does not build, so the kernel cannot be booted"

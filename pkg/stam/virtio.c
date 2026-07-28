@@ -433,13 +433,18 @@ uint64_t virtio_blk_sectors(void) { return capacity; }
  * all. Polling makes the failure "it never answered" instead of "it answered
  * and the wakeup was lost", and those are different bugs.
  */
-int virtio_blk_read(uint64_t sector, void *out) {
+/* One sector, either direction. The only differences are which way the middle
+ * descriptor points and what the header says, which is why this is one function
+ * — two copies of the ring dance would be two places for one bug to be fixed in
+ * one of. */
+static int blk_io(uint64_t sector, void *buf, int write) {
     if (!present) return -1;
     if (sector >= capacity) return -1;
 
     uint64_t fl = spin_lock_irq(&blk_lock);
 
-    hdr->type = 0;                 /* read */
+    if (write) { const uint8_t *s = buf; for (int i = 0; i < 512; i++) data[i] = s[i]; }
+    hdr->type = write ? 1u : 0u;
     hdr->reserved = 0;
     hdr->sector = sector;
     *status = 0xff;                /* so a device that writes nothing is seen */
@@ -450,7 +455,10 @@ int virtio_blk_read(uint64_t sector, void *out) {
     vq_desc[0].next  = 1;
     vq_desc[1].addr  = data_phys;
     vq_desc[1].len   = 512;
-    vq_desc[1].flags = 1 | 2;      /* NEXT | WRITE (the device writes it) */
+    /* WRITE here means "the device writes this", so it is set for a read and
+        clear for a write — the opposite of what the name suggests, and the
+        first thing to check when a transfer goes one way and not the other. */
+    vq_desc[1].flags = write ? 1u : (1u | 2u);
     vq_desc[1].next  = 2;
     vq_desc[2].addr  = status_phys;
     vq_desc[2].len   = 1;
@@ -477,8 +485,8 @@ int virtio_blk_read(uint64_t sector, void *out) {
     }
     if (!done) {
         spin_unlock_irq(&blk_lock, fl);
-        kprintf("  disk      the device did not answer a read of sector %llu\n",
-                (unsigned long long)sector);
+        kprintf("  disk      the device did not answer a %s of sector %llu\n",
+                write ? "write" : "read", (unsigned long long)sector);
         return -1;
     }
     __asm__ volatile("dsb sy" ::: "memory");
@@ -486,7 +494,10 @@ int virtio_blk_read(uint64_t sector, void *out) {
     vt_irq_ack();
 
     int ok = (*status == 0);
-    if (ok) { uint8_t *o = out; for (int i = 0; i < 512; i++) o[i] = data[i]; }
+    if (ok && !write) { uint8_t *o = buf; for (int i = 0; i < 512; i++) o[i] = data[i]; }
     spin_unlock_irq(&blk_lock, fl);
     return ok ? 0 : -1;
 }
+
+int virtio_blk_read(uint64_t sector, void *out)        { return blk_io(sector, out, 0); }
+int virtio_blk_write(uint64_t sector, const void *in)  { return blk_io(sector, (void *)in, 1); }

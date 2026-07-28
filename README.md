@@ -184,7 +184,10 @@ What it does today, each verified by running it:
   start it — counting its entries, so a kernel that read nothing cannot say so
   (D-079, D-080). Four tools, no shared line between any two, each checking the
   others against the on-disk format rather than against a shared assumption
-  about it. Read-only, and read whole rather than mapped.
+  about it. It **writes** too — an absolute path means the medium, a relative
+  one still means memory — and `make test` settles whether it worked by reading
+  the image back with mtools and `fsck.fat`, neither of which is ours (D-082).
+  Executables are read whole rather than mapped.
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands

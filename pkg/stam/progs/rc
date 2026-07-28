@@ -15,4 +15,6 @@ sigtest
 catch
 diskprog from-the-disk
 upper < /note.txt
+hello written-by-the-kernel > /out.txt
+upper < /out.txt
 exit

@@ -3526,3 +3526,77 @@ answer for a kernel that must map many such regions is a four-level walk and a
 kernel that must map one.
 
 `make test`: 241 checks, was 238, three consecutive runs.
+
+## D-082 — writing, and a third party to say whether it worked
+
+**2026-07-28.** `stam` writes to the disk. The shell redirects to an absolute
+path and the bytes land on the medium:
+
+```
+verk$ hello written-by-the-kernel > /out.txt
+verk$ upper < /out.txt
+  [HELLO] ARGV[1] = "WRITTEN-BY-THE-KERNEL"
+```
+
+An absolute name means the disk; a relative one is still a memory file, as it
+has been since D-060. One character, and it is the difference between a file
+that survives the reboot and one that does not — which a program should be able
+to say rather than have decided for it.
+
+### The objection in D-079, answered rather than withdrawn
+
+That entry declined to write FAT because vmkfs already implements the same
+on-disk rules, and two implementations of one format is the arrangement D-042 is
+about. That objection is still right. What makes the second implementation
+acceptable is that **a third party judges them both**:
+
+```
+$ mdir -i stam.disk@@1M ::
+OUT      TXT       333 1980-00-00   0:00
+$ mtype -i stam.disk@@1M ::/out.txt
+  [hello] argv[1] = "written-by-the-kernel"
+$ fsck.fat -n esp-after.img
+Free cluster summary uninitialized (should be 96611)
+esp-after.img: 5 files, 137/96748 clusters
+```
+
+`make test` boots the kernel, has it write a file, waits for the shell to
+finish, and then reads the image back with mtools and `fsck.fat`. Neither is
+ours. Reading back what we wrote proves only that we are consistent with
+ourselves; a kernel that wrote a plausible file into a filesystem it had
+corrupted passes that and fails these.
+
+Long names remain vmkfs's job. A name that does not fit 8.3 is refused here, by
+name, rather than written with a checksum this code would be the only thing
+computing.
+
+### The free count says it does not know
+
+FSInfo's free-cluster field is written as 0xFFFFFFFF, which the specification
+defines as "not maintained" and every reader handles — `fsck.fat` says so in as
+many words above, and finds nothing else wrong.
+
+The first version counted the whole table on every close: about 750 sector reads
+on a 48 MiB volume, in a driver that polls. It did not finish. **A number that
+costs that much to keep true is a number that will be kept true only sometimes,
+and a free count that is right on Tuesdays is worse than one that says it does
+not know.** The next-free hint gets the same answer, and `clus_alloc` scans from
+the start rather than trusting one — a stale hint is how two files come to share
+a cluster.
+
+### The flaky check, and what it was actually reporting
+
+Three checks failed exactly once and passed on the seven runs after it. That is
+the shape D-038 forbids shipping, so it was worth finding rather than re-running
+until green.
+
+The script had grown two commands and the wait for its `bye` had not. QEMU was
+killed between writing `/out.txt` and reading it back — so mtools found a file
+with no contents, which is a true report about a machine that was stopped, and
+says nothing about the kernel that stopped writing to it.
+
+Two changes, and neither is "wait longer" alone. The wait is longer, and **the
+on-disk checks are skipped entirely when the shell never said `bye`**: judging a
+volume the kernel was killed in the middle of writing is judging the kill.
+
+`make test`: 246 checks, was 241.

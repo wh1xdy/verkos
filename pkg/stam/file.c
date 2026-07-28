@@ -55,6 +55,7 @@ struct file {
     const uint8_t *ro;         /* initrd contents, borrowed not owned       */
     uint64_t       ro_len;
     fat_file_t     fat;        /* where it is on the disk, for FILE_FAT     */
+    int            writable;   /* a FILE_FAT opened for writing              */
     uint64_t       pos;
 };
 
@@ -94,8 +95,36 @@ static int name_eq(const char *a, const char *b) {
 static const char *skip_slash(const char *s) { return s[0] == '/' ? s + 1 : s; }
 
 int file_open(const char *name, int mode, file_t **out) {
+    /* An absolute name means the disk, when there is one. A relative one is a
+     * memory file, as it has been since D-060 — so the shell's `hello > saved`
+     * still keeps its output in memory and `hello > /saved` puts it on the
+     * medium. One character, and it is the difference between a file that
+     * survives the reboot and one that does not, which is a thing a program
+     * should be able to say rather than have decided for it. */
+    int absolute = (name[0] == '/');
     name = skip_slash(name);
     uint64_t s = sched_lock_irq();
+
+    /* The disk write path releases the lock around the device, and holding it
+     * across fat_create would mean holding it across a scan of the directory.
+     * Nothing else can reach this open file yet, so there is nothing to guard. */
+    if (mode != OPEN_READ && absolute && fat_mounted()) {
+        fat_file_t ff;
+        int have = (fat_open(name, &ff) == 0 && !ff.is_dir);
+        if (!have && fat_create(name, &ff) != 0) { sched_unlock_irq(s); return -2; }
+        if (have && mode == OPEN_WRITE && fat_truncate(&ff) != 0) {
+            sched_unlock_irq(s); return -5;                   /* -EIO */
+        }
+        struct file *df = file_alloc(FILE_FAT, 0);
+        if (!df) { sched_unlock_irq(s); return -24; }
+        df->fat      = ff;
+        df->ro_len   = ff.size;
+        df->writable = 1;
+        df->pos      = (mode == OPEN_APPEND) ? ff.size : 0;
+        *out = df;
+        sched_unlock_irq(s);
+        return 0;
+    }
 
     if (mode != OPEN_READ) {
         memfile_t *m = 0;
@@ -217,6 +246,7 @@ void file_close(file_t *f) {
 
     pipe_t *p = f->pipe;
     int kind = f->kind;
+    int was_written = (kind == FILE_FAT && f->writable);
     f->kind = FILE_FREE;
     f->pipe = 0;
     if (f == console_file) console_file = 0;
@@ -228,6 +258,12 @@ void file_close(file_t *f) {
         thread_wake_pipe(p);
     }
     sched_unlock_irq(s);
+
+    /* Outside the lock: recounting the free list is a few hundred sector reads,
+     * and every scheduling decision on the machine waits behind that lock. On
+     * close and not on every write, because the number is a hint to other
+     * readers and not something this code depends on. */
+    if (was_written) fat_sync();
 }
 
 static unsigned pipe_bytes(const pipe_t *p) {
@@ -292,7 +328,15 @@ long file_write(file_t *f, const char *buf, uint64_t len) {
         return (long)len;
     }
     if (f->kind == FILE_INITRD) return -9;   /* the archive is read-only */
-    if (f->kind == FILE_FAT) return -9;      /* and so is the disk, for now  */
+    if (f->kind == FILE_FAT) {
+        if (!f->writable) return -9;
+        /* Not under the scheduler lock, for the reason file_read gives: a
+         * sector write polls the device, and the console and the pipes need
+         * that lock while it does. */
+        long n = fat_write(&f->fat, f->pos, buf, len);
+        if (n > 0) f->pos += (uint64_t)n;
+        return n;
+    }
     if (f->kind == FILE_MEM) {
         /* A short write when the buffer fills, which is what a program should
          * be told rather than having the excess silently dropped. */
