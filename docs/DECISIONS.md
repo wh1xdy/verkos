@@ -4232,4 +4232,8 @@ cheaply:
 Candidate 2 is the one to take. It also explains why one processor differs from
 two, which nothing else has.
 
-Nothing here is in the kernel. `make test` is 253 and green.
+Nothing here is in the kernel. `make test` reached 253 and green on this
+tree — and it took three runs to get there: 243, 252, 253 on the same code,
+with the container still winding down from a build. The suite's boot checks
+are wall-clock checks and the machine has to be idle for them to mean
+anything, which STATUS.md says and which is easy to forget while iterating.
