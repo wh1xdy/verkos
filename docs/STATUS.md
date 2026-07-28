@@ -1,115 +1,136 @@
 # Where VerkOS stands
 
-Written 2026-07-26, as a handover. The point of this file is to let a new
-session start without reading the whole history: what is proved, what is
-merely written, and what is known to be wrong.
+Rewritten 2026-07-28. The point of this file is to let a new session start
+without reading the whole history: what is proved, what is merely written, and
+what is known to be wrong.
 
-`make test` — 253 checks, all passing, run in the `verkbuild` container on
-2026-07-28; the SMP and signal-handler checks have passed three
-consecutive runs and the 226 older ones twelve. The number is host-dependent: some checks are skipped without a
-network or a cross toolchain, so a Mac host reports fewer and fails several on
-missing headers. Run it where the build runs.
+`make test` — **253 checks**, all passing, run in the `verkbuild` container.
+Run it on an idle machine: several checks boot QEMU and wait for a marker, and
+two suites running at once fail each other's timeouts. The count is also
+host-dependent — some checks are skipped without a network or a cross toolchain,
+so a Mac host reports fewer and fails several on missing headers.
+
+---
+
+## The two halves
+
+VerkOS is a Linux distribution built from source, replacing third-party
+components with its own — and, since 2026-07-26, **its own kernel** as well.
+They are separate systems that share tools:
+
+- **The distribution** boots Linux 6.12.9 through our own bootloader, installs
+  itself five ways, and runs a userland where 97 command names are ours.
+- **`stam`** is our own aarch64 kernel. It is not in any image and no build
+  stage ships it; `pkg/stam/Makefile` builds it and `make test` boots it.
 
 ---
 
 ## What is verified by booting
 
-Nothing below is inference. Each was checked by running a system, not by
-reading code.
+Nothing below is inference. Each was checked by running a system.
+
+### The distribution
 
 | | |
 |---|---|
-| **Boot chain** | UEFI → vboot (ours) → kernel → initramfs → urverk → services → login, on aarch64 — **when the firmware publishes a device tree**. With ACPI-only firmware vboot's synthetic tree is enough for stam and not for Linux, which boots into silence (D-068) |
-| **Encrypted root** | `vinstall --encrypt` makes a LUKS2 container; the partition reports `crypto_LUKS`/`aes-xts-plain64` and refuses to mount; urverk finds it by UUID, prompts, opens it, boots with root on `/dev/mapper/cryptroot` |
-| **Dual boot** | `--root-part`/`--esp-part` install beside another system; its bootloader keeps its checksum, its config survives, and the firmware loads ours from a `Boot####` variable we wrote into efivarfs (confirmed in the firmware's own BdsDxe log) |
-| **Immutable install** | `--immutable`: root read-only under a tmpfs overlay. A file written on the first boot is gone on the second |
-| **Diskless install** | `--ramdisk`: no root partition; the system is one ext4 image on the ESP, loop-mounted with an overlay. Boots, 496 programs, three services; nothing persists |
-| **Passwords** | After install, the image's build password is rejected and the one given at install time is accepted |
-| **Accounts** | vlogin replaces shadow entirely: interactive login, wrong password, unknown user, locked account, autologin, `su`, `passwd`, `useradd`/`usermod`/`userdel`. `su`/`passwd` are setuid and drop privilege completely |
-| **Modules** | verkmod replaces kmod: `modprobe btrfs` pulls in five dependencies, the kernel reports the refcounts, `rmmod` refuses one in use |
-| **Full userland** | Native GCC built and installed; `libstdc++` has working threads (self-checked during the build) |
-| **Live ISO** | `make iso` → a 731 MB medium that boots: firmware → vboot → kernel → initramfs → urverk mounts the ISO by label, loop-mounts the system image, overlays a tmpfs. Installer present, root writable and ephemeral |
-| **All four live entries** | Each ISO menu entry was selected and watched: normal; `rd.toram` (copies 648 MB in, then mounts from `/ram/root.img`); verbose; and the rescue shell, which now exists (D-028) and returns to the boot when left |
-| **Install from the live medium** | Booting the ISO, running `vinstall` on it, then detaching the ISO: the installed disk boots on its own with a persistent root, `/boot` mounted, three services and 489 programs |
-| **Live ephemerality** | Files written on one live boot — `/root`, `/etc` — are gone on the next |
-| **Bootable from USB** | The same ISO attached as a `usb-storage` device boots: the firmware logs "USB HARDDRIVE" and the guest sees `sda1` (vfat), so it was read through the hybrid MBR, not El Torito |
+| **Boot chain** | UEFI → vboot (ours) → kernel → initramfs → urverk → services → login, on aarch64 — **when the firmware publishes a device tree**. With ACPI-only firmware vboot's synthetic tree is enough for stam and not for Linux (D-072) |
+| **Encrypted root** | `vinstall --encrypt` makes a LUKS2 container; urverk finds it by UUID, prompts, opens it, boots on `/dev/mapper/cryptroot` |
+| **Dual boot** | `--root-part`/`--esp-part` install beside another system; its bootloader keeps its checksum and the firmware loads ours from a `Boot####` variable we wrote |
+| **Immutable install** | `--immutable`: root read-only under a tmpfs overlay; a file written on the first boot is gone on the second |
+| **Diskless install** | `--ramdisk`: one ext4 image on the ESP, loop-mounted with an overlay |
+| **Accounts** | vlogin replaces shadow entirely; `su`/`passwd` are setuid and drop privilege completely |
+| **Modules** | verkmod replaces kmod: `modprobe btrfs` pulls in five dependencies; `rmmod` refuses one in use |
+| **Live ISO** | `make iso` → a 731 MB medium that boots, all four menu entries watched, installs from itself, and boots as a simulated USB stick |
+| **The disk is ours** | `vpart` writes the GPT, `vmkfs` formats and fills the ESP, `vboot` is the loader in it. `make boot` goes from an empty file to a bootable disk using only code in this repository (D-065, D-066) |
+
+### stam
+
+| | |
+|---|---|
+| **Two boot paths, one source** | a raw arm64 `Image` for `-kernel`, and a UEFI application firmware or vboot loads. Nothing above `bootinfo.h` knows which (D-030, D-034) |
+| **Its own hardware** | console, memory, CPUs and the timer's interrupt out of the device tree; GICv2 **and** v3; on ACPI-only machines vboot builds the tree (D-035, D-036, D-044) |
+| **Processes** | preemptive round-robin, kernel in TTBR1, a low half per process, ELF out of a cpio initrd, `fork`/`exec`/`wait4`, copy-on-write, pages returned (D-037…D-064) |
+| **System calls** | with Linux's aarch64 numbers. Every pointer checked against the caller's own tables before it is dereferenced (D-056) |
+| **A shell** | `vsh`: pipelines, `>`, `>>`, `<`, `&`, Ctrl-C with process groups, and a script mode that makes it testable without driving a terminal (D-063) |
+| **Signals** | raised, delivered on syscall *and* interrupt return, and **caught**: the frame goes on the program's own stack and comes back through a restorer it supplies (D-075, D-077) |
+| **SMP** | PSCI `CPU_ON`; `current` per processor in `TPIDR_EL1`; a real spinlock; one lock over the scheduler, the pipes and the console. With `-smp 4` the work spreads over four processors, each with its own tick count (D-076, D-078) |
+| **A disk** | virtio-blk over **MMIO and PCI**, the GPT `vpart` wrote, the FAT32 `vmkfs` formatted — read *and written*, with mtools and `fsck.fat` judging the result (D-079…D-082) |
+| **The circle** | through real firmware: UEFI starts vboot, vboot builds a tree from ACPI with the PCI bridge out of MCFG, and the kernel it starts reads back the very `vboot.conf` vboot parsed to start it (D-081) |
+| **No initrd** | with the userland on the medium, `/init` comes off the disk and so does every program the shell runs (D-083) |
+| **Directories** | `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir`, `rm` as ordinary programs (D-085) |
+
+---
 
 ## What exists but has never been booted
 
-Nothing of substance. The ISO now boots (D-024), which settled the one
-outstanding question: the firmware does present the embedded FAT image as an
-ordinary volume, so vboot works unchanged.
-
-Still untried: **real hardware**. The ISO boots as a simulated USB stick under
-QEMU/AAVMF, which exercises the same firmware path, but no physical machine has
-been asked to boot it. There is deliberately no GPT (D-026), so firmware that
+**Real hardware.** The ISO boots as a simulated USB stick under QEMU/AAVMF,
+which exercises the same firmware path, but no physical machine has been asked
+to boot it. There is deliberately no GPT on the ISO (D-026), so firmware that
 reads nothing but GPT will not find it.
+
+A **Qualcomm GENI console driver** and `vbootimg` exist for hardware nothing has
+run them on, and D-045 says so rather than letting them sit beside the tested
+work as equals.
+
+---
 
 ## Known-wrong or fragile
 
-- **stam's block driver still polls**, though no longer with interrupts masked.
-  The device's interrupt is found, enabled and acknowledged — `make test`
-  asserts one was taken — but sleeping on it stopped a single-processor boot at
-  the first write, and the kernel has no timeout to bound a sleep that is never
-  woken. A bounded sleep was then added to the scheduler — and the disk's sleep
-  still stopped a single-processor boot at the first write, which means the
-  thread is not in the sleep at all and the cause has not been found (D-087).
-- **The stam script boot is occasionally slow enough to be killed.** `make test`
-  waits 180 seconds for the shell to say `bye`; under a loaded host — another
-  QEMU left running, for instance — it sometimes does not, and three checks go
-  red together. The on-disk checks are skipped in that case (D-082), but the
-  two that read the boot log are not. It is a harness limit, not a kernel
-  defect, and it has not been separated from one by anything better than
-  re-running it on an idle machine.
-- **x86_64 has none of this.** The Proxmox VM is many months of work behind:
-  no verkmod, vlogin, vmkfs, vinstall, viso, e2fsprogs, cryptsetup, no native
-  GCC, and none of the sixteen tool fixes. A clean build there would also prove
-  nothing done here is aarch64-specific.
-- **The rootfs is 958 MB** now that the full userland is built. A live ISO would
-  be ~1.3 GB. A live medium does not need gcc, binutils or cmake.
+- **stam's disk sleep does not work on one processor**, and after five entries
+  the useful conclusion is that the problem is not in the driver. D-086 through
+  D-090: the sleep hangs a single-processor boot; a bounded sleep did not help,
+  so the thread is not in the sleep; no thread switch happens at all while two
+  threads stand runnable; `next_runnable` does name one; and the exit counter in
+  `schedule_locked` reads as though the function never runs. Two candidate
+  answers remain and neither has been tested. **The driver polls instead**, with
+  interrupts enabled, and nothing in the tree depends on the sleep.
+- **A diagnostic changed what it diagnosed, twice in one day.** An idle-core
+  report that counted its own loop passes called a busy machine stopped; a
+  version that walked the thread table on every tick pushed a boot past the
+  check waiting for it. Both are fixed and both are written down (D-088, D-090),
+  because the shape recurs.
+- **x86_64 has none of this.** The Proxmox VM is many months behind: no verkmod,
+  vlogin, vmkfs, vpart, vinstall, viso, no native GCC, and nothing of stam. A
+  clean build there would also prove nothing done here is aarch64-specific.
+- **The rootfs is 958 MB**; a live ISO would be ~1.3 GB. About 250 MB of the
+  medium is the compiler.
 - **`full-userland` is one block with no inner marks**, so any failure inside it
-  rebuilds bzip2, file, m4, binutils and gcc from the start. This cost several
-  hours during the LUKS work.
+  rebuilds bzip2, file, m4, binutils and gcc from the start.
 - **An interrupted `make install` of GCC leaves the system unable to rebuild
-  itself** — the new driver is installed but its internal headers are not, so
-  `gcc` cannot find `stddef.h` and `g++` segfaults. Recovery depended on the
-  cross toolchain's `aarch64-verk-linux-gnu-*` drivers still existing, which is
-  luck, not design.
-- **Static C++ linking does not work** until a native GCC has been built: the
-  cross toolchain's `libstdc++.a` is a stub with neither sized delete nor
-  `basic_string`.
-- The build volume is 79 GB. Unpacked sources are now reclaimed on success, but
-  a single failed GCC build can still occupy 46 GB.
+  itself.** Recovery depended on the cross toolchain still existing, which is
+  luck rather than design.
+- The build volume is 79 GB; a single failed GCC build can occupy 46 GB.
 
-## The thing most worth remembering
+---
 
-Building cryptsetup's dependency chain put VerkOS' own userland in front of real
-third-party build systems for the first time at scale. **Twelve defects fell out**
-(D-021), and nearly all produced *a wrong answer with a zero exit status*:
-`vtar` truncating paths over 100 characters and writing files to the wrong
-place, `vawk` treating a regex field separator as a literal, `vsed` silently
-discarding commands, `verkbox`'s `sort` missing `-c`/`-t`/`-k`.
+## The two things most worth remembering
 
-A deliberate sweep for silent failures earlier the same day — every tool through
-unknown flags, wrong formats, missing files — found eighteen *other* problems
-and none of these.
+**Real software finds what synthetic probes do not.** Building cryptsetup's
+dependency chain put our userland in front of real build systems for the first
+time at scale, and **twelve defects fell out** (D-021) — nearly all producing *a
+wrong answer with a zero exit status*. A deliberate sweep for silent failures
+earlier the same day found eighteen *other* problems and none of these.
 
 > Synthetic probes test what we thought to ask. Real build systems ask things we
-> did not think of, in combinations like `sort -nt_ -k5`, `tar xpf -` and
-> `sed -n -e 'w $@-t'`.
+> did not think of.
 
-Every one was found by a build failing somewhere far from the cause. That is the
-argument for building real software with our tools rather than testing them in
-isolation.
+**Ask the machine, do not reason about it.** The recurring defect across the
+whole log is *a report that does not depend on what it reports*. The recurring
+*cure* is making the program say where it got to: D-071 found a device-tree bug
+by printing the tree, after four correct-looking fixes had not; D-081 found a
+table of function pointers by reading a program counter; D-089 narrowed a day's
+suspicion to one function by asking the scheduler what it had chosen — in one
+run, after three entries of reasoning had each been plausibly wrong.
+
+---
 
 ## Suggested next steps, in order
 
-1. **Boot it on real hardware** — everything else is simulation. Write the ISO
-   to a stick and try it.
-2. **Sync x86_64** — the second architecture is the real test of whether any of
-   this was portable, viso and El Torito included.
-3. **Trim further** — about 250 MB of the 731 MB is the compiler. Removing it
-   would roughly halve the medium again, at the cost of an ISO install no
-   longer providing gcc.
+1. **Finish the scheduler question** — `schedule_locked` appears not to run
+   where it must. Two candidates, both testable by disassembly rather than
+   instrumentation, which is what made the last attempt unstable.
+2. **Boot it on real hardware** — everything else is simulation.
+3. **Sync x86_64** — the second architecture is the real test of whether any of
+   this was portable.
 4. **Give `full-userland` inner marks**, so a failure does not restart the
    compiler.
