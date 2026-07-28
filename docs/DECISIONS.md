@@ -3642,3 +3642,59 @@ quietly found an archive prints something else — and then that the shell reach
 it also came from there.
 
 `make test`: 248 checks, was 246, three consecutive runs.
+
+## D-084 — one variable for the whole machine, again
+
+**2026-07-28.** `mmu.c` kept `cur_user_kva`: which user page table
+`map_user_page` and `vm_cow_fault` are working in. One variable, for the whole
+kernel.
+
+That was true until D-078 made `current` per-processor, and then quietly was
+not. Two cores in `execve` at the same time each wrote their pages into whatever
+table the other had named last.
+
+It presented as `elf_load` faulting on an address the program was entitled to —
+sometimes a **permission** fault at `0x3f0000`, sometimes a **translation**
+fault at `0x41ffe8`, depending on which core had written last and what it had
+written. Nothing in either report mentioned a second processor.
+
+### Why it hid
+
+`cur_user_kva` is not in the scheduler and is not named by anything that looks
+like scheduling. It is read from inside `execve` and from inside the fault
+handler, neither of which mentions a CPU. D-078 went through every section
+marked in `lock.h` and this one was never marked, because on one processor it
+was not a race — it was a correct cache of a fact that only one thread at a time
+could have.
+
+And it only shows on a path that spends long enough between two mappings to be
+preempted. Reading an executable out of memory does not. **Reading one off a
+disk, through a driver that polls, does** — which is why D-079's work found a
+defect that D-078 introduced, three commits later, in a report about neither.
+
+### Per thread, not per processor
+
+The obvious fix is to move it into `cpu_t`, and it is wrong: a thread may be
+preempted between two mappings and resumed on a different core, and the answer
+has to travel with the work rather than with the machine. So it lives in
+`thread_t`, and `schedule_locked` swaps it through the `cpu_t` at every switch —
+the CPU field is a cache, and the thread owns it.
+
+### Two checks that came out of chasing it, and stay
+
+Both were written to test theories that turned out to be wrong. Both are worth
+keeping, because what they check is real and neither had anything watching it.
+
+**A canary at the bottom of every kernel stack**, checked at every switch. The
+stack was 8 KiB, which is not obviously enough for a call chain that carries a
+512-byte argument buffer, and "it overflowed" was the first theory. It had not —
+the canary has never fired — but nothing would have said so. The stack is 16 KiB
+now as well, which is cheap and removes the question.
+
+**A marker in every freed page**, checked when the allocator hands it out again.
+"A live page was handed back" was the second theory. Also wrong, also unwatched:
+a page written after it is freed is the quietest corruption there is, and this
+turns it into a line of output at the moment it happens.
+
+`make test`: 248 checks, unchanged — this fixes a defect nothing was catching,
+which is worth saying plainly rather than counting.

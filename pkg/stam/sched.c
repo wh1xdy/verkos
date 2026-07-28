@@ -27,7 +27,19 @@ extern uint64_t thread_entry_point(void);
  * out of slots where a one-core boot did not — reported as "vsh: cannot fork",
  * which is true and says nothing about why. */
 #define MAX_THREADS (16 + MAX_CPUS)
-#define STACK_PAGES 2
+/* Four pages, and a word at the bottom that says when four were not enough.
+ *
+ * It was two, and on 2026-07-28 a hundred and twenty-eight bytes of locals in
+ * the system-call dispatcher overflowed it. What the overflow hit was the page
+ * below, which the allocator had handed to a page table, and the symptom was a
+ * permission fault inside the ELF loader writing to an address the program was
+ * entitled to. Nothing pointed at the stack (D-084).
+ *
+ * Growing it makes that particular overflow stop; the canary makes the next one
+ * say so. Checked at every switch, which is the one place every thread passes
+ * through and cheap enough that it is not worth making conditional. */
+#define STACK_PAGES 4
+#define STACK_CANARY 0x5354414d4b475244ull   /* "STAMKGRD" */
 
 static thread_t threads[MAX_THREADS];
 static int n_threads;            /* how many slots have ever been used        */
@@ -122,6 +134,7 @@ static void slot_init(thread_t *t, const char *name, uint64_t space) {
     t->pending     = 0;
     t->blocked     = 0;
     t->home        = -1;         /* any processor may run it */
+    t->user_table  = 0;
     t->last_cpu    = -1;         /* nothing has run it yet     */
     t->ran_on      = 0;
     for (int i = 0; i < NSIG; i++) t->sigact[i].handler = t->sigact[i].restorer =
@@ -142,6 +155,7 @@ thread_t *thread_create(const char *name, void (*fn)(void *), void *arg) {
 
     slot_init(t, name, 0);
     t->stack_low = (uint64_t)(uintptr_t)stack;
+    *(uint64_t *)(uintptr_t)stack = STACK_CANARY;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
     uint64_t *frame = (uint64_t *)(uintptr_t)(top - 96);
@@ -187,6 +201,7 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
         t->blocked = current->blocked;
     }
     t->stack_low = (uint64_t)(uintptr_t)stack;
+    *(uint64_t *)(uintptr_t)stack = STACK_CANARY;
 
     uint64_t top = (uint64_t)(uintptr_t)stack + STACK_PAGES * PAGE_SIZE;
     unsigned char *frame = (unsigned char *)(uintptr_t)(top - frame_bytes);
@@ -274,6 +289,23 @@ static void schedule_locked(void) {
      * otherwise both take it, and two processors executing one kernel stack is
      * not a race that produces a wrong answer — it is one that produces no
      * further answers. */
+    /* Before anything else uses what the outgoing thread wrote. A stack that
+     * has overflowed has already corrupted whatever the allocator put below it,
+     * and the sooner that is said the closer the report is to the cause. */
+    if (prev->stack_low && *(uint64_t *)(uintptr_t)prev->stack_low != STACK_CANARY) {
+        kprintf("  [kernel] %s overflowed its kernel stack\n",
+                prev->name ? prev->name : "a thread");
+        /* Once. Not by forgetting where the stack is — release_slot frees it by
+         * that address — but by putting the canary back, so a second overflow
+         * after this one is still reported. */
+        *(uint64_t *)(uintptr_t)prev->stack_low = STACK_CANARY;
+    }
+    /* The table each was filling in goes with it. Leaving it on the processor
+     * is what D-084 was: two cores in execve at once, each writing its pages
+     * into whichever table the other had named last. */
+    prev->user_table = this_cpu()->user_table_kva;
+    this_cpu()->user_table_kva = next->user_table;
+
     if (prev->state == THREAD_RUNNING) prev->state = THREAD_RUNNABLE;
     next->state = THREAD_RUNNING;
     /* Where it has been, not only where it is. "Spread over N processors"

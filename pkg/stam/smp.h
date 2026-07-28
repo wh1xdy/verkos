@@ -25,6 +25,11 @@ typedef struct cpu {
     unsigned       index;
     unsigned       online;
     uint64_t       ticks;    /* its own, so an idle core is visibly idle */
+    /* Which user page table this processor is filling in. It was one variable
+     * for the whole kernel, which was true until D-078 made `current` per
+     * processor and then quietly was not: two cores in execve at once wrote
+     * their pages into each other's tables. See D-084. */
+    uint64_t       user_table_kva;
 } cpu_t;
 
 static inline cpu_t *this_cpu(void) {

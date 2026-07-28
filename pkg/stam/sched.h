@@ -19,6 +19,12 @@ typedef struct thread {
     const char *name;
     uint64_t    slices;      /* how many times it has been given the CPU   */
     uint64_t    space;       /* its low half, or 0 for a kernel-only thread */
+    /* Which user table map_user_page is filling in on its behalf. Per thread
+     * and not per processor: a thread may be preempted between two mappings
+     * and resumed on a different core, and the answer travels with the work
+     * rather than with the machine (D-084). The cpu_t field is a cache of
+     * this, swapped at every switch. */
+    uint64_t    user_table;
     int         parent;      /* who is entitled to collect its exit status  */
     int         status;      /* what it exited with, once it is a zombie    */
     int         wait_reason; /* WAIT_CHILD, WAIT_CONSOLE or WAIT_PIPE       */
