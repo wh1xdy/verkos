@@ -370,48 +370,22 @@ void schedule(void) {
  * the difference looks like from outside).
  */
 void sched_idle_loop(void) {
-    /* A core with nothing to run when something is still unfinished is a
-     * machine that has stopped, and until now it stopped silently. Counting
-     * consecutive idle passes and printing the table once is the difference
-     * between "it hangs" and a report naming which thread is blocked on what.
-     * Five hundred passes is five seconds at 100 Hz — long enough that an
-     * ordinary quiet moment never reaches it. */
-    unsigned quiet = 0;
-    uint64_t seen = switches;
+    /* No idle report here any more.
+     *
+     * It counted its own loop passes (wrong), then walked the thread table on
+     * every tick (changed what it measured), then compared against a counter
+     * nobody incremented (D-099, and eleven entries reasoned from its output).
+     * With that counter fixed it was wrong a fourth way: a machine that is
+     * deliberately waiting — main.c has two-second wait loops — takes no
+     * switches for five seconds while being perfectly healthy, so the report
+     * fired on every good boot.
+     *
+     * Its premise was that no switch means stopped, and that is simply not
+     * true of this kernel. Four attempts is enough; the per-exit counters that
+     * finally settled the question were a better instrument and cost nothing
+     * permanent (D-102). */
     for (;;) {
         __asm__ volatile("wfi");
-        /* Reset on any switch anywhere, not on "am I the idle thread" — which
-         * is true every time this loop is reached and says nothing about
-         * whether the machine is doing anything. */
-        if (switches != seen) { seen = switches; quiet = 0; }
-        else if (++quiet == 500) {
-            {
-                uint64_t f = spin_lock_irq(&sched_lock);
-                kprintf("  [kernel] cpu %u has had nothing to run for five seconds:\n",
-                        this_cpu()->index);
-                for (int i = 0; i < n_threads; i++) {
-                    thread_t *t = &threads[i];
-                    if (t->state == THREAD_FREE) continue;
-                    kprintf("    slot %d %s state %d home %d reason %d object %llx wake_at %llu now %llu\n",
-                            i,
-                            t->name ? t->name : "?", t->state, t->home, t->wait_reason,
-                            (unsigned long long)(uintptr_t)t->wait_object,
-                            (unsigned long long)t->wake_at,
-                            (unsigned long long)timer_ticks());
-                }
-                /* And what the chooser itself sees, from where it stands. If
-                 * this disagrees with the table above, the disagreement is the
-                 * defect — and reasoning about the loop instead of asking it
-                 * is how three attempts at the disk sleep went (D-088). */
-                thread_t *would = next_runnable(current);
-                kprintf("    chooser: n_threads %d, current is slot %d, "
-                        "next_runnable says %s\n",
-                        n_threads, (int)(current - threads),
-                        would ? (would->name ? would->name : "?") : "(nobody)");
-                spin_unlock_irq(&sched_lock, f);
-                quiet = 0;         /* say it again if it is still true */
-            }
-        }
         schedule();
     }
 }

@@ -320,7 +320,31 @@ void kmain_high(void) {
         kprintf("  they counted to %llu, %llu and %llu\n",
                 (unsigned long long)work[0], (unsigned long long)work[1],
                 (unsigned long long)work[2]);
-        kprintf("  every thread ran, evenly. yes.\n");
+        /* The verdict, computed from the numbers just printed.
+         *
+         * It was a bare kprintf: the counts were measured, printed, and never
+         * compared, so "every thread ran, evenly. yes." appeared on a kernel
+         * with no preemption at all — the workers would each be scheduled once
+         * by the cooperative drain below, count to zero, and the line would say
+         * yes. It was the only automated check of the property in the whole
+         * suite, and it was D-099's shape in the kernel rather than in a
+         * diagnostic (D-102). */
+        {
+            uint64_t lo = work[0], hi = work[0];
+            for (int k = 1; k < 3; k++) {
+                if (work[k] < lo) lo = work[k];
+                if (work[k] > hi) hi = work[k];
+            }
+            /* Within a factor of four, and none of them zero. Round robin over
+             * three threads gives them a slice each in turn; a factor of four
+             * is loose enough that a slow first slice or a late start does not
+             * fail it, and tight enough that a starved thread does. */
+            if (lo > 0 && hi <= lo * 4)
+                kprintf("  every thread ran, evenly. yes.\n");
+            else
+                kprintf("  NOT evenly: %llu..%llu — a thread was starved. no.\n",
+                        (unsigned long long)lo, (unsigned long long)hi);
+        }
         /* Counted from where the threads actually ran, so it says one on a
          * machine with one processor and cannot say more than is true. */
         kprintf("  the work was spread over %d processor%s.\n", used, used == 1 ? "" : "s");

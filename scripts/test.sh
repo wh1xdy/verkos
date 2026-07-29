@@ -907,8 +907,15 @@ if [ "$(uname -m)" != aarch64 ]; then
     fi
 fi
 if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
-    if ( cd pkg/stam && make CROSS="$STAM_CROSS" clean >/dev/null 2>&1 && \
-         make CROSS="$STAM_CROSS" >/dev/null 2>&1 ); then
+    # No `clean` first. It was there because the Makefile had no header
+    # dependencies and a changed struct silently produced mismatched objects
+    # (D-078 found that as a scheduler reporting two slices where there had been
+    # fifty). The Makefile has them now, so an incremental build is correct —
+    # and `clean` was actively harmful: it removes stam.img before the build
+    # runs, so a build that fails for any reason, including a second copy of
+    # this suite compiling in the same directory, leaves the tree with no
+    # kernel at all. Several of today's mystery failures were that.
+    if ( cd pkg/stam && make CROSS="$STAM_CROSS" >/dev/null 2>&1 ); then
         ok "stam compiles"
         IMG=pkg/stam/stam.img
         # The arm64 boot protocol puts "ARM\x64" at offset 56 — which reads as
@@ -1432,8 +1439,15 @@ if [ "$STAM_CROSS" != none ] && [ -n "$SFW" ] && \
               "grep -aq 'device tree found' $S/log && ! grep -aq 'Refusing to continue' $S/log"
         check "stam finds its console through that tree" \
               "grep -aqE 'console +(PL011|8250)' $S/log"
+        # Anchored on the success lines and their measured values. It used to
+        # be `grep -aq 'timer'`, which timer.c's own failure messages satisfy —
+        # "timer     no timer in the device tree" contains the word — and
+        # `grep -aq 'gic *v'`, which "gic       v3 refuses the system register
+        # interface" satisfies on its way to returning -1. Both halves passed
+        # on a boot that found neither device (D-102).
         check "stam finds the interrupt controller and the timer" \
-              "grep -aq 'gic *v' $S/log && grep -aq 'timer' $S/log"
+              "grep -aqE 'gic +v[23] at 0x' $S/log &&
+               grep -aqE 'timer +[0-9]+ Hz counter, ticking at [0-9]+ Hz on irq [0-9]+' $S/log"
         # A fixed string would say this whether or not any interrupt arrived.
         check "stam takes interrupts on the tree vboot built" \
               "grep -aq 'the kernel can preempt' $S/log"

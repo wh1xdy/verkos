@@ -4525,3 +4525,69 @@ on two:
 
 `make test`: 253 checks, green, with the sleep enabled. The block driver is
 interrupt-driven, which is where D-086 was trying to go eight entries ago.
+
+## D-102 — four findings from an audit that hunted the shapes
+
+**2026-07-29.** Twenty-eight agents over four lenses, hunting the two shapes that
+have bitten hardest: *two things that must agree, updated at different times*
+(D-042, D-084, D-101) and *a report that does not depend on what it reports*
+(D-033, D-055, D-099). Seventeen agents were lost to a session limit; two
+findings survived refutation, and following them up found two more.
+
+### 1. The evenness verdict was unconditional
+
+`main.c` printed `every thread ran, evenly. yes.` with no `if` above it. The
+counts were measured, printed, and never compared — so on a kernel with **no
+preemption at all** the workers would each be scheduled once by the cooperative
+drain that follows, count to zero, and the line would still say yes. It was the
+only automated check of that property in the suite.
+
+It is computed now: within a factor of four, none of them zero, and it says
+`NOT evenly: lo..hi — a thread was starved. no.` otherwise.
+
+D-099's shape, in the kernel rather than in a diagnostic.
+
+### 2. Two greps matched their own failure messages
+
+```sh
+grep -aq 'gic *v' $S/log && grep -aq 'timer' $S/log
+```
+
+`timer.c` prints `timer     no timer in the device tree` before returning -1 —
+which contains the word. `gic.c` prints `gic       v3 refuses the system
+register interface` before returning -1 — which matches `gic *v`. **Both halves
+passed on a boot that found neither device**, and on that boot nothing ticks, no
+thread is created, and the kernel stops at milestone 2.
+
+Anchored on the success lines and their measured values now.
+
+### 3. kprintf was not serialised
+
+Following those up on a four-core boot showed the answer to a week of
+oscillating SMP failures:
+
+```
+    slot 2 idle state 4 ho  they counted to 70102677, 152693483 and 14121me 1 reason 07846
+    slot   every thre4 worker-b state 1 homad ran, evenly. yes.
+```
+
+Two processors printing at once interleave **inside the string**. Unreadable,
+and worse: every check in `make test` that greps for a phrase fails, because the
+phrase is no longer contiguous. Several failures blamed on a busy host were
+that. `kprintf` takes a lock of its own now — the lowest in the order, since
+nothing inside it takes another.
+
+### 4. The idle report is gone
+
+It was wrong four times: it counted its own loop passes; it walked the thread
+table on every tick and changed what it measured; it compared against a counter
+nobody incremented (D-099, and eleven entries reasoned from its output); and
+with that fixed, it fired on every healthy boot, because `main.c` has
+two-second wait loops and a machine that is deliberately waiting takes no
+switches.
+
+Its premise — *no switch means stopped* — is not true of this kernel. Four
+attempts is enough. The per-exit counters that finally settled the question were
+a better instrument and left nothing permanent behind.
+
+`make test`: 253 checks, green.

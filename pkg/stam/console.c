@@ -301,7 +301,23 @@ static void kputu(uint64_t v, unsigned base, int pad) {
 
 /* Enough of printf to describe a machine: %s %c %d %u %x %p %%, with an
  * optional zero-pad width for %x. Anything more belongs in userspace. */
+/* One line at a time, whole.
+ *
+ * Two processors printing at once interleave inside the string: on a four-core
+ * boot the scheduler's report and the idle report came out spliced into each
+ * other mid-word, which is unreadable and — worse — breaks every check in
+ * make test that greps for a phrase, because the phrase is no longer contiguous.
+ * Several oscillating SMP failures were that and not the host being busy
+ * (D-102).
+ *
+ * A lock of its own, and the lowest one in the order: nothing here takes any
+ * other, so it can be taken while holding anything and cannot be part of a
+ * cycle. Interrupts are masked with it, because a handler that prints while
+ * this core is half way through a line is the same splice from one processor. */
+static spinlock_t print_lock = SPINLOCK_INIT;
+
 void kprintf(const char *fmt, ...) {
+    uint64_t pf = spin_lock_irq(&print_lock);
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     for (; *fmt; fmt++) {
@@ -334,6 +350,7 @@ void kprintf(const char *fmt, ...) {
         }
     }
     __builtin_va_end(ap);
+    spin_unlock_irq(&print_lock, pf);
 }
 
 /* Find the console the firmware told us to use, and fall back to looking for
