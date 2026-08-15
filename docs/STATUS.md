@@ -129,10 +129,10 @@ run, after three entries of reasoning had each been plausibly wrong.
 
 ## Suggested next steps, in order
 
-1. **Finish the scheduler question** — `schedule_locked` appears not to run
-   where it must. Two candidates, both testable by disassembly rather than
-   instrumentation, which is what made the last attempt unstable.
-2. **Boot it on real hardware** — everything else is simulation.
-3. **Sync x86_64** — the second architecture is the real test of whether any of
+1. **Boot it on real hardware** — everything else is simulation.
+2. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
-4. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
+3. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
+
+The scheduler question is no longer on this list: it is closed, see the top of
+this file and D-099 to D-101.
