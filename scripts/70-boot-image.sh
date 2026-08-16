@@ -20,7 +20,12 @@ case "$ARCH" in
     *)       die "stage 70 does not know how to boot $ARCH" ;;
 esac
 
-need_tool() { command -v "$1" >/dev/null || die "$1 is required for the boot image (install $2)"; }
+# No need_tool here on purpose. This stage runs `dd` and `cc` and otherwise
+# only our own programs — vpart writes the table, vmkfs formats and fills the
+# partition, vboot is the loader that goes in it (D-065, D-066). A helper that
+# checks nothing is worse than none: it reads, at a glance, like a stage that
+# verifies its prerequisites. One was defined here and never called until it
+# was noticed on 2026-08-16.
 
 build_initramfs() {
     local work="$BUILD_DIR/initramfs" out="$OUT_DIR/initramfs.img"

@@ -34,6 +34,19 @@ esac
 
 need_tool() { command -v "$1" >/dev/null || die "$1 is required for the ISO (install $2)"; }
 
+# Called, which it was not until 2026-08-16. The helper was written and never
+# used, so a machine without e2fsprogs reached this stage after a build of
+# several hours and failed on mkfs.ext4's own error message — which names the
+# command and not the package, and arrives at the most expensive possible
+# moment. Everything the stage needs from outside is checked here, first.
+#
+# xorriso and e2fsck are deliberately absent from this list: both are
+# independent verification, both skip cleanly when missing, and requiring them
+# would turn a check into a build dependency.
+need_tool mkfs.ext4 "e2fsprogs"
+need_tool truncate  "coreutils"
+need_tool dd        "coreutils"
+
 # The live boot configuration. Deliberately not pkg/vboot/vboot.conf, whose
 # entries name a root partition that a live medium does not have.
 write_live_config() {
