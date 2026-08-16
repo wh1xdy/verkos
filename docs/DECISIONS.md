@@ -4863,3 +4863,80 @@ a codebase agreeing with itself.
 `tcpget` contains no line that knows it is talking to a network. After
 `connect` returns, a stream is a stream: `read` and `write` on a descriptor,
 dispatched in `file.c` beside pipes and files on the disk.
+
+---
+
+## D-106 — CI proved nothing about the kernel, and said so in green
+
+2026-08-16.
+
+CI installed `qemu-system-x86` and a cross compiler. So stam was built on every
+push, and every one of the sixty-nine checks that *boot* it printed
+
+```
+  skip  booting stam (no qemu-system-aarch64)
+```
+
+and the job went green. A change that killed the boot would have been caught by
+whoever next ran the suite by hand.
+
+That is this project's recurring defect wearing a workflow file: a report that
+does not depend on what it reports. It was pointed out rather than found here,
+which is worth writing down too.
+
+### The job, and the check on the job
+
+An arm64 runner rather than emulating aarch64 on x86: on it the native compiler
+*is* the cross compiler — `test.sh` already treats an aarch64 host as needing no
+`CROSS` prefix — and the boots take seconds instead of minutes.
+
+The last step is the point. `make test` exits zero whether the boot checks ran
+or were skipped, so the job greps for the skip lines and **counts** the checks
+that executed, failing under sixty. Without that step the job is the one it
+replaced, one layer further down.
+
+Two defects of the same shape were in the job as first written, and both were
+found by re-reading it rather than by running it:
+
+- `make test | tee log` reports **tee's** status. A failing suite would have
+  been reported as a passing job.
+- `ls a b | head -1` reports **head's**. With no firmware present it would have
+  printed nothing and passed, having proved the opposite of what it claimed.
+
+### What the runner then found
+
+Every stam boot produced a **zero-byte** serial log — which reads exactly like a
+kernel faulting before its first character. The suite sent QEMU's stderr to
+`/dev/null`, so it took a round trip through CI to learn:
+
+```
+qemu-system-aarch64: failed to find romfile "efi-virtio.rom"
+```
+
+QEMU adds a `virtio-net-pci` card when no network is asked for. That card wants
+an option ROM. Without `ipxe-qemu` installed QEMU exits before executing a
+single instruction. The CI job installed with `--no-install-recommends`, which
+is exactly where `ipxe-qemu` went; the developer's container had it pulled in
+*as a recommendation* and so could never have shown this.
+
+Two fixes, because there are two faults. The boots that are about the scheduler,
+about programs and about the disk never wanted a card, and now say `-nic none`:
+a test should ask for the machine it means rather than inherit one from a
+default that varies by QEMU version. And `ipxe-qemu` is installed and checked
+for by name, because `virtio-blk-pci` wants the same ROM and does need it.
+
+Verified by reproducing it rather than by reasoning: same container, ROM moved
+aside, the old command line gives zero bytes and that exact message, the new one
+boots. Restored, and the suite is 260 green again.
+
+### Two things the suite keeps now
+
+QEMU's stderr, and the first two kilobytes of the serial log, printed when the
+boot produced nothing. An empty log has two very different causes — a kernel
+that faulted, and an emulator that never started — and the suite used to
+discard the only thing that tells them apart.
+
+A related narrowness fixed on the way: the check that a vboot built with a key
+contains that key asked for `aarch64-linux-gnu-gcc` **by name**, so it skipped
+on exactly the machines that need no prefix, including this new runner. The loop
+that builds vboot for both architectures already got this right; this had not.

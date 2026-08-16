@@ -5,6 +5,9 @@ without reading the whole history: what is proved, what is merely written, and
 what is known to be wrong.
 
 `make test` — **260 checks**, all passing, run in the `verkbuild` container.
+CI boots the kernel too, on an arm64 runner, and **fails if the boot checks are
+skipped** — before 2026-08-16 they always were, and the job was green anyway
+(D-106).
 Run it on an idle machine: several checks boot QEMU and wait for a marker, and
 two suites running at once fail each other's timeouts. The count is also
 host-dependent — some checks are skipped without a network or a cross toolchain,
