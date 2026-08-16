@@ -1143,9 +1143,15 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                         fi
                     fi
                     [ -n "$DISK" ] || log "vmkfs and vpart did not build a disk; the FAT checks will fail"
+                    # A network card on the same boot. QEMU's user-mode network
+                    # needs nothing from the host — the gateway at 10.0.2.2 is
+                    # inside QEMU — so this works on a build machine with no
+                    # network at all, which is the only reason it belongs in a
+                    # suite that must not depend on the outside world.
+                    NIC="-netdev user,id=n0 -device virtio-net-device,netdev=n0"
                     # shellcheck disable=SC2086
                     ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
-                        -display none -serial "file:$SL" -no-reboot $DISK \
+                        -display none -serial "file:$SL" -no-reboot $DISK $NIC \
                         -kernel pkg/stam/stam.img \
                         -initrd pkg/stam/progs/initrd-script.cpio \
                         </dev/null >/dev/null 2>&1 & echo $! > "$T/spid" )
@@ -1258,6 +1264,25 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     check "stam reads the loader's own configuration off the disk" \
                           "grep -aq \"read the loader's own vboot.conf off this disk\" $SL &&
                            grep -aq '2 entries' $SL"
+
+                    # --- the network ----------------------------------------
+                    # The card, named with the address the device reported. A
+                    # kernel that found no card prints nothing at all here, so
+                    # this cannot pass on a machine without one.
+                    check "stam finds the network card and reads its address" \
+                          "grep -aqE '^  net       virtio-net over (mmio v[12]|pci), ([0-9a-f]{2}:){5}[0-9a-f]{2}' $SL"
+                    # The gateway's address was not in the kernel: it came back
+                    # in an ARP reply, which means a frame left the machine.
+                    check "something outside answers an address stam asked for" \
+                          "grep -aqE '10\\.0\\.2\\.2 is at ([0-9a-f]{2}:){5}[0-9a-f]{2}' $SL"
+                    # And the strongest claim the kernel makes about anything:
+                    # an ICMP payload it chose, returned by something it did not
+                    # write, with both checksums verified before it was
+                    # believed. The microseconds are measured off the
+                    # architected counter — a fixed line would read the same
+                    # whether or not a packet moved.
+                    check "an echo request comes back with its payload intact" \
+                          "grep -aqE 'the echo came back intact in [0-9]+ microseconds\\. yes\\.' $SL"
                     # Run from the disk, not from the archive: `diskprog` is in
                     # no initrd, so exec had nowhere else to find it. It prints
                     # the argv it was given, which also says the arguments

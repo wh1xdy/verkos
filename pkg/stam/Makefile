@@ -39,7 +39,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o signal.o pci.o virtio.o virtio_blk.o gpt.o fat.o syscall.o userprog.o main.o
+OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o signal.o pci.o virtio.o virtio_blk.o virtio_net.o net.o gpt.o fat.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -88,7 +88,7 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c signal.c pci.c virtio.c virtio_blk.c gpt.c fat.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c signal.c pci.c virtio.c virtio_blk.c virtio_net.c net.c gpt.c fat.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S smpentry.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds

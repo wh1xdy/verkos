@@ -18,6 +18,7 @@
 #include "cpio.h"
 #include "smp.h"
 #include "virtio.h"
+#include "net.h"
 #include "fat.h"
 
 extern void syscall_set_archive(uint64_t addr, uint64_t size);
@@ -277,6 +278,11 @@ void kmain_high(void) {
                         "%u bytes, %d entries\n", cfg.size, entries);
             }
         }
+        /* The card, if there is one. Silent when there is not: a machine with
+         * no network is not a machine with a problem, and the milestone below
+         * says so where it would otherwise claim something. */
+        net_init(machine_tree());
+
         int others = smp_start_others(machine_tree());
         if (others) kprintf("  cpus      %u online\n", smp_cpus_online());
         thread_create("worker-a", worker, (void *)(uintptr_t)0);
@@ -351,6 +357,44 @@ void kmain_high(void) {
         for (unsigned c = 0; c < smp_cpus_online() && c < MAX_CPUS; c++)
             kprintf("    cpu %u took %llu timer interrupts\n", c,
                     (unsigned long long)cpu_slot(c)->ticks);
+
+        /* --- 6. is there anything outside this machine? ---
+         *
+         * Numbered last because it was added last, and printed here because it
+         * needs the timer ticking and nothing else.
+         *
+         * This is the one milestone whose answer cannot be manufactured by the
+         * kernel. Every other one is stam observing itself: a thread it
+         * scheduled, a program it loaded, a sector it read back. An echo reply
+         * is built by something else, addressed to a MAC address that something
+         * else learned from a frame we sent, carrying a payload we chose, with
+         * two checksums computed over it. There is no way to print the line
+         * below without a frame having left the machine and an answer having
+         * come back.
+         *
+         * Which is also why the failing branch says which half failed. "No
+         * reply" covers a card that never sent, a gateway that never answered
+         * and a reply we refused as malformed, and those are three different
+         * mornings. */
+        if (net_present()) {
+            kprintf("\n  --- 6. is there anything outside this machine? ---\n");
+            uint8_t gw[6];
+            if (net_arp_resolve(IPV4(10,0,2,2), gw) != 0) {
+                kprintf("  nobody answered who-has 10.0.2.2. no.\n");
+            } else {
+                kprintf("  10.0.2.2 is at %02x:%02x:%02x:%02x:%02x:%02x — it "
+                        "answered an address we asked for.\n",
+                        gw[0], gw[1], gw[2], gw[3], gw[4], gw[5]);
+                int intact = 0, took = net_ping(IPV4(10,0,2,2), 1, &intact);
+                if (took < 0)
+                    kprintf("  the echo request was sent and nothing came back. no.\n");
+                else if (!intact)
+                    kprintf("  a reply came back with a different payload. no.\n");
+                else
+                    kprintf("  the echo came back intact in %d microseconds. yes.\n",
+                            took);
+            }
+        }
 
         kprintf("\n  --- 2. can something run outside the kernel? ---\n");
         thread_create("program", first_program, 0);

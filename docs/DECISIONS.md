@@ -4591,3 +4591,115 @@ attempts is enough. The per-exit counters that finally settled the question were
 a better instrument and left nothing permanent behind.
 
 `make test`: 253 checks, green.
+
+---
+
+## D-103 — the transport was one device wide, and one of its bugs was waiting
+
+2026-08-16.
+
+stam had a disk and no way to reach anything outside the machine. Adding a
+network card meant a second virtio device, and the transport could not carry
+one: `virtio.c` was file-static state — `base`, `pci_common`, `vq_desc`, the
+capacity, the ring — serving exactly one device with exactly one queue.
+
+Separating the transport from the block driver was mechanical. What it turned up
+was not.
+
+### The bug that had never fired
+
+Queue setup on the PCI transport read the queue's notify offset and added it
+into the shared notify pointer:
+
+```c
+    uint16_t off = c_rd16(0x1e);
+    pci_notify += (uint64_t)off * notify_mult;
+```
+
+Correct for one queue. For the second it adds the second queue's offset to a
+pointer that already carries the first's, and every kick after that goes to an
+address belonging to nothing. Silently — a write to a valid page that means
+nothing does nothing, so a card would have looked like a card that never
+transmits. It is per queue now, held in the queue.
+
+Nothing had ever asked for a second queue, so nothing had ever been wrong. It is
+the third defect in this kernel found by making a working thing general rather
+than by testing it.
+
+### The half of the feature space nobody read
+
+Feature negotiation read bits 32..63 and wrote zero to bits 0..31. That is
+right for a block device, whose only interesting bit is `VIRTIO_F_VERSION_1` at
+32. Every *device's own* features live in the low word — including
+`VIRTIO_NET_F_MAC`, the bit that says the configuration space carries a real MAC
+address. Without negotiating it the driver would have read six bytes of whatever
+the register happened to hold and used them as its address, and a card that
+invents its own address is a card whose frames nothing answers.
+
+Both halves are negotiated now, and what the two sides agreed on is kept on the
+device, so a driver asks instead of assuming.
+
+### The header that is ten bytes or twelve
+
+Every buffer on both queues carries a `virtio_net_hdr` in front of the frame.
+Ten bytes on a legacy device, twelve on a modern one, because
+`VIRTIO_F_VERSION_1` brings a `num_buffers` field whether or not buffer merging
+was negotiated. Get it wrong by two and the destination MAC reads as the last
+two bytes of the header followed by four of the real address — every frame
+rubbish, no error anywhere. It is computed from what was agreed, and the boot
+line prints it, which is how the two transports were seen to genuinely differ:
+
+```
+  net       virtio-net over mmio v1, 52:54:00:12:34:56, 10-byte header, polled
+  net       virtio-net over pci,     52:54:00:12:34:56, 12-byte header, polled
+```
+
+### The compiler found the one real bug
+
+```
+virtio_net.c:61: warning: array subscript 4 is above array bounds of 'uint64_t[4]'
+```
+
+A completion naming a descriptor never posted was handed straight back to the
+receive queue — an index out of range, with an address read past the end of the
+array. Written as a defensive branch, which is what made it easy to write
+wrongly. The buffer is dropped now and the card is named for doing it.
+
+### Milestone 6
+
+The kernel's other five milestones are stam observing itself: a thread it
+scheduled, a program it loaded, a sector it wrote and read back. Every one of
+them could in principle be produced by a kernel that does nothing and prints
+well.
+
+An ICMP echo reply cannot. It is built by something outside, addressed to a MAC
+address that something outside learned from a frame we sent, carrying a payload
+we chose, with two checksums computed over it — and this kernel verifies both
+before believing a word of it:
+
+```
+  --- 6. is there anything outside this machine? ---
+  10.0.2.2 is at 52:55:0a:00:02:02 — it answered an address we asked for.
+  the echo came back intact in 188 microseconds. yes.
+```
+
+The failing branch names which half failed, because "no reply" covers a card
+that never sent, a gateway that never answered, and a reply refused as
+malformed, and those are three different mornings.
+
+The timing is microseconds off the architected counter and not timer ticks: the
+first version measured in ticks and printed `0 ticks`, a number that reads the
+same whether the reply was instant or the clock is stopped. That is the shape
+this project keeps finding, caught this time in something written an hour
+earlier.
+
+### What it is not
+
+There is no socket, no route table, no DHCP, no TCP, and no program can reach
+any of it. The address is hard-coded and the boot line says so out loud, so
+nobody reads it as discovery. The card is polled, like the disk was before it
+earned its interrupt (D-086).
+
+Verified on both transports, and on a machine with no card at all: zero `net`
+lines, no milestone 6, and the boot finishes as before — the report depends on
+what it reports.

@@ -200,6 +200,20 @@ What it does today, each verified by running it:
   `rm` as ordinary programs with no privileges and nothing the kernel knows
   about them. A directory grows by a cluster when it fills, and `rm` takes a
   file or an empty one (D-085).
+- **A network card, and something answered.** virtio-net over MMIO and PCI,
+  sharing the disk's transport. The kernel asks who has 10.0.2.2, learns an
+  address that is nowhere in its own image, and sends an ICMP echo request; the
+  reply comes back carrying the payload it chose, and it verifies both
+  checksums before believing it. Every other milestone stam prints is stam
+  observing itself — a thread it scheduled, a sector it wrote. This one is the
+  only line in the boot that another machine had to produce (D-103).
+
+      --- 6. is there anything outside this machine? ---
+      10.0.2.2 is at 52:55:0a:00:02:02 — it answered an address we asked for.
+      the echo came back intact in 188 microseconds. yes.
+
+  There is no socket and no DHCP: the address is hard-coded, the boot line says
+  so, and no program can reach any of it yet.
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands
