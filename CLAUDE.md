@@ -69,8 +69,10 @@ per-repo. **Do not change it back to the icloud address** — GitHub attributes 
 commit by its author email and that address resolves to a different account.
 The global identity is different on purpose; leave it alone.
 
-Commit and push only when asked. The repo is public
-(`github.com/wh1xdy/verkos`), which is also why its CI minutes are free.
+Commit and push only when asked. The repo (`github.com/wh1xdy/verkos`) is
+private — a machine without GitHub credentials cannot clone or fetch it, so the
+x86_64 build server is updated by pushing into its checkout over ssh rather than
+by pulling from GitHub.
 
 ## Care
 
