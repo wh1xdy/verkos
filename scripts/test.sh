@@ -1025,7 +1025,7 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
                     -display none -serial "file:$BL" -no-reboot \
                     -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
-                    </dev/null >/dev/null 2>&1 & echo $! > "$T/qpid" )
+                    </dev/null >/dev/null 2>"$T/qemu.err" & echo $! > "$T/qpid" )
                 # Long enough for the scheduler demonstration, which spends two
                 # seconds proving threads are preempted.
                 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
@@ -1046,6 +1046,17 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     printf '  \033[33m--- the boot produced this (%s bytes) ---\033[0m\n' \
                            "$(wc -c < "$BL" 2>/dev/null || echo 0)"
                     head -c 2000 "$BL" 2>/dev/null | sed 's/^/  | /'
+                    # And what QEMU said, which the suite used to send to
+                    # /dev/null. An empty serial log has two very different
+                    # causes — a kernel that faulted before its first character
+                    # and an emulator that never started — and only this tells
+                    # them apart.
+                    if [ -s "$T/qemu.err" ]; then
+                        printf '  \033[33m--- qemu said ---\033[0m\n'
+                        head -c 1000 "$T/qemu.err" | sed 's/^/  | /'
+                    else
+                        printf '  \033[33m--- qemu said nothing ---\033[0m\n'
+                    fi
                     printf '  \033[33m--- end ---\033[0m\n'
                 fi
                 check "stam boots and says which machine it found" \
@@ -1210,7 +1221,7 @@ srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", 15570))
 srv.listen(4)
-srv.settimeout(180)
+srv.settimeout(300)
 for _ in range(3):
     try:
         c, _who = srv.accept()
@@ -1258,7 +1269,12 @@ PYEOF
                     # /out.txt and reading it back. mtools then found a file
                     # with no contents, which is a true report about a machine
                     # that was stopped, and says nothing about the kernel.
-                    for _ in $(seq 1 180); do
+                    # 300 and not 180. The loop ends the moment the shell
+                    # says bye, so a longer ceiling costs a fast machine
+                    # nothing — and on a CI runner with no hardware
+                    # virtualisation this boot took *exactly* 180 seconds and
+                    # was killed, which failed one check and told nobody why.
+                    for _ in $(seq 1 300); do
                         sleep 1
                         grep -aq 'bye' "$SL" 2>/dev/null && break
                     done
