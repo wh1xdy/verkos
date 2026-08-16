@@ -71,3 +71,87 @@ jobs:
             bash -n "$f" || { echo "SYNTAX ERROR: $f"; rc=1; }
           done
           exit $rc
+
+  # ---------------------------------------------------------------------------
+  # The kernel, actually booted.
+  #
+  # Until 2026-08-16 CI proved nothing about stam. It installed qemu-system-x86
+  # and a cross compiler, so the kernel was *built* and then every one of the
+  # sixty-nine checks that boot it printed "skip booting stam (no
+  # qemu-system-aarch64)" — and the job went green. A regression that killed the
+  # boot would have been caught by whoever next ran the suite by hand.
+  #
+  # That is the defect this project keeps finding, wearing a workflow file:
+  # a report that does not depend on what it reports.
+  #
+  # An arm64 runner is used rather than emulating aarch64 on x86, because on it
+  # the native compiler *is* the cross compiler — test.sh already treats an
+  # aarch64 host as needing no CROSS prefix — and because a boot that takes
+  # minutes under emulation takes seconds here.
+  #
+  # There is no /dev/kvm on these runners, so QEMU is still translating. That is
+  # fine and it is why the timeout below is generous.
+  stam:
+    name: Boot stam on arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install what booting a kernel needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex gawk m4 texinfo bc cpio patch \
+            xz-utils gzip tar pkg-config perl python3 libelf-dev \
+            qemu-system-arm qemu-efi-aarch64 \
+            mtools dosfstools parted fdisk bzip2 \
+            libcurl4-openssl-dev liblzma-dev zlib1g-dev
+
+      - name: The tools this job depends on are actually here
+        run: |
+          set -eu
+          # Named individually, because "the install step succeeded" is not the
+          # same claim as "qemu-system-aarch64 exists" — apt is happy to
+          # succeed having installed a package that puts the binary elsewhere.
+          command -v qemu-system-aarch64
+          command -v gcc
+          test "$(uname -m)" = aarch64
+          # The firmware, by the same three paths test.sh looks in. Written as
+          # a loop and not `ls a b | head -1`, because a pipeline's status is
+          # the last command's: with neither file present, ls fails, head
+          # succeeds on nothing, and the step passes having proved the
+          # opposite of what it says.
+          found=""
+          for c in /usr/share/AAVMF/AAVMF_CODE.fd \
+                   /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+                   /usr/share/edk2/aarch64/QEMU_EFI.fd; do
+            [ -f "$c" ] && { found="$c"; break; }
+          done
+          [ -n "$found" ] || { echo "no aarch64 UEFI firmware; the vboot boot would skip"; exit 1; }
+          echo "firmware: $found"
+
+      # pipefail, or the status of this step is tee's and a failing suite is
+      # reported as a passing one — which is the same defect as the job this
+      # replaced, one line further down.
+      - name: make test
+        run: set -o pipefail; make test 2>&1 | tee /tmp/test.log
+
+      # The whole point of the job. `make test` exits zero whether the boot
+      # checks ran or were skipped, so a missing package or a renamed firmware
+      # path would turn this job back into the one it replaced — green, and
+      # proving nothing.
+      - name: The boot checks ran, rather than being skipped
+        run: |
+          set -e
+          if grep -aE 'skip +(booting stam|stam \()' /tmp/test.log; then
+            echo
+            echo "A stam check was skipped on the runner that exists to run it."
+            exit 1
+          fi
+          # And a count, so that a suite reorganised into naming the checks
+          # differently cannot pass this by printing nothing at all.
+          ran=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/test.log |
+                awk '/^== /{s=$0} /^  (ok|FAIL)/{if (s ~ /stam/) n++} END{print n+0}')
+          echo "stam checks that ran: $ran"
+          [ "$ran" -ge 60 ] || { echo "expected at least 60; the suite is not doing what this job assumes"; exit 1; }

@@ -94,11 +94,22 @@ if [ -x "$T/vsign" ]; then
     # out: build vboot against a generated header and look for the key bytes in
     # the binary. A build that silently kept the checked-in zeroes passes every
     # structural check and verifies nothing.
-    if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    # An aarch64 compiler, which on an aarch64 host is the ordinary one. Asking
+    # for the prefixed name specifically skipped this check on exactly the
+    # machines that need no prefix — including the CI runner added to boot the
+    # kernel. The loop that builds vboot for both architectures already gets
+    # this right; this did not.
+    A64_CC=""; A64_PRE=""
+    if [ "$(uname -m)" = aarch64 ]; then
+        A64_CC="${CC:-cc}"
+    elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        A64_CC="aarch64-linux-gnu-gcc"; A64_PRE="aarch64-linux-gnu-"
+    fi
+    if [ -n "$A64_CC" ]; then
         mkdir -p "$T/keydir"
         "$T/vsign" pubhdr "$T/k.pub" > "$T/keydir/vboot-key.h" 2>/dev/null
-        if VBOOT_KEY_DIR="$T/keydir" CC=aarch64-linux-gnu-gcc \
-           OBJCOPY=aarch64-linux-gnu-objcopy LD=aarch64-linux-gnu-ld \
+        if VBOOT_KEY_DIR="$T/keydir" CC="$A64_CC" \
+           OBJCOPY="${A64_PRE}objcopy" LD="${A64_PRE}ld" \
            bash pkg/vboot/build.sh "$T/vbkey" aarch64 >"$T/vbkey.log" 2>&1; then
             # The 32 key bytes, as they would sit in .rodata.
             od -An -tx1 -v "$T/k.pub" | tr -d " \n" > "$T/keyhex"
