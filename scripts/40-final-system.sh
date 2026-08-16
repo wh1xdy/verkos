@@ -1442,8 +1442,18 @@ if [ -z "${VERK_KEEP_SRC:-}" ]; then
         n=${d%/}
         case "${n##*/}" in pip|vpk-recipes) continue ;; esac
         [ -d "$n" ] || continue
-        sz=$(du -sm "$n" 2>/dev/null | cut -f1)
-        rm -rf "$n" 2>/dev/null && freed=$((freed + ${sz:-0}))
+        # head -n1 and the numeric guard, because this cosmetic MB tally must
+        # not be able to emit a scary error. On the x86_64 build server on
+        # 2026-08-16 this line fed bash arithmetic a two-line value — "1" then
+        # "keV\x8a" — from `du -sm` piped through `cut`, both now verkbox after
+        # the takeover above. The garbage could not be reproduced against a
+        # synthetic tree and the source dir was already removed, so the cause
+        # is unproved; what is certain is that a running total for a message
+        # nobody depends on should never break on it. rm has already done the
+        # real work; the number is decoration.
+        sz=$(du -sm "$n" 2>/dev/null | head -n1 | cut -f1)
+        case $sz in ''|*[!0-9]*) sz=0 ;; esac
+        rm -rf "$n" 2>/dev/null && freed=$((freed + sz))
     done
     [ "$freed" -gt 0 ] && echo "==> reclaimed ${freed} MB of unpacked sources (tarballs kept)"
 fi
