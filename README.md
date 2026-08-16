@@ -212,8 +212,23 @@ What it does today, each verified by running it:
       10.0.2.2 is at 52:55:0a:00:02:02 — it answered an address we asked for.
       the echo came back intact in 188 microseconds. yes.
 
-  There is no socket and no DHCP: the address is hard-coded, the boot line says
-  so, and no program can reach any of it yet.
+- **And programs can use it.** DHCP finds the address instead of assuming it —
+  address, netmask, gateway and DNS all out of option fields — and `socket`,
+  `bind`, `sendto` and `recvfrom` carry Linux's numbers, so a descriptor names
+  a socket the same way it names a pipe or a file on the disk. `udpecho` is an
+  ordinary unprivileged program that binds a port, waits for a datagram and
+  sends the bytes back to an address the kernel filled in for it.
+
+  The check on that is the only one in `make test` whose verdict nothing of
+  ours produces: a `python3` process on the build machine sends twenty-one
+  bytes it chose to a forwarded port and compares what comes back itself. For
+  it to agree, the card, the ring, DHCP, ARP, the IPv4 header, the UDP checksum
+  over a pseudo-header that is not in the packet, four system calls and a
+  descriptor table all had to be right (D-104).
+
+  There is no TCP, no fragmentation and no IP options; a socket holds one
+  datagram, and the card is polled, so nothing arrives unless a thread is
+  asking.
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands
@@ -235,9 +250,10 @@ arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: **43 checks** start the kernel under QEMU and read what
-it printed — the scheduler's own verdict, a program's report of its arguments,
-the pages a finished process gave back, a file written to the disk and then read
+`make test` now boots it: **65 checks** cover the kernel — building and linking
+it, and starting it under QEMU to read what it printed: the scheduler's own
+verdict, a program's report of its arguments, the pages a finished process gave
+back, a file written to the disk and then read
 back by mtools and `fsck.fat`, and a second boot with no initrd at all. Each of
 the early ones was validated by breaking the kernel on purpose and watching the
 right ones go red (D-055). CI has no

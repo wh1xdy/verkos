@@ -4703,3 +4703,97 @@ earned its interrupt (D-086).
 Verified on both transports, and on a machine with no card at all: zero `net`
 lines, no milestone 6, and the boot finishes as before — the report depends on
 what it reports.
+
+---
+
+## D-104 — the network belongs to programs now, and the judge is outside
+
+2026-08-16, the same day as D-103.
+
+D-103 gave the kernel a card and a ping. That proved the card worked and left
+the network outside the system: nothing but `main.c` could touch it, and the
+address was a constant with a comment saying it was QEMU's — true of QEMU and
+of nothing else.
+
+Four things closed the gap.
+
+### DHCP, so the address is found rather than assumed
+
+Discover, offer, request, acknowledge, over the UDP the same commit added.
+Address, netmask, gateway and DNS all come out of option fields:
+
+```
+  net       10.0.2.15/255.255.255.0 via 10.0.2.2, dns 10.0.2.3 — from DHCP, not compiled in
+```
+
+The fallback still exists, and it names itself as an assumption — `no DHCP
+answer; assuming 10.0.2.15 via 10.0.2.2` — so the two are never confused by a
+reader skimming a boot log. The suite matches the DHCP line specifically, which
+means a boot that fell back fails the check rather than passing it quietly.
+
+### A dispatcher, so more than one thing can arrive
+
+`net.c` was a straight line: send, then loop reading frames until the expected
+one appeared, discarding everything else. That cannot carry two conversations.
+It is now a poll-and-dispatch core with an ARP cache, an ICMP handler and a
+table of UDP sockets, and the two blocking callers — the kernel waiting for an
+echo, a process waiting in `recvfrom` — drive the same loop.
+
+The kernel also answers ARP requests now, and echo requests. A machine that
+asks and never answers is reachable only until the other end's cache expires,
+which presents as "the network worked for a minute" — the hardest kind of fault
+to read.
+
+### Four system calls, with Linux's numbers
+
+`socket` (198), `bind` (200), `sendto` (206), `recvfrom` (207). A descriptor
+names a socket the same way it names a pipe or a file on the disk, so `fork`
+and `close` needed to learn nothing; `thread_exit` already closes every
+descriptor, so a program that dies on an error path releases its port.
+
+`SOCK_STREAM` is refused rather than accepted and quietly served as datagrams.
+A kernel that hands back a descriptor and then loses data with no error is
+worse than one that says no.
+
+`recvfrom` blocks by polling and yielding, bounded at five seconds. The card
+has no interrupt, so the waiting thread has to be the one that asks — a busy
+wait, written down rather than dressed up, and the same stage the disk was at
+before D-086.
+
+### The judge is not ours
+
+The strongest check in `make test` is now this one, and nothing in this
+repository decides it:
+
+```
+  ok    bytes sent from outside come back unchanged
+```
+
+A `python3` process on the build machine sends twenty-one bytes it chose to a
+forwarded host port, and compares what comes back itself. For it to say
+`ECHO-OK`, all of this had to be right: the card, the ring, DHCP, ARP, the
+IPv4 header, the UDP checksum over a pseudo-header that is not in the packet,
+four system calls, a descriptor table, and an ordinary unprivileged program
+called `udpecho` that binds a port and sends the bytes back to an address the
+kernel filled in for it.
+
+It waits for the program's own "listening" line before sending, rather than
+sleeping and hoping. D-062 is the reason that distinction is not a style
+preference.
+
+### What is still not there
+
+No TCP. No fragmentation, no IP options, no multicast. A socket holds exactly
+one datagram — a second arriving before the first is read is dropped, which UDP
+permits and this kernel can honestly do. `bind` accepts only this machine's
+address or 0.0.0.0. The ARP cache is four entries and evicts the first when
+full. Every one of those is listed in `net.c` so that nobody has to find out by
+reading the code.
+
+### A thing that looked like a bug and was not
+
+`udpecho` runs three times in the boot, because milestone 3 runs the initrd's
+`/init` and milestone 5 runs two copies of it at once. The third is refused its
+port with `-98` (EADDRINUSE) and the second times out with `-11` (EAGAIN).
+Both are correct: two processes may not hold the same port, and only one
+datagram was sent.

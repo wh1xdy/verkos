@@ -23,4 +23,5 @@ ls /
 rm /gone.txt
 rm /adir
 ls /
+udpecho
 exit

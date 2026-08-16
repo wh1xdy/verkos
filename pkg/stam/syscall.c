@@ -12,6 +12,8 @@
 #include "console.h"
 #include "sched.h"
 #include "file.h"
+#include "net.h"
+#include "timer.h"
 #include "lock.h"
 #include "vm.h"
 #include "mmu.h"
@@ -54,6 +56,15 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_DUP     23
 #define SYS_DUP3    24        /* and no dup2 either; dup3 covers it */
 #define SYS_OPENAT  56        /* aarch64 has no open(); openat is the call  */
+/* Sockets. Linux's aarch64 numbers, like every other call here — a program
+ * built for Linux and run on stam must not need a different table. */
+#define SYS_SOCKET    198
+#define SYS_BIND      200
+#define SYS_SENDTO    206
+#define SYS_RECVFROM  207
+
+#define AF_INET      2
+#define SOCK_DGRAM   2
 #define O_WRONLY    1
 #define O_CREAT     0100
 #define O_APPEND    02000
@@ -325,9 +336,136 @@ static int fd_alloc(file_t *f) {
     return -1;
 }
 
+/* struct sockaddr_in, as every program has it: family, port and address, the
+ * last two in network order, then eight bytes nobody uses. Read and written a
+ * byte at a time for the same reason every packet field is (see net.c), and
+ * because the address came from a program and may be at any alignment it
+ * likes. */
+#define SOCKADDR_LEN 16
+
+static int sockaddr_read(uint64_t va, uint64_t len, uint32_t *ip, uint16_t *port) {
+    if (len < SOCKADDR_LEN) return -1;
+    if (!vm_user_ok(va, SOCKADDR_LEN, 0)) return -2;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)va;
+    /* The family is two bytes in the host's order, which on aarch64 is little
+     * endian; the port and address that follow are in the network's. Mixing
+     * the two up is the classic way for a socket call to bind to a port
+     * nobody meant. */
+    uint16_t family = (uint16_t)(p[0] | (p[1] << 8));
+    if (family != AF_INET) return -1;
+    *port = (uint16_t)((p[2] << 8) | p[3]);
+    *ip   = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+            ((uint32_t)p[6] << 8)  |  (uint32_t)p[7];
+    return 0;
+}
+
+static void sockaddr_write(uint64_t va, uint32_t ip, uint16_t port) {
+    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    for (int i = 0; i < SOCKADDR_LEN; i++) p[i] = 0;
+    p[0] = AF_INET; p[1] = 0;
+    p[2] = (uint8_t)(port >> 8); p[3] = (uint8_t)port;
+    p[4] = (uint8_t)(ip >> 24); p[5] = (uint8_t)(ip >> 16);
+    p[6] = (uint8_t)(ip >> 8);  p[7] = (uint8_t)ip;
+}
+
+static uint64_t sys_socket(uint64_t domain, uint64_t type) {
+    /* Only what exists. A kernel that accepts SOCK_STREAM and then behaves
+     * like a datagram socket is worse than one that refuses it: the program
+     * gets a descriptor, sends, and loses data with no error anywhere. */
+    if (domain != AF_INET) return (uint64_t)-97;            /* -EAFNOSUPPORT */
+    if ((type & 0xf) != SOCK_DGRAM) return (uint64_t)-93;   /* -EPROTONOSUPPORT */
+    if (!net_present()) return (uint64_t)-97;
+    file_t *f = 0;
+    int e = file_udp(&f);
+    if (e < 0) return (uint64_t)(int64_t)e;
+    int fd = fd_alloc(f);
+    if (fd < 0) { file_close(f); return (uint64_t)-24; }    /* -EMFILE */
+    return (uint64_t)fd;
+}
+
+static uint64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
+    udp_sock_t *s = file_udp_sock(fd_get(fd));
+    if (!s) return (uint64_t)-88;                           /* -ENOTSOCK */
+    uint32_t ip; uint16_t port;
+    int e = sockaddr_read(addr, len, &ip, &port);
+    if (e == -2) return EFAULT;
+    if (e) return (uint64_t)-22;                            /* -EINVAL */
+    /* The address in a bind is which of this machine's addresses to listen on,
+     * and this machine has one. Anything but that or 0.0.0.0 is a request the
+     * kernel cannot honour, and saying so beats listening on the only address
+     * there is and calling it success. */
+    if (ip && ip != net_my_ip()) return (uint64_t)-99;      /* -EADDRNOTAVAIL */
+    if (udp_bind(s, port) != 0) return (uint64_t)-98;       /* -EADDRINUSE */
+    return 0;
+}
+
+static uint64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
+                           uint64_t addr, uint64_t alen) {
+    udp_sock_t *s = file_udp_sock(fd_get(fd));
+    if (!s) return (uint64_t)-88;
+    if (!vm_user_ok(buf, len, 0)) return EFAULT;
+    uint32_t ip; uint16_t port;
+    int e = sockaddr_read(addr, alen, &ip, &port);
+    if (e == -2) return EFAULT;
+    if (e) return (uint64_t)-22;
+    if (udp_sendto(s, ip, port, (const void *)(uintptr_t)buf, (unsigned)len) != 0)
+        return (uint64_t)-101;                              /* -ENETUNREACH */
+    return len;
+}
+
+/* Blocks, by polling. The card has no interrupt yet, so nothing arrives unless
+ * somebody asks — which means the waiting thread has to be the one that asks.
+ * It yields between attempts, so the machine is not held; it is still a busy
+ * wait and it is written down rather than dressed up.
+ *
+ * Bounded at five seconds. A datagram that never comes must return an error
+ * and not a process that cannot be killed. */
+static uint64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
+                             uint64_t addr, uint64_t alen_ptr) {
+    udp_sock_t *s = file_udp_sock(fd_get(fd));
+    if (!s) return (uint64_t)-88;
+    if (!vm_user_ok(buf, len, 1)) return EFAULT;
+    if (addr) {
+        if (!vm_user_ok(addr, SOCKADDR_LEN, 1)) return EFAULT;
+        if (alen_ptr && !vm_user_ok(alen_ptr, sizeof(uint32_t), 1)) return EFAULT;
+    }
+    if (udp_port(s) == 0 && udp_bind(s, 0) != 0) return (uint64_t)-98;
+
+    uint64_t deadline = timer_ticks() + timer_hz() * 5;
+    for (;;) {
+        net_poll();
+        uint32_t from_ip; uint16_t from_port;
+        int n = udp_recvfrom(s, (void *)(uintptr_t)buf, (unsigned)len,
+                             &from_ip, &from_port);
+        if (n >= 0) {
+            if (addr) {
+                sockaddr_write(addr, from_ip, from_port);
+                if (alen_ptr) *(uint32_t *)(uintptr_t)alen_ptr = SOCKADDR_LEN;
+            }
+            return (uint64_t)n;
+        }
+        if (timer_ticks() >= deadline) return (uint64_t)-11;  /* -EAGAIN */
+        thread_yield();
+    }
+}
+
 static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void *frame) {
     switch (nr) {
     case SYS_READ:  return sys_read(a, b, c);
+    case SYS_SOCKET: return sys_socket(a, b);
+    case SYS_BIND:   return sys_bind(a, b, c);
+    /* Four arguments and five: taken out of the frame, because do_syscall is
+     * handed three. Every other call here fits in three and these two do not,
+     * and reaching into the frame is honest about where the values are rather
+     * than widening every signature for two callers. */
+    case SYS_SENDTO: {
+        frame_t *r = (frame_t *)frame;
+        return sys_sendto(a, b, c, r->x[4], r->x[5]);
+    }
+    case SYS_RECVFROM: {
+        frame_t *r = (frame_t *)frame;
+        return sys_recvfrom(a, b, c, r->x[4], r->x[5]);
+    }
     case SYS_CLONE:  return do_fork(frame);
     case SYS_EXECVE: return do_execve((const char *)(uintptr_t)a,
                                       (char *const *)(uintptr_t)b, frame);

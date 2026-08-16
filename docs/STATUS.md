@@ -4,7 +4,7 @@ Rewritten 2026-07-28. The point of this file is to let a new session start
 without reading the whole history: what is proved, what is merely written, and
 what is known to be wrong.
 
-`make test` — **253 checks**, all passing, run in the `verkbuild` container.
+`make test` — **256 checks**, all passing, run in the `verkbuild` container.
 Run it on an idle machine: several checks boot QEMU and wait for a marker, and
 two suites running at once fail each other's timeouts. The count is also
 host-dependent — some checks are skipped without a network or a cross toolchain,
@@ -66,7 +66,8 @@ Nothing below is inference. Each was checked by running a system.
 | **No initrd** | with the userland on the medium, `/init` comes off the disk and so does every program the shell runs (D-083) |
 | **Interrupt-driven disk** | the device's interrupt is found, enabled, acknowledged and **slept on** — a line printed from the handler says one arrived, and `make test` asserts it (D-086, D-101) |
 | **Directories** | `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir`, `rm` as ordinary programs (D-085) |
-| **A network card** | virtio-net over MMIO **and** PCI, sharing the disk's transport. ARP resolves an address the kernel did not know, and an ICMP echo comes back with the payload we chose and both checksums verified — the one thing stam prints that another machine had to produce (D-103) |
+| **A network card** | virtio-net over MMIO **and** PCI, sharing the disk's transport. ARP resolves an address the kernel did not know, and an ICMP echo comes back with the payload we chose and both checksums verified (D-103) |
+| **The network, for programs** | DHCP finds the address rather than assuming it; `socket`, `bind`, `sendto` and `recvfrom` with Linux's numbers; and `udpecho`, an unprivileged program that answers a datagram. A `python3` process outside the machine sends bytes it chose and checks itself that they came back — the one check in the suite whose verdict nothing of ours produces (D-104) |
 
 ---
 
@@ -130,13 +131,13 @@ run, after three entries of reasoning had each been plausibly wrong.
 
 ## Suggested next steps, in order
 
-1. **Give the network to programs** — the kernel can ping and nothing else can.
-   Sockets, or something smaller with the same effect, plus DHCP so the address
-   is discovered rather than assumed.
-2. **Boot it on real hardware** — everything else is simulation.
-3. **Sync x86_64** — the second architecture is the real test of whether any of
+1. **Boot it on real hardware** — everything else is simulation.
+2. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
-4. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
+3. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
+4. **An interrupt for the card, and TCP** — the card is polled, so nothing
+   arrives unless a thread is asking. Both are the same shape as the disk's
+   path from D-086.
 
 The scheduler question is no longer on this list: it is closed, see the top of
 this file and D-099 to D-101.

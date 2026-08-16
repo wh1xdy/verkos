@@ -1148,13 +1148,48 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # inside QEMU — so this works on a build machine with no
                     # network at all, which is the only reason it belongs in a
                     # suite that must not depend on the outside world.
-                    NIC="-netdev user,id=n0 -device virtio-net-device,netdev=n0"
+                    # A host port forwarded to the guest's 5555, so a process
+                    # on this machine can send a datagram *into* stam. That is
+                    # the whole point of the socket checks below: everything
+                    # else the kernel prints about the network, the kernel
+                    # printed about itself.
+                    NIC="-netdev user,id=n0,hostfwd=udp::15555-:5555 -device virtio-net-device,netdev=n0"
+                    rm -f "$T/echo.result"
                     # shellcheck disable=SC2086
                     ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
                         -display none -serial "file:$SL" -no-reboot $DISK $NIC \
                         -kernel pkg/stam/stam.img \
                         -initrd pkg/stam/progs/initrd-script.cpio \
                         </dev/null >/dev/null 2>&1 & echo $! > "$T/spid" )
+
+                    # Alongside the boot: wait for the program inside to say it
+                    # is listening — its own line, not a length of time — then
+                    # send it bytes and check what comes back. python3 is the
+                    # judge here precisely because it is not ours: nothing in
+                    # this repository is involved in deciding whether the reply
+                    # matched.
+                    if command -v python3 >/dev/null 2>&1; then
+                    (
+                        for _ in $(seq 1 600); do
+                            grep -aq 'udpecho listening' "$SL" 2>/dev/null && break
+                            sleep 0.2
+                        done
+                        python3 - > "$T/echo.result" 2>&1 <<'PYEOF'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(8)
+sent = b"verkos-udp-probe-8f3a"
+try:
+    s.sendto(sent, ("127.0.0.1", 15555))
+    back, _ = s.recvfrom(512)
+    print("ECHO-OK" if back == sent else "ECHO-DIFFERENT")
+except Exception as e:
+    print("ECHO-NONE", e)
+PYEOF
+                    ) &
+                    else
+                        log "no python3; the socket round-trip check will fail"
+                    fi
                     # The script ends with `exit`, so the shell says bye. Wait
                     # for that rather than for a fixed time — and long enough
                     # that a slow first run does not get killed part way. On
@@ -1283,6 +1318,25 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # whether or not a packet moved.
                     check "an echo request comes back with its payload intact" \
                           "grep -aqE 'the echo came back intact in [0-9]+ microseconds\\. yes\\.' $SL"
+
+                    # The address was not compiled in: it came back in a DHCP
+                    # option. A kernel that fell back to the hard-coded one
+                    # prints a different line and fails here.
+                    check "stam gets its address from DHCP rather than assuming one" \
+                          "grep -aqE '^  net       10\\.0\\.2\\.15/255\\.255\\.255\\.0 via 10\\.0\\.2\\.2.* from DHCP, not compiled in' $SL"
+                    # An ordinary program, with no privileges, using socket,
+                    # bind, recvfrom and sendto — Linux's numbers, from a
+                    # process the kernel knows nothing special about.
+                    check "a program binds a port and answers a datagram" \
+                          "grep -aq 'udpecho sent back 21 bytes' $SL"
+                    # And the judge is outside the machine. python3 sent bytes
+                    # it chose to a host port, and compared what came back
+                    # itself; nothing of ours took part in the verdict. This is
+                    # the only check in the suite whose answer is produced by a
+                    # program in another language on the other side of a
+                    # network stack.
+                    check "bytes sent from outside come back unchanged" \
+                          "grep -q ECHO-OK $T/echo.result"
                     # Run from the disk, not from the archive: `diskprog` is in
                     # no initrd, so exec had nowhere else to find it. It prints
                     # the argv it was given, which also says the arguments

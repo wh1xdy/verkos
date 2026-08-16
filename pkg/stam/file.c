@@ -9,6 +9,7 @@
 #include "file.h"
 #include "sched.h"
 #include "fat.h"
+#include "net.h"
 #include "console.h"
 #include "lock.h"
 #include "cpio.h"
@@ -25,6 +26,7 @@
 #define FILE_MEM      5        /* a named buffer that lasts until the reboot  */
 #define FILE_FAT      6        /* off the disk                                */
 #define FILE_FATDIR   7        /* a directory on the disk, only readable as names */
+#define FILE_UDP      8        /* a datagram socket                           */
 
 #define NMEM       4
 #define MEM_SIZE   4096
@@ -56,6 +58,7 @@ struct file {
     const uint8_t *ro;         /* initrd contents, borrowed not owned       */
     uint64_t       ro_len;
     fat_file_t     fat;        /* where it is on the disk, for FILE_FAT     */
+    udp_sock_t    *sock;       /* for FILE_UDP                              */
     int            writable;   /* a FILE_FAT opened for writing              */
     uint64_t       pos;
 };
@@ -74,6 +77,7 @@ static struct file *file_alloc(int kind, pipe_t *p) {
             files[i].ro   = 0;
             files[i].ro_len = 0;
             files[i].pos  = 0;
+            files[i].sock = 0;
             return &files[i];
         }
     return 0;
@@ -265,8 +269,10 @@ void file_close(file_t *f) {
     pipe_t *p = f->pipe;
     int kind = f->kind;
     int was_written = (kind == FILE_FAT && f->writable);
+    udp_sock_t *sock = (kind == FILE_UDP) ? f->sock : 0;
     f->kind = FILE_FREE;
     f->pipe = 0;
+    f->sock = 0;
     if (f == console_file) console_file = 0;
 
     if (p) {
@@ -277,11 +283,29 @@ void file_close(file_t *f) {
     }
     sched_unlock_irq(s);
 
+    /* Outside the lock, for the same reason as the sync below: udp_close walks
+     * the socket table, which no scheduling decision should ever wait for. */
+    if (sock) udp_close(sock);
+
     /* Outside the lock: recounting the free list is a few hundred sector reads,
      * and every scheduling decision on the machine waits behind that lock. On
      * close and not on every write, because the number is a hint to other
      * readers and not something this code depends on. */
     if (was_written) fat_sync();
+}
+
+int file_udp(file_t **out) {
+    udp_sock_t *s = udp_open();
+    if (!s) return -105;                    /* -ENOBUFS: no socket free  */
+    struct file *f = file_alloc(FILE_UDP, 0);
+    if (!f) { udp_close(s); return -24; }   /* -EMFILE                   */
+    f->sock = s;
+    *out = f;
+    return 0;
+}
+
+udp_sock_t *file_udp_sock(file_t *f) {
+    return (f && f->kind == FILE_UDP) ? f->sock : 0;
 }
 
 static unsigned pipe_bytes(const pipe_t *p) {

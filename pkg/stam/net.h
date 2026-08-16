@@ -15,19 +15,51 @@ int  virtio_net_recv(void *out, unsigned max);
 
 /* ---- what runs on top of it ---------------------------------------------
  *
- * Enough to prove the card works both ways and nothing more: address
- * resolution, so a frame can be addressed to a machine named by an IP address,
- * and an echo, so the answer proves the whole path. There is no socket, no
- * routing table and no TCP; a program cannot reach any of this yet. */
+ * Ethernet, ARP, IPv4, ICMP echo and UDP. Enough that a program can send a
+ * datagram and get one back, and no more: there is no TCP, no routing table
+ * beyond "the gateway takes everything not on this network", no fragmentation
+ * and no options.
+ *
+ * The card is polled, so this stack only runs when something calls net_poll —
+ * which the two blocking paths (waiting for a reply, waiting on a socket) do
+ * in their own loops. Nothing arrives while every thread is busy elsewhere.
+ * That is a real limit and it is written down rather than hidden: it is the
+ * same stage the disk was at before it earned its interrupt (D-086). */
 int  net_init(const fdt_t *f);
 int  net_present(void);
+/* Drain the card and dispatch whatever arrived. Cheap when nothing has. */
+void net_poll(void);
+
+/* Our own address, once DHCP has found one — 0 until then. */
+uint32_t net_my_ip(void);
+uint32_t net_gateway(void);
+
 /* Ask who has this address, and wait. 0 if a reply came, and `out` is filled. */
 int  net_arp_resolve(uint32_t ip, uint8_t out[6]);
 /* Send one echo request and wait for its reply. Returns how many microseconds
- * it took, or -1. `check` is set to 1 when the payload came back
- * unchanged, and that is the claim worth making — a reply of the right shape
- * carrying different bytes is not an echo. */
+ * it took, or -1. `check` is set to 1 when the payload came back unchanged,
+ * and that is the claim worth making — a reply of the right shape carrying
+ * different bytes is not an echo. */
 int  net_ping(uint32_t ip, uint16_t seq, int *check);
+
+/* ---- UDP ----------------------------------------------------------------
+ *
+ * A socket holds one datagram. Not a queue: a second arriving before the first
+ * is read replaces nothing and is dropped, which is what UDP permits and what
+ * this kernel can honestly do today. A program that reads in a loop between
+ * sends — which is every program here — never notices. */
+typedef struct udp_sock udp_sock_t;
+udp_sock_t *udp_open(void);
+void        udp_close(udp_sock_t *s);
+/* 0, or -1 if the port is taken. Port 0 means "choose one". */
+int  udp_bind(udp_sock_t *s, uint16_t port);
+uint16_t udp_port(const udp_sock_t *s);
+int  udp_sendto(udp_sock_t *s, uint32_t ip, uint16_t port,
+                const void *buf, unsigned len);
+/* The waiting datagram, or -1 if there is none. Never blocks; the caller polls
+ * so that it, and not this file, decides how long to wait. */
+int  udp_recvfrom(udp_sock_t *s, void *buf, unsigned max,
+                  uint32_t *from_ip, uint16_t *from_port);
 
 #define IPV4(a,b,c,d) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
                        ((uint32_t)(c) << 8)  |  (uint32_t)(d))

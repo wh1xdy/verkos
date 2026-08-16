@@ -53,6 +53,16 @@ void file_set_archive(uint64_t addr, uint64_t size);
 #define OPEN_APPEND  2        /* create, and start at the end */
 int file_open(const char *name, int mode, file_t **out);
 
+/* A datagram socket, as a file object — so that a descriptor means the same
+ * thing whether it names the console, a pipe, a file on the disk or a socket,
+ * and fork and close need to know nothing new. Returns 0, or a negative errno.
+ *
+ * The socket layer is in net.c and this file knows only that the object has to
+ * be released when the last descriptor goes. */
+struct udp_sock;
+int file_udp(file_t **out);
+struct udp_sock *file_udp_sock(file_t *f);   /* 0 when f is not a socket */
+
 file_t *file_ref(file_t *f);   /* one more holder */
 void    file_close(file_t *f); /* one fewer; the last one releases it */
 
