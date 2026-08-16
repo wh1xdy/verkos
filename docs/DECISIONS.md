@@ -4940,3 +4940,66 @@ A related narrowness fixed on the way: the check that a vboot built with a key
 contains that key asked for `aarch64-linux-gnu-gcc` **by name**, so it skipped
 on exactly the machines that need no prefix, including this new runner. The loop
 that builds vboot for both architectures already got this right; this had not.
+
+---
+
+## D-107 — the other half of TCP, where the connection arrives
+
+2026-08-16.
+
+`tcpget` proved the client half: stam calls out, something answers. The half
+left over is the harder one — hold a port open, answer a SYN nothing here asked
+for, build a connection out of it, and hand that connection to a program as an
+ordinary descriptor.
+
+```
+verk$ tcpserve
+tcpserve listening on port 5580
+tcpserve accepted from 10.0.2.2
+tcpserve answered 24 bytes
+```
+
+and outside, from a `python3` client that dialled in:
+
+```
+CLIENT-GOT b'verkos-tcp-echo:knock-knock-from-outside'
+CLIENT-OK
+```
+
+### What it needed
+
+Two states — `LISTEN` and `SYN_RCVD` — and a second way of matching an
+incoming segment. A connection is identified by its four-tuple; a listener has
+only half of one, so it is matched **second** and on the local port alone. A
+SYN with no matching connection goes looking for a listener, takes a free
+socket, and answers.
+
+The final ACK of that handshake **falls through** into the data path rather
+than returning. A client that sends its request in the same segment as the ACK
+is ordinary, and returning early would drop it and make the client retransmit —
+a connection that works and is mysteriously slow, which is worse than one that
+does not work.
+
+A full socket table drops the SYN in silence rather than sending a RST. A reset
+tells the client the port is *closed* when it is merely *busy*, and a client
+that retransmits gets in as soon as a slot frees.
+
+### bind carries the address, listen carries the backlog
+
+The first version had `tcp_listen(s, port)`, which is tidy and wrong: on every
+system the port comes from `bind`. A socket interface that is *nearly* the
+familiar one is worse than an unfamiliar one — a program written against it
+compiles everywhere and works only here. `bind` now takes a connection as well
+as a datagram socket, and `listen` takes what `bind` left.
+
+`accept4`'s flags are refused when non-zero rather than ignored, for the same
+reason `SOCK_STREAM` was refused before it existed: a call that accepts a flag
+it does not honour is a call that lies.
+
+### The address is filled in, not printed
+
+`tcpserve` prints the peer as four numbers read out of the `sockaddr` the
+kernel wrote, and `make test` matches `10.0.2.2` — so a kernel that accepted a
+connection and invented the peer fails that check and not the one above it.
+The byte count comes from the read, so it cannot be printed by a program that
+read nothing.

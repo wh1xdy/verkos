@@ -328,6 +328,18 @@ int file_tcp(file_t **out) {
     return 0;
 }
 
+/* Wrap a connection that already exists — one that arrived and was accepted,
+ * rather than one this end opened. The socket is not created here, which is
+ * the whole difference from file_tcp. */
+int file_tcp_adopt(tcp_sock_t *c, file_t **out) {
+    if (!c) return -22;
+    struct file *f = file_alloc(FILE_TCP, 0);
+    if (!f) { tcp_close(c); return -24; }    /* -EMFILE */
+    f->conn = c;
+    *out = f;
+    return 0;
+}
+
 tcp_sock_t *file_tcp_conn(file_t *f) {
     return (f && f->kind == FILE_TCP) ? f->conn : 0;
 }

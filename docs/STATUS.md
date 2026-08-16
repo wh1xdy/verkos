@@ -4,7 +4,7 @@ Rewritten 2026-07-28. The point of this file is to let a new session start
 without reading the whole history: what is proved, what is merely written, and
 what is known to be wrong.
 
-`make test` — **260 checks**, all passing, run in the `verkbuild` container.
+`make test` — **263 checks**, all passing, run in the `verkbuild` container.
 CI boots the kernel too, on an arm64 runner, and **fails if the boot checks are
 skipped** — before 2026-08-16 they always were, and the job was green anyway
 (D-106).
@@ -71,7 +71,7 @@ Nothing below is inference. Each was checked by running a system.
 | **Directories** | `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir`, `rm` as ordinary programs (D-085) |
 | **A network card** | virtio-net over MMIO **and** PCI, sharing the disk's transport. ARP resolves an address the kernel did not know, and an ICMP echo comes back with the payload we chose and both checksums verified (D-103) |
 | **The network, for programs** | DHCP finds the address rather than assuming it; `socket`, `bind`, `sendto` and `recvfrom` with Linux's numbers; and `udpecho`, an unprivileged program that answers a datagram. A `python3` process outside the machine sends bytes it chose and checks itself that they came back — the one check in the suite whose verdict nothing of ours produces (D-104) |
-| **TCP** | Client side: handshake, cumulative acknowledgement, retransmission, FIN each way. `tcpget` connects to a `python3` server on the host through 10.0.2.2, writes a request and reads the answer with ordinary `read`/`write`. The server — a real stack that never heard of this one — asserts the request arrived byte for byte (D-105) |
+| **TCP, both ways** | Client: handshake, cumulative acknowledgement, retransmission, FIN each way; `tcpget` fetches from a `python3` server on the host, which asserts the request arrived byte for byte (D-105). Server: `bind`, `listen`, `accept` — `tcpserve` holds a port, answers a SYN nothing here asked for, and a `python3` client dialling in gets its own bytes back wrapped (D-107) |
 
 ---
 
@@ -142,7 +142,7 @@ run, after three entries of reasoning had each been plausibly wrong.
 4. **Make TCP fast enough to be used** — one segment in flight means a round
    trip per segment. A window, and reassembly of what arrives out of order, are
    the two that matter.
-5. **listen and accept** — stam opens connections; it cannot receive one.
+
 
 The scheduler question is no longer on this list: it is closed, see the top of
 this file and D-099 to D-101.

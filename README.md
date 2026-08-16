@@ -235,9 +235,14 @@ What it does today, each verified by running it:
   asserts from *both* ends: that it received the request byte for byte, and
   that the reply came back through the stream (D-105).
 
-  One segment in flight, no reassembly, no `listen`, no TIME_WAIT and no
-  options but the maximum segment size. All of it listed at the top of
-  `tcp.c`.
+  And the other direction, which is the harder half: `tcpserve` calls `bind`,
+  `listen` and `accept`, so the kernel holds a port open, answers a SYN nothing
+  asked for, and hands the connection to a program as an ordinary descriptor.
+  A `python3` client dialling in gets its own bytes back wrapped, and checks
+  that itself (D-107).
+
+  One segment in flight, no reassembly, no TIME_WAIT and no options but the
+  maximum segment size. All of it listed at the top of `tcp.c`.
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands
@@ -259,7 +264,7 @@ arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: **69 checks** cover the kernel — building and linking
+`make test` now boots it: **72 checks** cover the kernel — building and linking
 it, and starting it under QEMU to read what it printed: the scheduler's own
 verdict, a program's report of its arguments, the pages a finished process gave
 back, a file written to the disk and then read

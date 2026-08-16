@@ -20,8 +20,9 @@
  *   - **No reassembly.** A segment arriving out of order is dropped and the
  *     acknowledgement repeats what we still want. The sender retransmits, and
  *     over a link that reorders, throughput collapses. It does not corrupt.
- *   - **No listen or accept.** This end opens connections; it does not receive
- *     them.
+ *   - **One connection per listener at a time in the backlog.** A second SYN
+ *     arriving before the first is accepted is answered and queued; a fifth is
+ *     dropped, and the client retransmits.
  *   - **No TIME_WAIT.** After the last acknowledgement the socket is free
  *     immediately, so a port reused within the network's memory could confuse
  *     a stale segment for a new one. The ports are ephemeral and the machine
@@ -52,13 +53,14 @@
 #define F_PSH  0x08
 #define F_ACK  0x10
 
-#define NTCP       4
+#define NTCP       6
 #define RXBUF      4096
 #define MSS        1400          /* 1500 - 20 - 20, rounded down */
 #define RETRIES    6
 #define RTO_TICKS  1             /* one timer tick; the timer runs at 100 Hz */
 
-enum { T_FREE = 0, T_SYN_SENT, T_ESTABLISHED, T_CLOSE_WAIT, T_FIN_WAIT, T_CLOSED };
+enum { T_FREE = 0, T_LISTEN, T_SYN_SENT, T_SYN_RCVD,
+       T_ESTABLISHED, T_CLOSE_WAIT, T_FIN_WAIT, T_CLOSED };
 
 struct tcp_sock {
     int      state;
@@ -71,6 +73,10 @@ struct tcp_sock {
     unsigned rxlen;
     int      fin_seen;           /* they have closed their half             */
     int      reset;              /* they sent RST; every call fails now     */
+    /* For a connection that arrived rather than one we opened: which
+     * listening socket it belongs to until somebody accepts it. Cleared on
+     * accept, so an accepted connection is nobody's backlog. */
+    struct tcp_sock *parent;
 };
 static struct tcp_sock socks[NTCP];
 static uint16_t next_port = 40000;
@@ -143,8 +149,42 @@ void tcp_input(const uint8_t *seg, unsigned n, uint32_t src) {
 
     struct tcp_sock *s = 0;
     for (int i = 0; i < NTCP; i++)
-        if (socks[i].state != T_FREE && socks[i].lport == dport &&
+        if (socks[i].state != T_FREE && socks[i].state != T_LISTEN &&
+            socks[i].lport == dport &&
             socks[i].rport == sport && socks[i].rip == src) { s = &socks[i]; break; }
+
+    /* No connection, but perhaps somebody is listening. The four-tuple is what
+     * identifies a connection, and a listener has only half of one — which is
+     * why it is matched second and on the port alone. */
+    if (!s && (flags & F_SYN) && !(flags & F_ACK)) {
+        struct tcp_sock *l = 0;
+        for (int i = 0; i < NTCP; i++)
+            if (socks[i].state == T_LISTEN && socks[i].lport == dport) { l = &socks[i]; break; }
+        if (!l) return;
+        struct tcp_sock *c = 0;
+        for (int i = 0; i < NTCP; i++)
+            if (socks[i].state == T_FREE) { c = &socks[i]; break; }
+        /* No room. Dropped in silence rather than refused, because a RST tells
+         * the client the port is closed when it is merely busy — and a client
+         * that retransmits its SYN gets in as soon as a slot frees. */
+        if (!c) return;
+
+        uint64_t t; __asm__ volatile("mrs %0, cntpct_el0" : "=r"(t));
+        c->state    = T_SYN_RCVD;
+        c->lport    = dport;
+        c->rport    = sport;
+        c->rip      = src;
+        c->rxlen    = 0;
+        c->fin_seen = 0;
+        c->reset    = 0;
+        c->parent   = l;
+        c->rcv_nxt  = seq + 1;               /* their SYN occupies one */
+        uint32_t iss = (uint32_t)t;
+        c->snd_una  = iss;
+        c->snd_nxt  = iss + 1;               /* and so does ours */
+        send_seg(c, F_SYN | F_ACK, iss, 0, 0, 1);
+        return;
+    }
     if (!s) return;
 
     if (flags & F_RST) { s->reset = 1; s->state = T_CLOSED; return; }
@@ -163,6 +203,15 @@ void tcp_input(const uint8_t *seg, unsigned n, uint32_t src) {
         s->state = T_ESTABLISHED;
         send_seg(s, F_ACK, s->snd_nxt, 0, 0, 0);
         return;
+    }
+
+    if (s->state == T_SYN_RCVD) {
+        if (!(flags & F_ACK) || ack != s->snd_nxt) return;
+        s->snd_una = ack;
+        s->state = T_ESTABLISHED;
+        /* Falls through: the same segment may carry data, and a client that
+         * sends its request in the ACK — which is ordinary — would otherwise
+         * have it dropped and have to retransmit. */
     }
 
     if (flags & F_ACK) {
@@ -203,10 +252,60 @@ tcp_sock_t *tcp_open(void) {
             struct tcp_sock *s = &socks[i];
             s->state = T_CLOSED;
             s->rxlen = 0; s->fin_seen = 0; s->reset = 0;
-            s->lport = 0; s->rport = 0; s->rip = 0;
+            s->lport = 0; s->rport = 0; s->rip = 0; s->parent = 0;
             return s;
         }
     return 0;
+}
+
+/* The port comes from bind, as it does on any system: listen carries a backlog
+ * and not an address. Writing it the other way round would have been a socket
+ * interface that is nearly the familiar one, which is worse than an unfamiliar
+ * one — a program written against it would compile everywhere and work here. */
+int tcp_bind(tcp_sock_t *s, uint16_t port) {
+    if (!s || s->state != T_CLOSED) return -22;
+    for (int i = 0; i < NTCP; i++)
+        if (&socks[i] != s && socks[i].state == T_LISTEN && socks[i].lport == port)
+            return -98;                                    /* -EADDRINUSE */
+    s->lport = port;
+    return 0;
+}
+
+int tcp_listen(tcp_sock_t *s) {
+    if (!s || s->state != T_CLOSED || !net_present()) return -22;
+    if (s->lport == 0) return -22;                         /* bind first */
+    for (int i = 0; i < NTCP; i++)
+        if (&socks[i] != s && socks[i].state == T_LISTEN && socks[i].lport == s->lport)
+            return -98;
+    s->rport  = 0;
+    s->rip    = 0;
+    s->parent = 0;
+    s->state  = T_LISTEN;
+    return 0;
+}
+
+uint32_t tcp_peer_ip(const tcp_sock_t *s)   { return s ? s->rip : 0; }
+uint16_t tcp_peer_port(const tcp_sock_t *s) { return s ? s->rport : 0; }
+
+/* The next connection that finished its handshake, or null at the deadline.
+ *
+ * Polls, like everything else that waits here: the card's frames are dispatched
+ * by whoever is waiting for them, so a listener that slept without polling
+ * would never see the SYN that is meant to wake it. */
+tcp_sock_t *tcp_accept(tcp_sock_t *s, uint64_t ticks) {
+    if (!s || s->state != T_LISTEN) return 0;
+    uint64_t deadline = timer_ticks() + ticks;
+    for (;;) {
+        net_poll();
+        for (int i = 0; i < NTCP; i++)
+            if (socks[i].parent == s &&
+                (socks[i].state == T_ESTABLISHED || socks[i].state == T_CLOSE_WAIT)) {
+                socks[i].parent = 0;          /* accepted; nobody's backlog now */
+                return &socks[i];
+            }
+        if (timer_ticks() >= deadline) return 0;
+        net_wait(1);
+    }
 }
 
 int tcp_connect(tcp_sock_t *s, uint32_t ip, uint16_t port) {
@@ -312,6 +411,11 @@ long tcp_recv(tcp_sock_t *s, uint8_t *buf, unsigned max) {
 
 void tcp_close(tcp_sock_t *s) {
     if (!s) return;
+    /* A listener has no connection to end. Freeing it also frees its port,
+     * which is what a program expects when it closes the socket it listened
+     * on. Connections it already handed out are unaffected: accept cleared
+     * their parent. */
+    if (s->state == T_LISTEN) { s->state = T_FREE; return; }
     if (s->state == T_ESTABLISHED || s->state == T_CLOSE_WAIT) {
         send_seg(s, F_ACK | F_FIN, s->snd_nxt, 0, 0, 0);
         s->snd_nxt++;

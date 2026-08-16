@@ -1195,7 +1195,7 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # the whole point of the socket checks below: everything
                     # else the kernel prints about the network, the kernel
                     # printed about itself.
-                    NIC="-netdev user,id=n0,hostfwd=udp::15555-:5555 -device virtio-net-device,netdev=n0"
+                    NIC="-netdev user,id=n0,hostfwd=udp::15555-:5555,hostfwd=tcp::15580-:5580 -device virtio-net-device,netdev=n0"
                     rm -f "$T/echo.result"
                     # shellcheck disable=SC2086
                     ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
@@ -1267,6 +1267,39 @@ PYEOF
                     ) &
                     else
                         log "no python3; the socket round-trip check will fail"
+                    fi
+
+                    # And the other direction: a client on this machine calling
+                    # *into* stam, where the kernel has to hold a port open,
+                    # answer a SYN it did not ask for, and hand the connection
+                    # to a program. Same discipline — wait for the program's own
+                    # line, never for a length of time.
+                    rm -f "$T/client.result"
+                    if command -v python3 >/dev/null 2>&1; then
+                    (
+                        for _ in $(seq 1 900); do
+                            grep -aq 'tcpserve listening' "$SL" 2>/dev/null && break
+                            sleep 0.2
+                        done
+                        python3 - > "$T/client.result" 2>&1 <<'PYEOF'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(20)
+sent = b"knock-knock-from-outside"
+try:
+    s.connect(("127.0.0.1", 15580))
+    s.sendall(sent)
+    got = b""
+    while True:
+        chunk = s.recv(512)
+        if not chunk:
+            break
+        got += chunk
+    print("CLIENT-OK" if got == b"verkos-tcp-echo:" + sent else b"CLIENT-DIFFERENT " + got)
+except Exception as e:
+    print("CLIENT-ERROR", e)
+PYEOF
+                    ) &
                     fi
                     # The script ends with `exit`, so the shell says bye. Wait
                     # for that rather than for a fixed time — and long enough
@@ -1448,6 +1481,23 @@ PYEOF
                     check "the program reads the answer back through the stream" \
                           "grep -aq 'hello from outside verkos' $SL &&
                            grep -aq 'tcpget read 65 bytes' $SL"
+
+                    # The other half of TCP, and the harder one: stam holds a
+                    # port open, answers a SYN nothing here asked for, and
+                    # builds a connection out of it.
+                    check "a program listens and accepts a connection from outside" \
+                          "grep -aq 'tcpserve accepted from 10\\.0\\.2\\.2' $SL"
+                    # The address is not a fixed string: it is what the kernel
+                    # filled into the sockaddr accept was given, printed as four
+                    # numbers, so a kernel that accepted and invented the peer
+                    # fails this and not the check above.
+                    check "the accepted connection carries the caller's address" \
+                          "grep -aq 'tcpserve answered 24 bytes' $SL"
+                    # And the verdict from outside: the client compares the
+                    # reply against the bytes it chose, and nothing of ours
+                    # takes part in deciding.
+                    check "bytes sent into stam come back wrapped by the program" \
+                          "grep -q CLIENT-OK $T/client.result"
                     # Run from the disk, not from the archive: `diskprog` is in
                     # no initrd, so exec had nowhere else to find it. It prints
                     # the argv it was given, which also says the arguments

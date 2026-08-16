@@ -7,6 +7,16 @@
 typedef struct tcp_sock tcp_sock_t;
 
 tcp_sock_t *tcp_open(void);
+/* Take a port. As everywhere else, the address is bind's and listen carries
+ * only a backlog. 0, or -98 if something already listens there. */
+int  tcp_bind(tcp_sock_t *s, uint16_t port);
+int  tcp_listen(tcp_sock_t *s);
+/* Who is at the other end, for accept to report. */
+uint32_t tcp_peer_ip(const tcp_sock_t *s);
+uint16_t tcp_peer_port(const tcp_sock_t *s);
+/* The next connection that finished its handshake, or null at the deadline
+ * (in timer ticks). The returned socket is a connection of its own. */
+tcp_sock_t *tcp_accept(tcp_sock_t *s, uint64_t ticks);
 /* Three-way handshake. 0, or a negative errno: -111 refused, -110 timed out. */
 int  tcp_connect(tcp_sock_t *s, uint32_t ip, uint16_t port);
 /* Stop and wait: every segment is acknowledged before the next goes out. */

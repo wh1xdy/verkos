@@ -186,6 +186,11 @@ progs/tcpget.elf: progs/tcpget.c progs/syscalls.h
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Answers a connection that came from outside: bind, listen, accept.
+progs/tcpserve.elf: progs/tcpserve.c progs/syscalls.h
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -205,7 +210,7 @@ progs/vsh.elf: progs/vsh.c
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
                           progs/forky.elf progs/twice.elf progs/badptr.elf \
                           progs/catch.elf progs/ls.elf progs/mkdir.elf \
-                          progs/rm.elf progs/udpecho.elf progs/tcpget.elf progs/rc
+                          progs/rm.elf progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf progs/rc
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/scriptroot && mkdir -p progs/scriptroot
@@ -223,6 +228,7 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/rm.elf progs/scriptroot/rm
 	@cp progs/udpecho.elf progs/scriptroot/udpecho
 	@cp progs/tcpget.elf progs/scriptroot/tcpget
+	@cp progs/tcpserve.elf progs/scriptroot/tcpserve
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
@@ -255,7 +261,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
        progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf \
-       progs/udpecho.elf progs/tcpget.elf \
+       progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf \
        progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio
 
 run-prog: stam.img progs/hello.elf

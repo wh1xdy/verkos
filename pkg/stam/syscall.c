@@ -64,6 +64,9 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_SENDTO    206
 #define SYS_RECVFROM  207
 #define SYS_CONNECT   203
+#define SYS_LISTEN    201
+#define SYS_ACCEPT    202
+#define SYS_ACCEPT4   242
 
 #define AF_INET      2
 #define SOCK_DGRAM   2
@@ -388,8 +391,10 @@ static uint64_t sys_socket(uint64_t domain, uint64_t type) {
 }
 
 static uint64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
-    udp_sock_t *s = file_udp_sock(fd_get(fd));
-    if (!s) return (uint64_t)-88;                           /* -ENOTSOCK */
+    file_t *f = fd_get(fd);
+    udp_sock_t *s = file_udp_sock(f);
+    tcp_sock_t *c = file_tcp_conn(f);
+    if (!s && !c) return (uint64_t)-88;                     /* -ENOTSOCK */
     uint32_t ip; uint16_t port;
     int e = sockaddr_read(addr, len, &ip, &port);
     if (e == -2) return EFAULT;
@@ -399,6 +404,7 @@ static uint64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
      * kernel cannot honour, and saying so beats listening on the only address
      * there is and calling it success. */
     if (ip && ip != net_my_ip()) return (uint64_t)-99;      /* -EADDRNOTAVAIL */
+    if (c) return (uint64_t)(int64_t)tcp_bind(c, port);
     if (udp_bind(s, port) != 0) return (uint64_t)-98;       /* -EADDRINUSE */
     return 0;
 }
@@ -411,6 +417,39 @@ static uint64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t len) {
     if (e == -2) return EFAULT;
     if (e) return (uint64_t)-22;
     return (uint64_t)(int64_t)tcp_connect(c, ip, port);
+}
+
+static uint64_t sys_listen(uint64_t fd, uint64_t backlog) {
+    (void)backlog;   /* the depth is what the socket table has free, and
+                      * pretending to honour a number would be a lie in an
+                      * argument */
+    tcp_sock_t *c = file_tcp_conn(fd_get(fd));
+    if (!c) return (uint64_t)-88;                           /* -ENOTSOCK */
+    return (uint64_t)(int64_t)tcp_listen(c);
+}
+
+static uint64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t alen_ptr) {
+    tcp_sock_t *l = file_tcp_conn(fd_get(fd));
+    if (!l) return (uint64_t)-88;
+    if (addr) {
+        if (!vm_user_ok(addr, SOCKADDR_LEN, 1)) return EFAULT;
+        if (alen_ptr && !vm_user_ok(alen_ptr, sizeof(uint32_t), 1)) return EFAULT;
+    }
+    /* Bounded, like every wait in this kernel: a listener nobody ever calls
+     * must return an error rather than become a process that cannot be
+     * killed. */
+    tcp_sock_t *c = tcp_accept(l, timer_hz() * 10);
+    if (!c) return (uint64_t)-11;                           /* -EAGAIN */
+    file_t *f = 0;
+    int e = file_tcp_adopt(c, &f);
+    if (e < 0) return (uint64_t)(int64_t)e;
+    int nfd = fd_alloc(f);
+    if (nfd < 0) { file_close(f); return (uint64_t)-24; }    /* -EMFILE */
+    if (addr) {
+        sockaddr_write(addr, tcp_peer_ip(c), tcp_peer_port(c));
+        if (alen_ptr) *(uint32_t *)(uintptr_t)alen_ptr = SOCKADDR_LEN;
+    }
+    return (uint64_t)nfd;
 }
 
 static uint64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
@@ -472,6 +511,15 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
     case SYS_SOCKET: return sys_socket(a, b);
     case SYS_BIND:   return sys_bind(a, b, c);
     case SYS_CONNECT: return sys_connect(a, b, c);
+    case SYS_LISTEN:  return sys_listen(a, b);
+    /* accept4's flags are the fourth argument and nothing here implements
+     * any of them, so a non-zero one is refused rather than ignored. */
+    case SYS_ACCEPT4: {
+        frame_t *r = (frame_t *)frame;
+        if (r->x[3]) return (uint64_t)-22;                  /* -EINVAL */
+        return sys_accept(a, b, c);
+    }
+    case SYS_ACCEPT:  return sys_accept(a, b, c);
     /* Four arguments and five: taken out of the frame, because do_syscall is
      * handed three. Every other call here fits in three and these two do not,
      * and reaching into the frame is honest about where the values are rather

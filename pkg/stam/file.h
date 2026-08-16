@@ -67,6 +67,8 @@ struct udp_sock *file_udp_sock(file_t *f);   /* 0 when f is not a socket */
  * the whole point: a program that reads a stream does not need to know it is a
  * network. */
 int file_tcp(file_t **out);
+/* The same, for a connection that arrived and was accepted. */
+int file_tcp_adopt(struct tcp_sock *c, file_t **out);
 struct tcp_sock *file_tcp_conn(file_t *f);   /* 0 when f is not a connection */
 
 file_t *file_ref(file_t *f);   /* one more holder */
