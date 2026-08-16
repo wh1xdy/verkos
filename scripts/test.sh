@@ -1036,6 +1036,18 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 kill "$(cat "$T/qpid")" 2>/dev/null
                 wait "$(cat "$T/qpid")" 2>/dev/null
 
+                # A boot that produced nothing is a boot whose log is the
+                # only useful thing left, and until 2026-08-16 the suite threw
+                # it away: on a new machine every check below failed with no
+                # indication of whether QEMU had refused to start, the kernel
+                # had faulted, or it had simply been slow. One round trip
+                # through CI to find that out is one too many.
+                if ! grep -aq 'stam 0.1 — the VerkOS kernel' "$BL"; then
+                    printf '  \033[33m--- the boot produced this (%s bytes) ---\033[0m\n' \
+                           "$(wc -c < "$BL" 2>/dev/null || echo 0)"
+                    head -c 2000 "$BL" 2>/dev/null | sed 's/^/  | /'
+                    printf '  \033[33m--- end ---\033[0m\n'
+                fi
                 check "stam boots and says which machine it found" \
                       "grep -aq 'stam 0.1 — the VerkOS kernel' $BL"
                 check "stam reaches userspace and reports the console it found" \
