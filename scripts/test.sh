@@ -1022,7 +1022,15 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
             if ( cd pkg/stam && make CROSS="$STAM_CROSS" progs >/dev/null 2>&1 ) &&
                [ -f pkg/stam/stam.img ] && [ -f pkg/stam/progs/initrd.cpio ]; then
                 BL=$T/stam-boot.log
-                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                # -nic none: QEMU adds a virtio-net-pci card when no network is asked
+                # for, that card wants an option ROM, and a machine without
+                # ipxe-qemu installed makes QEMU exit before it executes a
+                # single instruction. The serial log is then zero bytes, which
+                # reads exactly like a kernel that faulted on its first line.
+                # These boots are about the scheduler and about programs; the
+                # card was never wanted, and a test should say which machine it
+                # is asking for rather than inherit one.
+                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nic none \
                     -display none -serial "file:$BL" -no-reboot \
                     -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
                     </dev/null >/dev/null 2>"$T/qemu.err" & echo $! > "$T/qpid" )
@@ -1098,7 +1106,7 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                 # a call that was accepted and a processor that was running
                 # (D-076).
                 SM=$T/stam-smp.log
-                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nic none \
                     -smp 2 -display none -serial "file:$SM" -no-reboot \
                     -kernel pkg/stam/stam.img -initrd pkg/stam/progs/initrd.cpio \
                     </dev/null >/dev/null 2>&1 & echo $! > "$T/qpid" )
@@ -1521,7 +1529,7 @@ PYEOF
                     if [ -n "$DISK" ]; then
                         NL=$T/noinitrd.log
                         # shellcheck disable=SC2086
-                        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 \
+                        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512 -nic none \
                             -display none -serial "file:$NL" -no-reboot $DISK \
                             -kernel pkg/stam/stam.img \
                             </dev/null >/dev/null 2>&1 & echo $! > "$T/npid" )
@@ -1599,7 +1607,7 @@ if [ "$STAM_CROSS" != none ] && [ -n "$SFW" ] && \
         dd if=/dev/zero of="$S/code.fd" bs=1M count=64 status=none 2>/dev/null
         dd if="$SFW" of="$S/code.fd" conv=notrunc status=none 2>/dev/null
         dd if=/dev/zero of="$S/vars.fd" bs=1M count=64 status=none 2>/dev/null
-        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 \
+        ( qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 -nic none \
             -display none -no-reboot \
             -drive if=pflash,format=raw,file="$S/code.fd",readonly=on \
             -drive if=pflash,format=raw,file="$S/vars.fd" \

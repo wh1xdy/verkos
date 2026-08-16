@@ -104,7 +104,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bison flex gawk m4 texinfo bc cpio patch \
             xz-utils gzip tar pkg-config perl python3 libelf-dev \
-            qemu-system-arm qemu-efi-aarch64 \
+            qemu-system-arm qemu-efi-aarch64 ipxe-qemu \
             mtools dosfstools parted fdisk bzip2 \
             libcurl4-openssl-dev liblzma-dev zlib1g-dev
 
@@ -130,6 +130,12 @@ jobs:
           done
           [ -n "$found" ] || { echo "no aarch64 UEFI firmware; the vboot boot would skip"; exit 1; }
           echo "firmware: $found"
+          # virtio-blk-pci wants an option ROM, and without it QEMU exits
+          # before executing an instruction — leaving a zero-byte serial log
+          # that reads exactly like a kernel faulting on its first line. That
+          # cost a round trip through CI to diagnose; it is now a named
+          # precondition.
+          test -f /usr/lib/ipxe/qemu/efi-virtio.rom
 
       # pipefail, or the status of this step is tee's and a failing suite is
       # reported as a passing one — which is the same defect as the job this
