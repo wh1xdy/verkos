@@ -494,10 +494,22 @@ fi
 # cmake is build tooling, like meson/ninja/python: json-c has been cmake-only
 # since 0.14, and json-c is what cryptsetup parses LUKS2 headers with. Stage 60
 # deletes it from the image again.
+#
+# -DCMAKE_USE_OPENSSL=OFF, because cmake's bootstrap builds a bundled curl and
+# that curl wants OpenSSL — which is not built until 260 lines below this, so
+# cmake's configure failed with "Could not find OpenSSL". It only ever appeared
+# to work because an earlier rootfs still had openssl lying around from a
+# previous pass; on a rootfs where the final-system packages had been cleaned
+# but the toolchain kept, cmake is genuinely reached before openssl and stops
+# the whole build. Reordering would work too, but this cmake is throwaway build
+# tooling for one package and never fetches anything over the network, so the
+# TLS in its curl is dead weight. Turning it off removes the dependency rather
+# than satisfying it. bootstrap passes flags after `--` to the internal cmake.
 if need cmake; then
 say "cmake ${CMAKE_VERSION} (build tooling for json-c)"
 d=$(unpack cmake-${CMAKE_VERSION}.tar.gz); cd "$d"
-./bootstrap --prefix=/usr --parallel=$(nproc 2>/dev/null || echo 2) --no-qt-gui
+./bootstrap --prefix=/usr --parallel=$(nproc 2>/dev/null || echo 2) --no-qt-gui \
+    -- -DCMAKE_USE_OPENSSL=OFF
 make; make install
 cd /sources; mark cmake
 fi
