@@ -35,6 +35,14 @@ need "$QEMU_BIN" "qemu-system"
 if ! is_native; then
     need "${QEMU_USER}-static" "qemu-user-static"
 fi
+# The EFI system partition is a FAT image, and pkg/vboot/build.sh fills it with
+# mtools' mmd/mcopy (stage 70), as does the live ISO (stage 71). Checked here
+# because it is missing exactly the way it hurts most: a machine with the whole
+# toolchain but no mtools builds the entire system and the kernel — the long
+# part — and then dies in the boot stage on `mmd: command not found`. Found on
+# the x86_64 build server on 2026-08-16, after everything up to the ext4 image
+# had succeeded.
+need mmd "mtools"; need mcopy "mtools"
 
 # Disk space check (need lots).
 avail_gb="$(df -Pk "$VERK_ROOT" | awk 'NR==2{print int($4/1024/1024)}')"
