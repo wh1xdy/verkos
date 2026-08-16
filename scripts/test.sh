@@ -1322,6 +1322,12 @@ PYEOF
                     # The address was not compiled in: it came back in a DHCP
                     # option. A kernel that fell back to the hard-coded one
                     # prints a different line and fails here.
+                    # Printed from the handler and nowhere else, so it cannot
+                    # appear on a machine whose card never raised anything —
+                    # which is exactly what a line at set-up time would have
+                    # done. Before it, every wait for a frame was a spin.
+                    check "the card's interrupt arrives and waits sleep for it" \
+                          "grep -aq \"the card's interrupt arrived\" $SL"
                     check "stam gets its address from DHCP rather than assuming one" \
                           "grep -aqE '^  net       10\\.0\\.2\\.15/255\\.255\\.255\\.0 via 10\\.0\\.2\\.2.* from DHCP, not compiled in' $SL"
                     # An ordinary program, with no privileges, using socket,

@@ -20,18 +20,24 @@
  * looks like it is receiving nothing but rubbish. So it is computed from what
  * the two sides actually agreed on, not assumed.
  *
- * ---- polled ----
+ * ---- polled until it is not ----
  *
- * The card's interrupt is not used. The disk earned its interrupt by first
- * working polled and then proving one arrived (D-086), and the same order is
- * right here: what is being shown is that the card sends and receives at all.
- * A driver that sleeps for something that never comes is a machine that stops.
+ * The card's interrupt is enabled where the device tree names one, and not
+ * relied on until one has actually arrived. Until then every wait spins. That
+ * order is the disk's (D-086) and it is not caution for its own sake: "the
+ * tree named an interrupt" and "the interrupt arrives" are different claims,
+ * and a driver that sleeps for something that never comes is a machine that
+ * stops. On the PCI transport there is no number to enable — the routing is in
+ * the bridge's interrupt-map, which vboot's synthetic tree does not carry — so
+ * that path stays polled and the boot line says so.
  */
 #include "virtio.h"
 #include "net.h"
 #include "mmu.h"
 #include "console.h"
 #include "lock.h"
+#include "sched.h"
+#include "gic.h"
 #include <stdint.h>
 
 #define VIRTIO_NET      1        /* device id */
@@ -56,6 +62,31 @@ static uint8_t *rx_buf[RX_BUFFERS];
 static uint64_t rx_phys[RX_BUFFERS];
 static uint8_t *tx_buf;
 static uint64_t tx_phys;
+
+/* Earned by one interrupt and then trusted. */
+static volatile int irq_works;
+static const char   net_token;   /* an address to wait on, nothing more */
+
+int virtio_net_irq_works(void) { return irq_works; }
+const void *virtio_net_wait_token(void) { return &net_token; }
+
+/* Acknowledge and wake. Nothing else: whoever was waiting reads the ring
+ * itself, and doing it here would be a handler touching state whose owner is
+ * asleep rather than gone. */
+void virtio_net_interrupt(void) {
+    if (!present) return;
+    virtio_ack(&dev);
+    /* Said once, and only from here. A line printed where the driver is set up
+     * would say the same thing whether or not the card ever raised anything,
+     * which is the report this project keeps finding. */
+    if (!irq_works) {
+        irq_works = 1;
+        kprintf("  net       the card's interrupt arrived; waits sleep now\n");
+    }
+    uint64_t s = sched_lock_irq();
+    thread_wake_pipe(&net_token);
+    sched_unlock_irq(s);
+}
 
 static void rx_post(unsigned i) {
     rxq.desc[i].addr  = rx_phys[i];
@@ -107,9 +138,16 @@ int virtio_net_init(const fdt_t *f) {
     for (unsigned i = 0; i < RX_BUFFERS; i++) rx_post(i);
 
     present = 1;
+
+    if (dev.irq >= 0) {
+        gic_set_net_irq(dev.irq);
+        gic_enable_irq((unsigned)dev.irq);
+    }
+
     kprintf("  net       virtio-net over %s, %02x:%02x:%02x:%02x:%02x:%02x, "
-            "%u-byte header, polled\n",
-            dev.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], hdr_size);
+            "%u-byte header, %s\n",
+            dev.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], hdr_size,
+            dev.irq >= 0 ? "interrupt enabled" : "polled");
     return 0;
 }
 

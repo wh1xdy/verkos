@@ -386,6 +386,24 @@ static void handle_ipv4(const uint8_t *r, int n) {
     else if (ip[9] == IP_UDP) handle_udp(payload, plen, src);
 }
 
+/* Wait for something to arrive.
+ *
+ * Sleeps once the card's interrupt has proved itself, and spins before that —
+ * on the PCI transport, where there is no interrupt number to enable, it spins
+ * forever, which is why the boot line says which of the two this machine got.
+ *
+ * The bound is the caller's, and there always is one: every wait in this file
+ * ends in an error rather than in a machine that stops. */
+void net_wait(uint64_t ticks) {
+    if (virtio_net_irq_works()) {
+        uint64_t s = sched_lock_irq();
+        thread_block_on_pipe_until(virtio_net_wait_token(), ticks);
+        sched_unlock_irq(s);
+    } else {
+        thread_yield();
+    }
+}
+
 void net_poll(void) {
     if (!virtio_net_present()) return;
     uint8_t r[1514];
@@ -426,6 +444,7 @@ int net_arp_resolve(uint32_t ip, uint8_t out[6]) {
     while (timer_ticks() < deadline) {
         net_poll();
         if (arp_lookup(ip, out) == 0) return 0;
+        net_wait(1);
     }
     return -1;
 }
@@ -475,6 +494,7 @@ int net_ping(uint32_t ip, uint16_t seq, int *check) {
             ping_seq = -1;
             return (int)(took > 0x7fffffff ? 0x7fffffff : took);
         }
+        net_wait(1);
     }
     ping_seq = -1;
     return -1;
@@ -531,6 +551,7 @@ static int dhcp_wait(udp_sock_t *s, uint32_t xid, uint8_t want, uint8_t *m, unsi
         net_poll();
         uint32_t from; uint16_t fport;
         int got = udp_recvfrom(s, m, n, &from, &fport);
+        if (got < 0) { net_wait(1); continue; }
         if (got < 240) continue;
         if (m[0] != 2) continue;                   /* a reply       */
         if (get32(m + 4) != xid) continue;         /* to ours       */

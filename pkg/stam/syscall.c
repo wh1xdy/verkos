@@ -445,7 +445,10 @@ static uint64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
             return (uint64_t)n;
         }
         if (timer_ticks() >= deadline) return (uint64_t)-11;  /* -EAGAIN */
-        thread_yield();
+        /* Sleeps if the card's interrupt has proved itself, spins if it has
+         * not. Either way it is bounded above, so a datagram that never comes
+         * is an error and not a process nothing can kill. */
+        net_wait(1);
     }
 }
 

@@ -12,6 +12,15 @@ void virtio_net_mac(uint8_t out[6]);
 int  virtio_net_send(const void *frame, unsigned len);
 /* The next frame that arrived, or -1 if none is waiting. Never blocks. */
 int  virtio_net_recv(void *out, unsigned max);
+/* From the interrupt handler: acknowledge the card and wake whoever is waiting
+ * for a frame. */
+void virtio_net_interrupt(void);
+/* Whether an interrupt from the card has ever actually arrived. Until one has,
+ * every wait polls — "the tree named an interrupt" is not the same claim as
+ * "the interrupt arrives", and it is earned by one and then trusted (D-086). */
+int  virtio_net_irq_works(void);
+/* The address a thread waits on for a frame. Meaningless except as a token. */
+const void *virtio_net_wait_token(void);
 
 /* ---- what runs on top of it ---------------------------------------------
  *
@@ -29,6 +38,10 @@ int  net_init(const fdt_t *f);
 int  net_present(void);
 /* Drain the card and dispatch whatever arrived. Cheap when nothing has. */
 void net_poll(void);
+/* Wait for something to arrive, up to `ticks`. Sleeps when the card's
+ * interrupt has proved itself and spins when it has not, so a machine whose
+ * card is silent still makes progress. */
+void net_wait(uint64_t ticks);
 
 /* Our own address, once DHCP has found one — 0 until then. */
 uint32_t net_my_ip(void);
