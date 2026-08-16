@@ -539,13 +539,30 @@ make install_device-mapper
 ldconfig; cd /sources; mark libdevmapper
 fi
 
+# perl, built HERE rather than down in section 8.4, because openssl's Configure
+# below IS a perl script — the reorder that moved openssl up hit '/usr/bin/env:
+# perl: No such file or directory' the first time it ran on a clean rootfs.
+# Core perl (-des, non-interactive) needs none of zlib/xz/expat/libffi, which
+# are optional CPAN modules and not part of the base build, so it is safe this
+# early. It is also a general build tool that several configure scripts want;
+# sitting late was itself the oddity. Stamped: slow.
+if need perl; then
+say "perl ${PERL_VERSION}"
+d=$(unpack perl-${PERL_VERSION}.tar.xz); cd "$d"
+sh Configure -des -Dprefix=/usr -Dusethreads
+make; make install
+cd /sources
+mark perl
+fi
+
 # OpenSSL, built HERE and not 230 lines below, because cryptsetup's crypto
 # backend is openssl and configure stops with "You need openssl library" the
 # moment it is missing. It used to be built down in the networking section, and
 # the cryptsetup comment below said "OpenSSL is already built" — which was true
 # only of a rootfs that still carried it from an earlier pass. On a clean one
 # the LUKS chain reached cryptsetup first and the whole build stopped. The
-# comment described an order the code did not have.
+# comment described an order the code did not have. (openssl's Configure is
+# perl, which is why perl is built just above.)
 #
 # zlib-dynamic and not zlib: openssl loads zlib through dlopen at runtime, so it
 # needs no zlib at build time — which is why it can be built here, before zlib's
@@ -666,15 +683,10 @@ ninja -C build; ninja -C build install; cd /sources
 mark dbus
 fi
 
-# 8.4 perl — needed by libxcrypt's configure (and generally). Stamped: slow.
-if need perl; then
-say "perl ${PERL_VERSION}"
-d=$(unpack perl-${PERL_VERSION}.tar.xz); cd "$d"
-sh Configure -des -Dprefix=/usr -Dusethreads
-make; make install
-cd /sources
-mark perl
-fi
+# 8.4 perl — built up in the LUKS/crypto section now, because openssl's
+# Configure is a perl script and openssl was moved up to precede cryptsetup.
+# libxcrypt's configure (just below) still wants it, and `need perl` is
+# idempotent, so it is not built twice.
 
 # 8.5 libxcrypt — provides libcrypt/crypt.h. Modern glibc (2.38+) builds without
 # the crypt add-on, and systemd needs the 'crypt' library. LFS uses libxcrypt.
