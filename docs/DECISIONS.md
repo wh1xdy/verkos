@@ -5003,3 +5003,85 @@ kernel wrote, and `make test` matches `10.0.2.2` — so a kernel that accepted a
 connection and invented the peer fails that check and not the one above it.
 The byte count comes from the read, so it cannot be printed by a program that
 read nothing.
+
+---
+
+## D-108 — x86_64 builds and boots, and a clean rootfs found three ordering bugs
+
+2026-08-16.
+
+VerkOS had never been shown to build on its second architecture in this repo's
+memory: STATUS said "x86_64 has none of this." The build server — a 36-core
+machine — held a checkout **84 commits behind**, from 2026-07-26, before stam
+existed. Bringing it to HEAD and building from a rootfs that still had the
+toolchain but not the final-system packages walked the *real* dependency graph
+for the first time, and it was wrong in three places.
+
+### Three ordering bugs, each hidden the same way
+
+Stage 40 builds the final system package by package. Three packages were built
+before something they need:
+
+1. **cmake before openssl.** cmake's bootstrap builds a bundled curl that wants
+   OpenSSL; openssl was built 260 lines later. Fixed by `-DCMAKE_USE_OPENSSL=OFF`
+   — this cmake is throwaway tooling for json-c and never fetches anything, so
+   its TLS is dead weight. The dependency is removed, not satisfied.
+2. **cryptsetup before openssl.** cryptsetup *is* built against openssl as its
+   crypto backend, so this one had to be reordered, not switched off. Its
+   comment even read "OpenSSL is already built" — describing an order the code
+   did not have. openssl moved up to precede it.
+3. **openssl before perl.** openssl's Configure is a perl script, and moving
+   openssl up put it before perl. perl moved up too; core perl needs none of
+   the libraries in between, and it is a general build tool that sitting late
+   was itself the oddity.
+
+Every one was invisible until now because the previous build left these
+packages in the rootfs, so a resumed build never reached them in order. **A
+report that does not depend on what it reports, at the scale of a whole build
+stage:** "it builds" was true only of a tree that already carried the answers.
+
+### A host check that fired too late
+
+Stage 70 fills the FAT EFI partition with mtools' `mmd`/`mcopy`, and the host
+check never looked for mtools. So the server built the entire system and the
+kernel — the hours — and died in the boot stage on `mmd: command not found`.
+`make check` now names mtools, so it fails in seconds. This is the same shape
+as the stage-71 `need_tool` that was defined and never called (earlier the same
+day): a prerequisite check is worth only what it actually checks.
+
+### It boots
+
+Not "the files exist" — the system boots. Headless, the x86_64 kernel starts,
+urverk runs, and with the ext4 root attached it mounts it, brings up loopback
+and the network (e1000e, 1000 Mbps), starts vdhcp, sshd and console, and
+reaches a login:
+
+```
+  [urverk] VerkOS init (stage 2) — Urverk
+  EXT4-fs (vda): re-mounted ... r/w.
+  [urverk] started vdhcp / sshkeys / sshd / console
+  [urverk] VerkOS is up
+root@verkos:~#    — VerkOS 0.1, Linux 6.12.9, x86_64, 496 progs built from source
+```
+
+The first boot with `rdinit=/init` and no `root=` panicked — correctly: urverk
+refuses to proceed without a root device and drops to a shell, and even that
+fallback worked. The panic was the proof that urverk checks, not the failure it
+looked like.
+
+### The reclaim glitch, recorded not claimed fixed
+
+The source-reclaim step at the end of stage 40 fed bash arithmetic a two-line
+value — `1` then `keV\x8a` — out of `du -sm | cut`, both verkbox after the
+coreutils takeover. It printed a syntax error and the build continued (the `rm`
+had already run). The garbage would not reproduce against a synthetic tree and
+the source dir was already gone, so the cause is **unproved** — a verkbox du/cut
+edge, or a stray byte in one source tree. The line is hardened so a cosmetic
+tally can never emit an error again, and that is all that is claimed: the bug,
+if it is one, is noted, not fixed.
+
+### Still missing
+
+stam is not here — the checkout predates it and stam is aarch64 only so far —
+and no live x86_64 ISO has been built. "x86_64 builds and boots" is the claim;
+"x86_64 has everything aarch64 has" is not.

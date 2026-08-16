@@ -100,9 +100,16 @@ work as equals.
   version that walked the thread table on every tick pushed a boot past the
   check waiting for it. Both are fixed and both are written down (D-088, D-090),
   because the shape recurs.
-- **x86_64 has none of this.** The Proxmox VM is many months behind: no verkmod,
-  vlogin, vmkfs, vpart, vinstall, viso, no native GCC, and nothing of stam. A
-  clean build there would also prove nothing done here is aarch64-specific.
+- **x86_64 builds and boots** (2026-08-16, D-108). The build server was 84
+  commits behind — a checkout from before stam existed — and a clean pass
+  exposed three latent ordering bugs in stage 40 (cmake, openssl, perl) and a
+  missing host check for mtools, all hidden until now because an older rootfs
+  carried the packages that the real dependency graph reaches out of order. The
+  full pipeline now produces a kernel, an ext4 root and an EFI boot disk, and
+  the system boots to a `root@verkos` login: urverk mounts the root, brings up
+  the network, starts vdhcp/sshd/console — 496 programs built from source. What
+  it does **not** yet have: stam (the checkout predates it, and stam is aarch64
+  only so far), and no live x86_64 ISO has been built.
 - **The rootfs is 958 MB**; a live ISO would be ~1.3 GB. About 250 MB of the
   medium is the compiler.
 - **An interrupted `make install` of GCC leaves the system unable to rebuild
