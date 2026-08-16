@@ -29,3 +29,6 @@ pkg/stam/progs/*.cpio
 pkg/stam/progs/root/
 pkg/stam/progs/sroot/
 pkg/stam/progs/scriptroot/
+
+# Local working guide for Claude Code — kept on disk, not in the repo.
+CLAUDE.md
