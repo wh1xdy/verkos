@@ -539,11 +539,33 @@ make install_device-mapper
 ldconfig; cd /sources; mark libdevmapper
 fi
 
+# OpenSSL, built HERE and not 230 lines below, because cryptsetup's crypto
+# backend is openssl and configure stops with "You need openssl library" the
+# moment it is missing. It used to be built down in the networking section, and
+# the cryptsetup comment below said "OpenSSL is already built" — which was true
+# only of a rootfs that still carried it from an earlier pass. On a clean one
+# the LUKS chain reached cryptsetup first and the whole build stopped. The
+# comment described an order the code did not have.
+#
+# zlib-dynamic and not zlib: openssl loads zlib through dlopen at runtime, so it
+# needs no zlib at build time — which is why it can be built here, before zlib's
+# own section further down. install_sw/install_ssldirs skip the slow docs.
+if need openssl; then
+say "openssl ${OPENSSL_VERSION} (cryptsetup's backend; also OpenSSH's)"
+d=$(unpack openssl-${OPENSSL_VERSION}.tar.gz); cd "$d"
+./config --prefix=/usr --openssldir=/etc/ssl --libdir=lib shared zlib-dynamic
+make
+make install_sw install_ssldirs
+ldconfig
+cd /sources
+mark openssl
+fi
+
 if need cryptsetup; then
 say "cryptsetup ${CRYPTSETUP_VERSION}"
 d=$(unpack cryptsetup-${CRYPTSETUP_VERSION}.tar.xz); cd "$d"
-# OpenSSL is already built and is the crypto backend; the extra tools are not
-# wanted, and neither is the systemd integration that no longer exists here.
+# OpenSSL is built just above and is the crypto backend; the extra tools are
+# not wanted, and neither is the systemd integration that no longer exists here.
 ./configure --prefix=/usr --disable-ssh-token --disable-asciidoc \
     --with-crypto_backend=openssl --disable-static
 make; make install
@@ -770,17 +792,9 @@ ln -sfv /sbin/urverk /usr/sbin/init
 cd /sources
 
 # 10. Networking + SSH -------------------------------------------------------
-# OpenSSL (crypto for OpenSSH). install_sw/install_ssldirs skip the slow docs.
-if need openssl; then
-say "openssl ${OPENSSL_VERSION}"
-d=$(unpack openssl-${OPENSSL_VERSION}.tar.gz); cd "$d"
-./config --prefix=/usr --openssldir=/etc/ssl --libdir=lib shared zlib-dynamic
-make
-make install_sw install_ssldirs
-ldconfig
-cd /sources
-mark openssl
-fi
+# OpenSSL is built up in the LUKS section, because cryptsetup needs it there;
+# `need openssl` is idempotent, so it is not built again here. OpenSSH below
+# links the same libraries.
 
 # OpenSSH — sshd + ssh client. Needs openssl + zlib.
 if need openssh; then
