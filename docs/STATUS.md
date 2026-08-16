@@ -4,7 +4,7 @@ Rewritten 2026-07-28. The point of this file is to let a new session start
 without reading the whole history: what is proved, what is merely written, and
 what is known to be wrong.
 
-`make test` — **256 checks**, all passing, run in the `verkbuild` container.
+`make test` — **260 checks**, all passing, run in the `verkbuild` container.
 Run it on an idle machine: several checks boot QEMU and wait for a marker, and
 two suites running at once fail each other's timeouts. The count is also
 host-dependent — some checks are skipped without a network or a cross toolchain,
@@ -68,6 +68,7 @@ Nothing below is inference. Each was checked by running a system.
 | **Directories** | `getdents64`, `mkdirat`, `unlinkat`, and `ls`, `mkdir`, `rm` as ordinary programs (D-085) |
 | **A network card** | virtio-net over MMIO **and** PCI, sharing the disk's transport. ARP resolves an address the kernel did not know, and an ICMP echo comes back with the payload we chose and both checksums verified (D-103) |
 | **The network, for programs** | DHCP finds the address rather than assuming it; `socket`, `bind`, `sendto` and `recvfrom` with Linux's numbers; and `udpecho`, an unprivileged program that answers a datagram. A `python3` process outside the machine sends bytes it chose and checks itself that they came back — the one check in the suite whose verdict nothing of ours produces (D-104) |
+| **TCP** | Client side: handshake, cumulative acknowledgement, retransmission, FIN each way. `tcpget` connects to a `python3` server on the host through 10.0.2.2, writes a request and reads the answer with ordinary `read`/`write`. The server — a real stack that never heard of this one — asserts the request arrived byte for byte (D-105) |
 
 ---
 
@@ -135,9 +136,10 @@ run, after three entries of reasoning had each been plausibly wrong.
 2. **Sync x86_64** — the second architecture is the real test of whether any of
    this was portable.
 3. **Trim the live medium** — about 250 MB of the 731 MB is the compiler.
-4. **An interrupt for the card, and TCP** — the card is polled, so nothing
-   arrives unless a thread is asking. Both are the same shape as the disk's
-   path from D-086.
+4. **Make TCP fast enough to be used** — one segment in flight means a round
+   trip per segment. A window, and reassembly of what arrives out of order, are
+   the two that matter.
+5. **listen and accept** — stam opens connections; it cannot receive one.
 
 The scheduler question is no longer on this list: it is closed, see the top of
 this file and D-099 to D-101.

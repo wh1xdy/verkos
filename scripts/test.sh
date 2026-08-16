@@ -1168,6 +1168,42 @@ if [ -f "pkg/stam/Makefile" ] && [ "$STAM_CROSS" != none ]; then
                     # judge here precisely because it is not ours: nothing in
                     # this repository is involved in deciding whether the reply
                     # matched.
+                    # And a TCP server, on the machine QEMU is running on.
+                    # 10.0.2.2 is the hypervisor's stand-in for this host, so
+                    # a listener here is reachable from inside stam — and the
+                    # far end of that conversation is a real TCP stack that
+                    # has never heard of us. That is the only way to find out
+                    # whether what stam sends is TCP, rather than something two
+                    # halves of one codebase agree about.
+                    #
+                    # Three connections, because the script runs three times:
+                    # milestone 3 starts /init once and milestone 5 starts two
+                    # copies of it at the same time.
+                    rm -f "$T/server.log"
+                    if command -v python3 >/dev/null 2>&1; then
+                    python3 - > "$T/server.log" 2>&1 <<'PYEOF' &
+import socket
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 15570))
+srv.listen(4)
+srv.settimeout(180)
+for _ in range(3):
+    try:
+        c, _who = srv.accept()
+        c.settimeout(20)
+        got = c.recv(4096)
+        print("SERVER-REQUEST-OK" if got.startswith(b"GET /verkos HTTP/1.0")
+              else b"SERVER-GOT-OTHER " + got, flush=True)
+        c.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 26\r\n\r\nhello from outside verkos\n")
+        c.close()
+    except Exception as e:
+        print("SERVER-ERROR", e, flush=True)
+        break
+PYEOF
+                    TCPSRV=$!
+                    fi
+
                     if command -v python3 >/dev/null 2>&1; then
                     (
                         for _ in $(seq 1 600); do
@@ -1205,6 +1241,7 @@ PYEOF
                     done
                     kill "$(cat "$T/spid")" 2>/dev/null
                     wait "$(cat "$T/spid")" 2>/dev/null
+                    [ -n "${TCPSRV:-}" ] && { kill "$TCPSRV" 2>/dev/null; wait "$TCPSRV" 2>/dev/null; }
 
                     check "the shell runs a script and reaches its end" \
                           "grep -aq 'bye' $SL"
@@ -1343,6 +1380,27 @@ PYEOF
                     # network stack.
                     check "bytes sent from outside come back unchanged" \
                           "grep -q ECHO-OK $T/echo.result"
+
+                    # --- TCP ------------------------------------------------
+                    # The handshake completed, which means a SYN left the
+                    # machine, a real stack answered it, and stam accepted the
+                    # answer. A kernel whose sequence arithmetic is wrong by
+                    # one gets this far and no further, which is where the
+                    # first version of it stopped.
+                    check "a program opens a connection to another machine" \
+                          "grep -aq 'tcpget connected' $SL"
+                    # The server is not ours and it read the request byte for
+                    # byte. This is the check that says what stam speaks is
+                    # TCP and not a private agreement.
+                    check "a server outside reads the request stam sent" \
+                          "grep -q SERVER-REQUEST-OK $T/server.log"
+                    # And back the other way: the reply the server wrote, read
+                    # by the program through an ordinary read() until the far
+                    # end closed. Both the body and the byte count, so a
+                    # partial read that happened to contain the phrase fails.
+                    check "the program reads the answer back through the stream" \
+                          "grep -aq 'hello from outside verkos' $SL &&
+                           grep -aq 'tcpget read 65 bytes' $SL"
                     # Run from the disk, not from the archive: `diskprog` is in
                     # no initrd, so exec had nowhere else to find it. It prints
                     # the argv it was given, which also says the arguments

@@ -4797,3 +4797,69 @@ reading the code.
 port with `-98` (EADDRINUSE) and the second times out with `-11` (EAGAIN).
 Both are correct: two processes may not hold the same port, and only one
 datagram was sent.
+
+---
+
+## D-105 — TCP, and two off-by-one errors in the same number
+
+2026-08-16.
+
+The card earned its interrupt first, the same way the disk did (D-086):
+enabled where the tree names one, spun on until one actually arrived, and the
+line announcing it printed from the handler and nowhere else. `net_wait` is now
+the single place that decides between sleeping and spinning, and the PCI
+transport — which has no interrupt number, the routing being in a bridge
+interrupt-map vboot's synthetic tree does not carry — still spins and says so.
+
+Then TCP: connect, send, receive, close. Client only, one segment in flight,
+no reassembly, no TIME_WAIT, no options but the maximum segment size. All of
+that is listed at the top of `tcp.c` rather than left to be discovered.
+
+### Both bugs were the same misunderstanding
+
+A SYN carries no data and **occupies one sequence number anyway**. So does a
+FIN. Everything that went wrong went wrong there.
+
+**The first:** the handshake compared the server's acknowledgement against our
+initial sequence number. The server acknowledges ISN + 1. The segment came
+back perfectly formed and was thrown away for not matching, and `connect`
+returned -110 with nothing whatever wrong at either end.
+
+What made it findable in one run: the *second* attempt, after the test server
+had exited, returned -111 — a refusal, which is a RST, which means the SYN had
+reached the host and the reply had been processed. Sending worked, receiving
+worked, and only the comparison did not. The failure that looked like "no
+network" had already proved the network.
+
+**The second, immediately after:** `write` returned -110 while the server's log
+showed it had received the request three times. `snd_nxt` was advanced when the
+acknowledgement arrived rather than when the segment left, so the guard that
+rejects acknowledgements for data this end never sent rejected the real one.
+The segment arrived, the server answered, and the sender retransmitted until it
+gave up.
+
+A sequence number is consumed by transmission. Both fixes are that sentence.
+
+### The other end is not ours
+
+```
+verk$ tcpget
+tcpget connected
+HTTP/1.0 200 OK
+Content-Length: 26
+
+hello from outside verkos
+
+tcpget read 65 bytes
+```
+
+10.0.2.2 is the hypervisor's stand-in for the machine QEMU runs on, so a
+`python3` listener there is reachable from inside stam — and it is a real TCP
+stack that has never heard of this one. It asserts the request arrived byte for
+byte; the program asserts the answer came back through an ordinary `read()`
+loop that ends when the far end closes. Neither half of that can be produced by
+a codebase agreeing with itself.
+
+`tcpget` contains no line that knows it is talking to a network. After
+`connect` returns, a stream is a stream: `read` and `write` on a descriptor,
+dispatched in `file.c` beside pipes and files on the disk.

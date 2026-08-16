@@ -39,7 +39,7 @@ COMMON   = -ffreestanding -nostdlib -mgeneral-regs-only -fno-stack-protector \
 CFLAGS   = $(COMMON) -fpic -Wextra -g
 LDFLAGS  = -nostdlib -nostartfiles -static -Wl,-T,stam.ld -Wl,--build-id=none
 
-OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o signal.o pci.o virtio.o virtio_blk.o virtio_net.o net.o gpt.o fat.o syscall.o userprog.o main.o
+OBJS = boot.o smpentry.o vectors.o exceptions.o klib.o fdt.o console.o handover_dtb.o mmu.o gic.o timer.o switch.o sched.o vm.o elf.o cpio.o file.o smp.o signal.o pci.o virtio.o virtio_blk.o virtio_net.o net.o tcp.o gpt.o fat.o syscall.o userprog.o main.o
 
 all: stam.img
 
@@ -88,7 +88,7 @@ clean:
 # then branches to where it used to live. Hidden symbols are addressed
 # PC-relative instead, which is correct at any load address.
 EFI_CFLAGS = $(COMMON) -fshort-wchar -fpic -I../vboot
-EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c signal.c pci.c virtio.c virtio_blk.c virtio_net.c net.c gpt.c fat.c syscall.c main.c exceptions.c
+EFI_SRCS   = handover_efi.c klib.c fdt.c console.c handover_dtb.c mmu.c gic.c timer.c sched.c vm.c elf.c cpio.c file.c smp.c signal.c pci.c virtio.c virtio_blk.c virtio_net.c net.c tcp.c gpt.c fat.c syscall.c main.c exceptions.c
 EFI_ASM    = vectors.S switch.S userprog.S smpentry.S
 
 stam.efi: $(EFI_SRCS) $(EFI_ASM) stam-efi.lds
@@ -180,6 +180,12 @@ progs/udpecho.elf: progs/udpecho.c progs/syscalls.h
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# Opens a connection to a server on the machine stam is running on, writes a
+# request and reads the answer until the far end closes.
+progs/tcpget.elf: progs/tcpget.c progs/syscalls.h
+	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
+	    -Wl,--build-id=none -o $@ $<
+
 # Hands the kernel addresses that are not its own and checks it is refused.
 progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
@@ -199,7 +205,7 @@ progs/vsh.elf: progs/vsh.c
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
                           progs/forky.elf progs/twice.elf progs/badptr.elf \
                           progs/catch.elf progs/ls.elf progs/mkdir.elf \
-                          progs/rm.elf progs/udpecho.elf progs/rc
+                          progs/rm.elf progs/udpecho.elf progs/tcpget.elf progs/rc
 	@cc -O1 -o /tmp/vcpio-host ../vcpio/vcpio.c 2>/dev/null || \
 	    { echo "vcpio did not build"; exit 1; }
 	@rm -rf progs/scriptroot && mkdir -p progs/scriptroot
@@ -216,6 +222,7 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/mkdir.elf progs/scriptroot/mkdir
 	@cp progs/rm.elf progs/scriptroot/rm
 	@cp progs/udpecho.elf progs/scriptroot/udpecho
+	@cp progs/tcpget.elf progs/scriptroot/tcpget
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
@@ -248,7 +255,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
        progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf \
-       progs/udpecho.elf \
+       progs/udpecho.elf progs/tcpget.elf \
        progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio
 
 run-prog: stam.img progs/hello.elf

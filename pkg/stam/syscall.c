@@ -13,6 +13,7 @@
 #include "sched.h"
 #include "file.h"
 #include "net.h"
+#include "tcp.h"
 #include "timer.h"
 #include "lock.h"
 #include "vm.h"
@@ -62,9 +63,11 @@ extern void exception_report(unsigned long kind, regs_t *r);
 #define SYS_BIND      200
 #define SYS_SENDTO    206
 #define SYS_RECVFROM  207
+#define SYS_CONNECT   203
 
 #define AF_INET      2
 #define SOCK_DGRAM   2
+#define SOCK_STREAM  1
 #define O_WRONLY    1
 #define O_CREAT     0100
 #define O_APPEND    02000
@@ -369,14 +372,15 @@ static void sockaddr_write(uint64_t va, uint32_t ip, uint16_t port) {
 }
 
 static uint64_t sys_socket(uint64_t domain, uint64_t type) {
-    /* Only what exists. A kernel that accepts SOCK_STREAM and then behaves
-     * like a datagram socket is worse than one that refuses it: the program
-     * gets a descriptor, sends, and loses data with no error anywhere. */
     if (domain != AF_INET) return (uint64_t)-97;            /* -EAFNOSUPPORT */
-    if ((type & 0xf) != SOCK_DGRAM) return (uint64_t)-93;   /* -EPROTONOSUPPORT */
     if (!net_present()) return (uint64_t)-97;
+    unsigned kind = (unsigned)type & 0xf;
+    /* Only what exists. Anything else is refused rather than quietly served as
+     * one of these two: a program that gets a descriptor and then loses data
+     * with no error anywhere is worse off than one that was told no. */
+    if (kind != SOCK_DGRAM && kind != SOCK_STREAM) return (uint64_t)-93;
     file_t *f = 0;
-    int e = file_udp(&f);
+    int e = (kind == SOCK_STREAM) ? file_tcp(&f) : file_udp(&f);
     if (e < 0) return (uint64_t)(int64_t)e;
     int fd = fd_alloc(f);
     if (fd < 0) { file_close(f); return (uint64_t)-24; }    /* -EMFILE */
@@ -397,6 +401,16 @@ static uint64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
     if (ip && ip != net_my_ip()) return (uint64_t)-99;      /* -EADDRNOTAVAIL */
     if (udp_bind(s, port) != 0) return (uint64_t)-98;       /* -EADDRINUSE */
     return 0;
+}
+
+static uint64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t len) {
+    tcp_sock_t *c = file_tcp_conn(fd_get(fd));
+    if (!c) return (uint64_t)-88;                           /* -ENOTSOCK */
+    uint32_t ip; uint16_t port;
+    int e = sockaddr_read(addr, len, &ip, &port);
+    if (e == -2) return EFAULT;
+    if (e) return (uint64_t)-22;
+    return (uint64_t)(int64_t)tcp_connect(c, ip, port);
 }
 
 static uint64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
@@ -457,6 +471,7 @@ static uint64_t do_syscall(uint64_t nr, uint64_t a, uint64_t b, uint64_t c, void
     case SYS_READ:  return sys_read(a, b, c);
     case SYS_SOCKET: return sys_socket(a, b);
     case SYS_BIND:   return sys_bind(a, b, c);
+    case SYS_CONNECT: return sys_connect(a, b, c);
     /* Four arguments and five: taken out of the frame, because do_syscall is
      * handed three. Every other call here fits in three and these two do not,
      * and reaching into the frame is honest about where the values are rather

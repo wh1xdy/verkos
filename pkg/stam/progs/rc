@@ -24,4 +24,5 @@ rm /gone.txt
 rm /adir
 ls /
 udpecho
+tcpget
 exit

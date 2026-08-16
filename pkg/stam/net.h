@@ -43,6 +43,16 @@ void net_poll(void);
  * card is silent still makes progress. */
 void net_wait(uint64_t ticks);
 
+/* One IPv4 packet with this payload, routed and addressed. The layer above
+ * builds its own header; this one owns the network layer and below.
+ * 0 on success. */
+int net_ip_send(uint32_t dst, uint8_t proto, const void *payload, unsigned len);
+/* The internet checksum over the pseudo-header TCP and UDP share — the two
+ * addresses, the protocol and the length — folded together with the segment.
+ * Returns 0 over a segment whose checksum is already correct. */
+uint16_t net_ip_checksum_with_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
+                                     const void *seg, unsigned len);
+
 /* Our own address, once DHCP has found one — 0 until then. */
 uint32_t net_my_ip(void);
 uint32_t net_gateway(void);

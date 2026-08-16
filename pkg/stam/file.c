@@ -10,6 +10,7 @@
 #include "sched.h"
 #include "fat.h"
 #include "net.h"
+#include "tcp.h"
 #include "console.h"
 #include "lock.h"
 #include "cpio.h"
@@ -27,6 +28,7 @@
 #define FILE_FAT      6        /* off the disk                                */
 #define FILE_FATDIR   7        /* a directory on the disk, only readable as names */
 #define FILE_UDP      8        /* a datagram socket                           */
+#define FILE_TCP      9        /* a connection                                */
 
 #define NMEM       4
 #define MEM_SIZE   4096
@@ -59,6 +61,7 @@ struct file {
     uint64_t       ro_len;
     fat_file_t     fat;        /* where it is on the disk, for FILE_FAT     */
     udp_sock_t    *sock;       /* for FILE_UDP                              */
+    tcp_sock_t    *conn;       /* for FILE_TCP                              */
     int            writable;   /* a FILE_FAT opened for writing              */
     uint64_t       pos;
 };
@@ -78,6 +81,7 @@ static struct file *file_alloc(int kind, pipe_t *p) {
             files[i].ro_len = 0;
             files[i].pos  = 0;
             files[i].sock = 0;
+            files[i].conn = 0;
             return &files[i];
         }
     return 0;
@@ -270,9 +274,11 @@ void file_close(file_t *f) {
     int kind = f->kind;
     int was_written = (kind == FILE_FAT && f->writable);
     udp_sock_t *sock = (kind == FILE_UDP) ? f->sock : 0;
+    tcp_sock_t *conn = (kind == FILE_TCP) ? f->conn : 0;
     f->kind = FILE_FREE;
     f->pipe = 0;
     f->sock = 0;
+    f->conn = 0;
     if (f == console_file) console_file = 0;
 
     if (p) {
@@ -286,6 +292,10 @@ void file_close(file_t *f) {
     /* Outside the lock, for the same reason as the sync below: udp_close walks
      * the socket table, which no scheduling decision should ever wait for. */
     if (sock) udp_close(sock);
+    /* And this one sends a FIN and waits briefly for the answer, which is
+     * far too much to do holding the lock every scheduling decision on the
+     * machine goes through. */
+    if (conn) tcp_close(conn);
 
     /* Outside the lock: recounting the free list is a few hundred sector reads,
      * and every scheduling decision on the machine waits behind that lock. On
@@ -308,6 +318,20 @@ udp_sock_t *file_udp_sock(file_t *f) {
     return (f && f->kind == FILE_UDP) ? f->sock : 0;
 }
 
+int file_tcp(file_t **out) {
+    tcp_sock_t *c = tcp_open();
+    if (!c) return -105;                    /* -ENOBUFS: no connection free */
+    struct file *f = file_alloc(FILE_TCP, 0);
+    if (!f) { tcp_close(c); return -24; }   /* -EMFILE                      */
+    f->conn = c;
+    *out = f;
+    return 0;
+}
+
+tcp_sock_t *file_tcp_conn(file_t *f) {
+    return (f && f->kind == FILE_TCP) ? f->conn : 0;
+}
+
 static unsigned pipe_bytes(const pipe_t *p) {
     return (p->head - p->tail) % PIPE_SIZE;
 }
@@ -316,6 +340,10 @@ long file_read(file_t *f, char *buf, uint64_t len) {
     if (!f || f->kind == FILE_FREE) return -9;              /* -EBADF */
     if (f->kind == FILE_PIPE_W) return -9;                  /* wrong end */
     if (f->kind == FILE_CONSOLE) return console_read_line(buf, len);
+    /* A connection is a stream, so read means exactly what it means on a pipe:
+     * whatever has arrived, and 0 when the other end has closed. */
+    if (f->kind == FILE_TCP) return tcp_recv(f->conn, (uint8_t *)buf, (unsigned)len);
+    if (f->kind == FILE_UDP) return -9;     /* use recvfrom; a datagram has a sender */
     if (!len) return 0;
 
     /* A file is a sequence of bytes with a position, and running off the end
@@ -406,6 +434,8 @@ long file_write(file_t *f, const char *buf, uint64_t len) {
         for (uint64_t i = 0; i < len; i++) kputc(buf[i]);
         return (long)len;
     }
+    if (f->kind == FILE_TCP) return tcp_send(f->conn, (const uint8_t *)buf, (unsigned)len);
+    if (f->kind == FILE_UDP) return -9;     /* use sendto; a datagram needs a destination */
     if (f->kind == FILE_INITRD) return -9;   /* the archive is read-only */
     if (f->kind == FILE_FAT) {
         if (!f->writable) return -9;

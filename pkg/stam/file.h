@@ -60,8 +60,14 @@ int file_open(const char *name, int mode, file_t **out);
  * The socket layer is in net.c and this file knows only that the object has to
  * be released when the last descriptor goes. */
 struct udp_sock;
+struct tcp_sock;
 int file_udp(file_t **out);
 struct udp_sock *file_udp_sock(file_t *f);   /* 0 when f is not a socket */
+/* A connection. read and write on one mean what they mean on a pipe, which is
+ * the whole point: a program that reads a stream does not need to know it is a
+ * network. */
+int file_tcp(file_t **out);
+struct tcp_sock *file_tcp_conn(file_t *f);   /* 0 when f is not a connection */
 
 file_t *file_ref(file_t *f);   /* one more holder */
 void    file_close(file_t *f); /* one fewer; the last one releases it */

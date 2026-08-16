@@ -226,9 +226,18 @@ What it does today, each verified by running it:
   over a pseudo-header that is not in the packet, four system calls and a
   descriptor table all had to be right (D-104).
 
-  There is no TCP, no fragmentation and no IP options; a socket holds one
-  datagram, and the card is polled, so nothing arrives unless a thread is
-  asking.
+- **And it speaks TCP.** The client half: three-way handshake, cumulative
+  acknowledgement, retransmission on a timeout, a FIN in each direction.
+  `tcpget` opens a connection to a `python3` server running on the machine
+  QEMU is on, writes a request and reads the answer until the far end closes —
+  with `read` and `write`, and no line in it that knows it is a network. The
+  server is a real stack that has never heard of this one, and `make test`
+  asserts from *both* ends: that it received the request byte for byte, and
+  that the reply came back through the stream (D-105).
+
+  One segment in flight, no reassembly, no `listen`, no TIME_WAIT and no
+  options but the maximum segment size. All of it listed at the top of
+  `tcp.c`.
 - **PCI**, enumerated through ECAM: base address registers sized and placed
   where nothing has placed them, capabilities walked, and the virtio device
   found by its class rather than by an id that names the legacy card it stands
@@ -250,7 +259,7 @@ arithmetic (D-056). A **Qualcomm GENI console driver** and `vbootimg` exist for
 hardware nothing has run them on, and D-045 says so plainly rather than letting
 them sit beside the tested work as equals.
 
-`make test` now boots it: **65 checks** cover the kernel — building and linking
+`make test` now boots it: **69 checks** cover the kernel — building and linking
 it, and starting it under QEMU to read what it printed: the scheduler's own
 verdict, a program's report of its arguments, the pages a finished process gave
 back, a file written to the disk and then read

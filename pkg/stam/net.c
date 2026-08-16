@@ -38,12 +38,14 @@
 #include "console.h"
 #include "timer.h"
 #include "sched.h"
+#include "tcp.h"
 #include <stdint.h>
 
 #define ET_ARP   0x0806
 #define ET_IPV4  0x0800
 #define IP_ICMP  1
 #define IP_UDP   17
+#define IP_TCP   6
 
 static uint8_t  my_mac[6];
 static uint32_t my_ip;                 /* 0 until DHCP has answered */
@@ -274,6 +276,47 @@ int udp_sendto(udp_sock_t *s, uint32_t ip, uint16_t port,
     return udp_send_from(my_ip, s->port, ip, port, mac, buf, len);
 }
 
+/* ---- what the layers above use ------------------------------------------ */
+
+uint16_t net_ip_checksum_with_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
+                                     const void *seg, unsigned len) {
+    uint8_t pseudo[12];
+    put32(pseudo + 0, src);
+    put32(pseudo + 4, dst);
+    pseudo[8] = 0; pseudo[9] = proto;
+    put16(pseudo + 10, (uint16_t)len);
+    uint32_t sum = sum_add(0, pseudo, sizeof pseudo);
+    sum = sum_add(sum, seg, len);
+    return sum_fold(sum);
+}
+
+int net_ip_send(uint32_t dst, uint8_t proto, const void *payload, unsigned len) {
+    if (len > 1480) return -1;
+    uint8_t mac[6];
+    if (route_mac(dst, mac) != 0) return -1;
+
+    uint8_t f[14 + 20 + 1480];
+    for (unsigned i = 0; i < 14 + 20; i++) f[i] = 0;
+    eth_header(f, mac, ET_IPV4);
+    uint8_t *ip = f + 14;
+    ip[0] = 0x45;
+    put16(ip + 2, (uint16_t)(20 + len));
+    /* An identification that varies, because two packets from this machine
+     * with the same one and the same addresses are, to anything that
+     * reassembles, one packet. Nothing here fragments, but the middle of a
+     * network does not know that. */
+    static uint16_t ident;
+    put16(ip + 4, ident++);
+    ip[8] = 64;
+    ip[9] = proto;
+    put32(ip + 12, my_ip);
+    put32(ip + 16, dst);
+    put16(ip + 10, checksum(ip, 20));
+    const uint8_t *s = payload;
+    for (unsigned i = 0; i < len; i++) f[14 + 20 + i] = s[i];
+    return virtio_net_send(f, 14 + 20 + len);
+}
+
 /* ---- the dispatcher ----------------------------------------------------- */
 
 static void handle_arp(const uint8_t *r, int n) {
@@ -384,6 +427,7 @@ static void handle_ipv4(const uint8_t *r, int n) {
     unsigned plen = total - ihl;
     if (ip[9] == IP_ICMP) handle_icmp(payload, plen, src);
     else if (ip[9] == IP_UDP) handle_udp(payload, plen, src);
+    else if (ip[9] == IP_TCP) tcp_input(payload, plen, src);
 }
 
 /* Wait for something to arrive.
