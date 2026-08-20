@@ -1,0 +1,3 @@
+// expect: global capability
+var world: Console;
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }

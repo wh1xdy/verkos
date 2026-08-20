@@ -206,6 +206,10 @@ thread_t *thread_fork(const void *parent_frame, unsigned frame_bytes, uint64_t s
     if (current) {
         for (int i = 0; i < NSIG; i++) t->sigact[i] = current->sigact[i];
         t->blocked = current->blocked;
+        /* The child is the same program, so it is held to the same manifest.
+         * A fork that dropped it would be a way out of the language's promise
+         * that costs one system call. */
+        t->sav = current->sav;
     }
     t->stack_low = (uint64_t)(uintptr_t)stack;
     *(uint64_t *)(uintptr_t)stack = STACK_CANARY;

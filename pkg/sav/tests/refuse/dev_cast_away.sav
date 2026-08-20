@@ -1,0 +1,7 @@
+// expect: cannot become
+entry fn main(out: Console) -> i32 {
+    let reg: dev *u32 = 0x9000000 as dev *u32;
+    let p: *u32 = reg as *u32;
+    out!write("x");
+    return 0;
+}

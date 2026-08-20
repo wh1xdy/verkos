@@ -1,0 +1,6 @@
+// expect: checks nothing
+entry fn main(out: Console) -> i32 {
+    out!write("x");
+    assert 2 > 1;
+    return 0;
+}

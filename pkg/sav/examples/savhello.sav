@@ -1,0 +1,68 @@
+// savhello — a program written in sav, compiled by savc, run by stam.
+//
+// Nothing between this file and the machine belongs to anyone else: savc
+// wrote every byte of the executable, stam loads it, and the only way it can
+// reach the kernel is through the capabilities `main` asks for. Read the
+// signature of main and you know what this program can do — and the kernel
+// knows it too, because savc wrote the same set into a note in the binary.
+
+fn digits(v: i64) -> n: i64
+    needs v >= 0
+    gives n >= 1
+{
+    var count: i64 = 1;
+    var x: i64 = v;
+    while x >= 10 {
+        x = x / 10;
+        count = count + 1;
+    }
+    return count;
+}
+
+fn say_num(out: Console, v: i64) {
+    var buf: [24]u8;
+    var i: i64 = 23;
+    var x: i64 = v;
+    if x == 0 {
+        buf[i] = '0';
+        i = i - 1;
+    }
+    while x > 0 {
+        buf[i] = ('0' as u8) + ((x % 10) as u8);
+        x = x / 10;
+        i = i - 1;
+    }
+    out!write(buf[i + 1..24]);
+}
+
+entry fn main(out: Console, args: Args, me: Proc) -> i32 {
+    out!write("  [sav] a program written in sav is running on stam\n");
+
+    out!write("  [sav] 6 * 7 = ");
+    say_num(out, 6 * 7);
+    out!write(", and 12345 has ");
+    say_num(out, digits(12345));
+    out!write(" digits\n");
+
+    out!write("  [sav] getpid() says ");
+    say_num(out, me!pid());
+    out!write("\n");
+
+    let n: i64 = args!count();
+    out!write("  [sav] argc = ");
+    say_num(out, n);
+    out!write("\n");
+    for i in 0..n {
+        out!write("  [sav] argv[");
+        say_num(out, i);
+        out!write("] = \"");
+        out!write(args!get(i));
+        out!write("\"\n");
+    }
+
+    // A claim that depends on what it claims: the loop above ran n times, and
+    // this fails loudly if the count it was given was not the count it saw.
+    assert n == args!count();
+    out!write("  [sav] sav program finished\n");
+    return 0;
+}

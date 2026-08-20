@@ -1,0 +1,3 @@
+// expect: decided before the program runs
+fn f(a: i64) -> n: i64 gives true { return a; }
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }

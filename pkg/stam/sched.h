@@ -1,6 +1,7 @@
 #ifndef STAM_SCHED_H
 #define STAM_SCHED_H
 #include <stdint.h>
+#include "savnote.h"
 #include "file.h"
 
 #define NSIG    32          /* room for every signal number this kernel knows */
@@ -50,6 +51,12 @@ typedef struct thread {
      * both halves of `a | b` can close their unused end without the other
      * losing it. */
     struct file *fd[NFD];
+    /* What this program said it may ask of the kernel. Loaded from the note in
+     * its executable; absent, and therefore unrestricted, for every program
+     * not built by savc. Inherited by fork, replaced by exec — the same rule
+     * the address space follows, and for the same reason: it belongs to the
+     * image, not to the thread that happens to run it. */
+    sav_manifest_t sav;
 } thread_t;
 
 void      sched_init(const char *name_of_current);

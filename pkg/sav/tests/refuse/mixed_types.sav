@@ -1,0 +1,8 @@
+// expect: do not mix
+entry fn main(out: Console) -> i32 {
+    let a: u8 = 3;
+    let b: i64 = 4;
+    let c: i64 = (a + b) as i64;
+    out!write("x");
+    return 0;
+}

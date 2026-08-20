@@ -1,0 +1,8 @@
+// expect: is the name `f` gives to the value it returns
+fn f(a: i64) -> n: i64
+    gives n >= a
+{
+    var n: i64 = a;
+    return n;
+}
+entry fn main(out: Console) -> i32 { out!write("x"); return f(1) as i32; }

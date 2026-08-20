@@ -1,0 +1,2 @@
+// expect: no `entry fn`
+fn f(a: i64) -> n: i64 gives n == a { return a; }

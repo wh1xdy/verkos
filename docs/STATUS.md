@@ -4,7 +4,7 @@ Rewritten 2026-07-28. The point of this file is to let a new session start
 without reading the whole history: what is proved, what is merely written, and
 what is known to be wrong.
 
-`make test` — **263 checks**, all passing, run in the `verkbuild` container.
+`make test` — **305 checks**, all passing, run in the `verkbuild` container.
 CI boots the kernel too, on an arm64 runner, and **fails if the boot checks are
 skipped** — before 2026-08-16 they always were, and the job was green anyway
 (D-106).
@@ -32,6 +32,11 @@ They are separate systems that share tools:
   itself five ways, and runs a userland where 97 command names are ours.
 - **`stam`** is our own aarch64 kernel. It is not in any image and no build
   stage ships it; `pkg/stam/Makefile` builds it and `make test` boots it.
+- **`sav`** is our own language, and `savc` our own compiler for it, since
+  2026-08-20. It writes an aarch64 ELF with no assembler, linker or libc in
+  between, and the executables it produces carry a capability manifest that
+  stam reads and enforces (D-109). Nothing in the distribution is built with it
+  yet; it compiles programs stam runs.
 
 ---
 
@@ -72,6 +77,16 @@ Nothing below is inference. Each was checked by running a system.
 | **A network card** | virtio-net over MMIO **and** PCI, sharing the disk's transport. ARP resolves an address the kernel did not know, and an ICMP echo comes back with the payload we chose and both checksums verified (D-103) |
 | **The network, for programs** | DHCP finds the address rather than assuming it; `socket`, `bind`, `sendto` and `recvfrom` with Linux's numbers; and `udpecho`, an unprivileged program that answers a datagram. A `python3` process outside the machine sends bytes it chose and checks itself that they came back — the one check in the suite whose verdict nothing of ours produces (D-104) |
 | **TCP, both ways** | Client: handshake, cumulative acknowledgement, retransmission, FIN each way; `tcpget` fetches from a `python3` server on the host, which asserts the request arrived byte for byte (D-105). Server: `bind`, `listen`, `accept` — `tcpserve` holds a port, answers a SYN nothing here asked for, and a `python3` client dialling in gets its own bytes back wrapped (D-107) |
+
+### sav
+
+| | |
+|---|---|
+| **A program, end to end** | `savhello.sav` is compiled by savc into an ELF with no assembler, linker or libc in its history, loaded out of the initrd by stam, and prints what it computed — arithmetic, a contract, argv and its own pid (D-109) |
+| **The refusals** | thirteen source files that must not compile, each checked against *the reason* and not just the exit status: a vacuous `gives`, a promise that never names the result, `assert 2 > 1`, a global capability, a `dev` pointer cast to an ordinary one, `out.write(...)` without the `!`, `*uart` instead of `uart@` |
+| **The programs** | eight compiled and run in the container and compared byte for byte — narrow arithmetic that wraps, recursion, structs, slices, `for`/`while`, argv, and a broken contract that stops the program with 70 |
+| **The binary itself** | the manifest holds exactly the calls the code makes, `readelf -r` finds no relocations, the note is a real `PT_NOTE`, and two writes to adjacent device registers come out as two 32-bit stores |
+| **The manifest, enforced** | `savliar` is the same program with `write` left out of its note on purpose. stam refuses the call, names it, and the shell reports 159 — SIGSYS. Without a binary that lies, an enforced manifest and a decorative one look identical |
 
 ---
 

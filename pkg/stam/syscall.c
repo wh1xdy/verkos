@@ -251,7 +251,8 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
     thread_current()->space = space;
 
     uint64_t entry = 0;
-    if (elf_load(file, len, &entry) != 0) {
+    sav_manifest_t manifest;
+    if (elf_load(file, len, &entry, &manifest) != 0) {
         mmu_switch_user(saved);
         thread_current()->space = saved_space;
         DROP_DISK();
@@ -270,6 +271,10 @@ static uint64_t do_execve(const char *path, char *const *argv, void *frameptr) {
      * program run from the disk. */
     DROP_DISK();
     thread_current()->space = space;
+    /* The new image's manifest replaces the old one, whatever it was. exec is
+     * where a process becomes a different program, and the authority it was
+     * granted is the new program's, not the one that called exec. */
+    thread_current()->sav = manifest;
 
     /* Lay the arguments out at the top of the new stack, the way every aarch64
      * Linux program is started and therefore the way a compiler's idea of
@@ -712,6 +717,18 @@ void handle_user_sync(regs_t *r) {
     __asm__ volatile("msr daifclr, #2" ::: "memory");
 
     if ((esr >> 26) == 0x15) {              /* SVC from AArch64 */
+        /* The manifest, enforced. A sav program declared in its own executable
+         * which calls it can make; asking for another one is not an error it
+         * gets to handle, because a program that could handle it could also
+         * retry it. It dies of SIGSYS, and the console says which call and
+         * what the program was allowed. */
+        thread_t *t = thread_current();
+        if (t && t->sav.present && !sav_allows(&t->sav, r->x[8])) {
+            kprintf("  [sav] pid %d asked for system call %llu, which is not in its manifest\n",
+                    t->id, (unsigned long long)r->x[8]);
+            kprintf("  [sav] it declared: %s\n", t->sav.caps);
+            thread_exit(128 + 31);           /* SIGSYS, as a shell reports it */
+        }
         r->x[0] = do_syscall(r->x[8], r->x[0], r->x[1], r->x[2], r);
         /* On the way back out is where a signal is acted on. Not where it is
          * raised — that happens in an interrupt, with the target's stack

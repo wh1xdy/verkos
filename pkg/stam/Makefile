@@ -196,6 +196,35 @@ progs/badptr.elf: progs/badptr.c
 	$(CC) $(PROG_CFLAGS) -Wl,-Ttext=0x400000 -Wl,-e,_start \
 	    -Wl,--build-id=none -o $@ $<
 
+# ---- programs written in sav ---------------------------------------------
+# savc is the VerkOS compiler for the VerkOS language. It is a host program and
+# is built here rather than assumed: the compiler and the kernel live in the
+# same repository, and a program in the initrd should not need a separate
+# build step to exist.
+#
+# The executables it writes have no assembler, linker or libc anywhere in their
+# history, and carry a note saying which system calls they may make. This
+# kernel reads that note and refuses the rest.
+SAVC = ../sav/savc
+
+# Always delegated, never depended on by timestamp: `../sav/savc` belongs to
+# whichever host built it last, and this repository is built from a Mac and
+# from inside a Linux container against the same checkout. The sav Makefile
+# keeps its objects per host and the copy is cheap.
+.PHONY: savc-for-this-host
+savc-for-this-host:
+	@$(MAKE) -s -C ../sav savc
+
+progs/savhello.elf: ../sav/examples/savhello.sav savc-for-this-host
+	$(SAVC) $< -o $@
+
+# The same program with one call left out of its note: the code still makes
+# it, and the kernel is expected to stop it. A binary that lies is the only
+# way to watch the refusal happen — a check that cannot be seen failing is
+# exactly the defect this project keeps finding in its own work.
+progs/savliar.elf: ../sav/examples/savhello.sav savc-for-this-host
+	$(SAVC) $< -o $@ --omit-call 64
+
 # The initrd as every Linux initramfs is: a newc cpio archive, written by
 # VerkOS' own vcpio. Names have no leading slash, which is the convention;
 # stam accepts either when a program asks.
@@ -208,6 +237,7 @@ progs/vsh.elf: progs/vsh.c
 # to synchronise with. The commands are in progs/rc, in the repository, where
 # they can be read.
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
+       progs/savhello.elf progs/savliar.elf \
                           progs/forky.elf progs/twice.elf progs/badptr.elf \
                           progs/catch.elf progs/ls.elf progs/mkdir.elf \
                           progs/rm.elf progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf progs/rc
@@ -229,6 +259,8 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/udpecho.elf progs/scriptroot/udpecho
 	@cp progs/tcpget.elf progs/scriptroot/tcpget
 	@cp progs/tcpserve.elf progs/scriptroot/tcpserve
+	@cp progs/savhello.elf progs/scriptroot/savhello
+	@cp progs/savliar.elf progs/scriptroot/savliar
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
@@ -260,6 +292,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
+       progs/savhello.elf progs/savliar.elf \
        progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf \
        progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf \
        progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio

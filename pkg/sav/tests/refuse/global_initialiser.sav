@@ -1,0 +1,3 @@
+// expect: starts as zero
+var table: i64 = 7;
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }

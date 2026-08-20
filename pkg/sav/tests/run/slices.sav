@@ -1,0 +1,43 @@
+// Slices carry their length, and a slice of a slice is a slice.
+fn count_letter(s: []u8, c: u8) -> n: i64
+    needs c != 0
+    gives n <= s.len
+{
+    var found: i64 = 0;
+    for i in 0..s.len {
+        if s[i] == c { found = found + 1; }
+    }
+    return found;
+}
+
+fn show(out: Console, v: i64) {
+    var buf: [24]u8;
+    var i: i64 = 23;
+    var x: i64 = v;
+    if x == 0 { buf[i] = '0'; i = i - 1; }
+    while x > 0 {
+        buf[i] = ('0' as u8) + ((x % 10) as u8);
+        x = x / 10;
+        i = i - 1;
+    }
+    out!write(buf[i + 1..24]);
+    out!write("\n");
+}
+
+entry fn main(out: Console) -> i32 {
+    let word: []u8 = "kvistarna";
+    show(out, word.len);
+    show(out, count_letter(word, 'a'));
+    out!write(word[0..5]);
+    out!write("\n");
+    out!write(word[5..word.len]);
+    out!write("\n");
+
+    var buf: [8]u8;
+    for i in 0..8 { buf[i] = ('A' as u8) + (i as u8); }
+    out!write(buf[0..8]);
+    out!write("\n");
+    out!write(buf[2..5]);
+    out!write("\n");
+    return 0;
+}

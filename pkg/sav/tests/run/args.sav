@@ -1,0 +1,13 @@
+// args: alpha beta
+entry fn main(out: Console, args: Args) -> i32 {
+    let n: i64 = args!count();
+    for i in 0..n {
+        out!write(args!get(i));
+        out!write("\n");
+    }
+    // asking past the end is an empty slice, not whatever was on the stack
+    out!write("[");
+    out!write(args!get(n + 5));
+    out!write("]\n");
+    return 0;
+}

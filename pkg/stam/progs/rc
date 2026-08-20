@@ -23,6 +23,8 @@ ls /
 rm /gone.txt
 rm /adir
 ls /
+savhello written-in-sav
+savliar
 udpecho
 tcpserve
 tcpget

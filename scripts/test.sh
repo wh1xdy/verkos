@@ -905,6 +905,33 @@ if [ -x "$T/vmkfs" ] && command -v file >/dev/null 2>&1; then
     done
 fi
 
+say "sav (our own language) and savc, which writes its executables"
+# savc turns a .sav file into an aarch64 ELF with no assembler, no linker and
+# no libc in between, and the suite next to it checks both halves of the
+# language: what it accepts and, more importantly, what it refuses. A rule
+# nothing tests is a comment.
+#
+# Every case reports itself, so a failure names the rule that broke rather
+# than "the sav suite". On a host that cannot execute aarch64 Linux binaries
+# the programs are compiled and not run, and the suite says so by reporting
+# only the compile half.
+if [ -f pkg/sav/Makefile ]; then
+    if make -s -C pkg/sav savc >/dev/null 2>&1; then
+        ok "savc builds"
+        while IFS= read -r line; do
+            case "$line" in
+                PASS\ *) ok "${line#PASS }" ;;
+                FAIL\ *) bad "${line#FAIL }" ;;
+                *) [ -n "$line" ] && printf '      %s\n' "$line" ;;
+            esac
+        done < <(sh pkg/sav/tests/run.sh 2>/dev/null)
+    else
+        bad "savc does not build"
+    fi
+else
+    printf '  \033[33mskip\033[0m  sav (pkg/sav is not here)\n'
+fi
+
 say "stam (our own kernel) builds, and is a valid arm64 Image"
 # Same trap as vboot: the Makefile builds with $(CROSS)gcc, and finding
 # aarch64-linux-gnu-gcc on an x86_64 host means nothing unless CROSS is set to
@@ -1498,6 +1525,35 @@ PYEOF
                     # takes part in deciding.
                     check "bytes sent into stam come back wrapped by the program" \
                           "grep -q CLIENT-OK $T/client.result"
+                    # --- sav, on stam -----------------------------------
+                    # A program written in the VerkOS language, compiled by the
+                    # VerkOS compiler into an executable with no assembler,
+                    # linker or libc anywhere in its history, loaded out of the
+                    # initrd by the VerkOS kernel. It prints what it computed,
+                    # so a program that started and did nothing is not mistaken
+                    # for one that worked.
+                    check "a program written in sav runs on stam" \
+                          "grep -aq 'a program written in sav is running on stam' $SL"
+                    check "what the sav program computed is what it should have" \
+                          "grep -aq '6 \* 7 = 42, and 12345 has 5 digits' $SL"
+                    check "the sav program reached its end, contracts and all" \
+                          "grep -aq 'sav program finished' $SL"
+                    # The kernel read the capability manifest out of the note in
+                    # the executable. This line comes from the loader, not from
+                    # the program, so it says the kernel found it — not that the
+                    # compiler wrote it.
+                    check "stam reads the capability manifest out of the executable" \
+                          "grep -aqE 'a sav program: [A-Za-z ]+, and 3 system calls it may make' $SL"
+                    # And the refusal, watched happening. savliar is the same
+                    # program with write left out of its note on purpose: the
+                    # code still makes the call, and the kernel stops it. This
+                    # is the only check here that can tell an enforced manifest
+                    # from a decorative one.
+                    check "a sav program is stopped at a call its manifest does not carry" \
+                          "grep -aq 'asked for system call 64, which is not in its manifest' $SL"
+                    check "and it dies of SIGSYS, which the shell reports as 159" \
+                          "grep -aq '\[159\]' $SL"
+
                     # Run from the disk, not from the archive: `diskprog` is in
                     # no initrd, so exec had nowhere else to find it. It prints
                     # the argv it was given, which also says the arguments

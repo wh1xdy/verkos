@@ -5085,3 +5085,130 @@ if it is one, is noted, not fixed.
 stam is not here — the checkout predates it and stam is aarch64 only so far —
 and no live x86_64 ISO has been built. "x86_64 builds and boots" is the claim;
 "x86_64 has everything aarch64 has" is not.
+
+---
+
+## D-109 — sav: VerkOS gets its own language, and its own compiler for it
+
+**Decision:** write a language, `sav`, and a compiler for it, `savc`, that turns
+a `.sav` file into an aarch64 ELF executable with no assembler, no linker and
+no libc anywhere between the source and the bytes. The language's rules are
+taken from the defects that have cost this project the most time, and the
+capability set of a program survives compilation as a note in the executable,
+which stam reads and enforces.
+
+**Why a language, rather than a C compiler.** A C compiler would have been
+worth more to the distribution — GCC is the largest third-party thing left —
+and it would have been a bigger job that ended with the same defects being
+possible to write. The whole of this log has one recurring shape: *a report
+that does not depend on what it reports*. A menu entry naming a flag nothing
+implemented, refusals exiting zero, a kernel printing "time running" with no
+timer, a test that lied every third run, a CI job green because the checks were
+skipped. That is a language-shaped problem, and no C compiler refuses any of it.
+
+### The four rules
+
+**1. A claim must depend on what it claims.** `needs` and `gives` are part of a
+function's signature, and the returned value is named there — `fn digits(v: i64)
+-> n: i64` — so that a promise can be about it. The compiler refuses a clause it
+can decide by itself (`gives true`, `gives 2 * 3 == 6`, `needs LIMIT > 0` where
+LIMIT is a const), refuses a `gives` that never mentions the result, because
+such a clause says the same thing whether the function worked or not, and
+refuses a `gives` on a function whose result has no name: you may only promise
+about something you have named. `assert` is held to the same rule.
+
+What it is **not** is a prover. `gives n >= 0` on a function that returns -1
+compiles; it fails at run time, in a message naming the file, the
+line and the source of the clause, and the program stops with 70. The compiler
+decides *vacuity*, which is cheap and total; it does not decide *truth*, which
+is neither.
+
+**2. Nothing reaches the world except through a capability.** sav has no inline
+assembly and no free `write`. A system call can be made only through a method
+on a capability value, written `out!write(...)` — the mark is required, so that
+`grep -n '!'` over a program lists every line that reaches outside it — and capability values exist only where the entry code
+put them: `entry fn main(out: Console, args: Args)` may write and read its
+arguments, and can do nothing else. A capability cannot be a global, cannot be
+cast, and cannot be reassigned, so authority travels as an argument and reading
+a signature is enough to know what a function can reach.
+
+**3. The capability set survives compilation, and the kernel enforces it.** savc
+writes the set of system calls the program can possibly make — built from the
+capability methods it actually generated, in the one place in the code
+generator that emits `svc` — into a `PT_NOTE` in the executable. stam reads it
+in `elf_load`, keeps it on the thread, inherits it across `fork`, replaces it
+at `exec`, and refuses at the syscall entry any call the note does not carry:
+the process dies of SIGSYS with the call number and its declared capabilities
+on the console. A program with no note is an ordinary program and is not
+restricted, so nothing that ran before this existed changes.
+
+This is the part that could not be done without owning both halves. A language
+can promise what a program will ask for; only the kernel can make it true.
+
+**4. Device memory is a type with its own syntax, and an address is never a
+constant.** `dev *u32` is a distinct type reached only through `uart@`: `*uart`
+does not compile, nor does indexing it or reaching a field through it, and `dev`
+cannot be cast away. Every access is one instruction of the declared width, and
+it is visible as a device access at the line where it happens. GCC merging `addr_cells = 2; size_cells
+= 1;` into one 8-byte store cost this kernel a boot (see the Makefile comment
+in pkg/stam); savc has no pass that could merge anything. And a global in sav
+may not have an initialiser at all, because the only interesting thing to put
+in one is an address — the table of absolute pointers that stopped resolving
+when the kernel moved to the high half. Every address savc emits is formed
+`adrp`/`add`, PC-relative; the executables it writes contain zero relocations,
+which `readelf -r` says and `make test` checks.
+
+### The syntax
+
+Ordinary where the semantics are ordinary, and its own exactly where they are
+not: braces, `fn`, `let`, `if`, `while`, `for i in 0..n` are what everyone
+already reads. What differs is `needs`/`gives` and the named result, `!` on
+every call that reaches the world, and `@` on every access that reaches
+hardware. Each of those departures is one of the four rules made visible at the
+point of use rather than only in a signature — and two of them are greppable,
+which is the practical form of the same idea.
+
+Being different anywhere else would cost a reader and buy nothing.
+
+### What savc is
+
+Eight C files: a lexer, a parser, a checker that carries the four rules, an
+aarch64 instruction encoder, a code generator, an ELF writer and a driver. It
+is a host program, built per host under `build/$(uname -s)-$(uname -m)` because
+this repository is built from a Mac and from inside a Linux container against
+the same checkout and one set of objects cannot serve both.
+
+The code generator is deliberately simple: values in x0 (and x1 for the second
+word of a slice), everything else on the stack, no optimisation and no
+reordering. That is not only economy — rule 4 says an access happens exactly as
+written, and a compiler with no reordering pass keeps that promise by
+construction rather than by exception.
+
+### What is proved by running it
+
+- `pkg/sav/tests` — 35 cases in the build container: thirteen refusals, each
+  checking the *reason* and not just the exit status; eight programs compiled,
+  run and compared byte for byte, including arithmetic on narrow types,
+  recursion, structs, slices, `for` and `while`, argv, and a contract that
+  breaks and stops the program with 70; and structural checks on the binary —
+  the manifest holds exactly the calls used, there are no relocations, the note
+  is there, and two writes to adjacent device registers come out as two 32-bit
+  stores.
+- On stam, in `make test`: `savhello`, written in sav, is loaded out of the
+  initrd and prints what it computed. The kernel prints the manifest it read.
+- And `savliar`: the same source compiled with `--omit-call 64`, so the code
+  makes a call the note does not carry. stam refuses it, says which call, and
+  the shell reports 159 — SIGSYS. That flag exists for exactly this: an
+  enforcement nobody can watch failing is indistinguishable from a decorative
+  one, which is this project's oldest defect wearing a kernel's clothes.
+
+### What is not done
+
+No modules — one file per program, and every test program that prints a number
+carries its own copy of the routine that does it. No bounds checks on slice
+indexing, which the length is there to make possible and which nothing yet
+does. No self-hosting: savc is written in C, and the language cannot yet
+express the compiler. No floating point, no unions, no enums, no struct
+arguments by value, and no x86_64 — savc emits aarch64 and only aarch64.
+
+`kvist` is reserved for something later, and is deliberately not used here.

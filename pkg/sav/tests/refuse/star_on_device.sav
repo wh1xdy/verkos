@@ -1,0 +1,7 @@
+// expect: written `p@`
+entry fn main(out: Console) -> i32 {
+    let uart: dev *u32 = 0x9000000 as dev *u32;
+    *uart = 65;
+    out!write("x");
+    return 0;
+}

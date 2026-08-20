@@ -19,7 +19,10 @@
 #include "console.h"
 
 #define PT_LOAD 1
+#define PT_NOTE 4
 #define PF_X    1
+#define SAV_NOTE_TYPE 1
+#define SAV_MAGIC 0x31564153u          /* "SAV1", little-endian */
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t le32(const uint8_t *p) {
@@ -32,8 +35,49 @@ static uint64_t le64(const uint8_t *p) {
 /* Every rejection says which check failed. "not a valid executable" sends
  * someone reading the loader; "built for a different machine" sends them to
  * the compiler, which is where the problem is. */
-int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out) {
+int sav_allows(const sav_manifest_t *m, uint64_t nr) {
+    if (!m->present) return 1;
+    for (unsigned i = 0; i < m->ncalls; i++) if (m->call[i] == (uint32_t)nr) return 1;
+    return 0;
+}
+
+/* Read the manifest out of a PT_NOTE, if there is one. Everything is bounded
+ * by the sizes the file itself declares and then by the size of the file: a
+ * note that says it is longer than the image is a broken image, not a reason
+ * to read past the end of it. */
+static void read_sav_note(const uint8_t *e, uint64_t size, uint64_t off, uint64_t len,
+                          sav_manifest_t *out) {
+    if (!out || off + len > size || len < 16) return;
+    const uint8_t *n = e + off;
+    uint32_t namesz = le32(n), descsz = le32(n + 4), type = le32(n + 8);
+    uint64_t name_at = 12, desc_at = 12 + ((namesz + 3) & ~3u);
+    if (desc_at + descsz > len) return;
+    if (type != SAV_NOTE_TYPE || namesz != 4) return;
+    if (!(n[name_at] == 's' && n[name_at+1] == 'a' && n[name_at+2] == 'v' && n[name_at+3] == 0)) return;
+
+    const uint8_t *d = n + desc_at;
+    if (descsz < 16 || le32(d) != SAV_MAGIC || le32(d + 4) != 1) return;
+    uint32_t ncalls = le32(d + 8), nameslen = le32(d + 12);
+    if (16 + (uint64_t)ncalls * 4 + nameslen > descsz) return;
+    if (ncalls > SAV_MAX_CALLS) return;
+
+    out->present = 1;
+    out->ncalls = ncalls;
+    for (uint32_t i = 0; i < ncalls; i++) out->call[i] = le32(d + 16 + i * 4);
+    /* The names arrive with a NUL between each; the console wants one line,
+     * so they are joined with a space and the trailing one is dropped. */
+    uint32_t k = 0;
+    for (; k < nameslen && k < SAV_CAPS_BYTES - 1; k++) {
+        char ch = (char)d[16 + ncalls * 4 + k];
+        out->caps[k] = ch ? ch : ' ';
+    }
+    while (k && out->caps[k - 1] == ' ') k--;
+    out->caps[k] = 0;
+}
+
+int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out, sav_manifest_t *manifest) {
     const uint8_t *e = (const uint8_t *)(uintptr_t)image;
+    if (manifest) { manifest->present = 0; manifest->ncalls = 0; manifest->caps[0] = 0; }
     if (size < 64) { kprintf("  [elf] too small to be an executable\n"); return -1; }
     if (!(e[0] == 0x7f && e[1] == 'E' && e[2] == 'L' && e[3] == 'F')) {
         kprintf("  [elf] no ELF magic — this is not an executable\n"); return -1; }
@@ -51,6 +95,7 @@ int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out) {
     unsigned loaded = 0;
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *ph = e + phoff + (uint64_t)i * phentsize;
+        if (le32(ph) == PT_NOTE) { read_sav_note(e, size, le64(ph + 8), le64(ph + 32), manifest); continue; }
         if (le32(ph) != PT_LOAD) continue;
         uint32_t flags  = le32(ph + 4);
         uint64_t offset = le64(ph + 8);
@@ -87,6 +132,11 @@ int elf_load(uint64_t image, uint64_t size, uint64_t *entry_out) {
         loaded++;
     }
     if (!loaded) { kprintf("  [elf] nothing to load — no PT_LOAD segments\n"); return -1; }
+
+    if (manifest && manifest->present)
+        kprintf("  [sav] a sav program: %s, and %u system call%s it may make\n",
+                manifest->caps[0] ? manifest->caps : "no capabilities",
+                manifest->ncalls, manifest->ncalls == 1 ? "" : "s");
 
     *entry_out = le64(e + 24);
     return 0;

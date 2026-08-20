@@ -1,0 +1,34 @@
+// Arithmetic, precedence and the narrow types staying narrow.
+fn show(out: Console, v: i64) {
+    var buf: [24]u8;
+    var i: i64 = 23;
+    var x: i64 = v;
+    if x < 0 { out!write("-"); x = 0 - x; }
+    if x == 0 { buf[i] = '0'; i = i - 1; }
+    while x > 0 {
+        buf[i] = ('0' as u8) + ((x % 10) as u8);
+        x = x / 10;
+        i = i - 1;
+    }
+    out!write(buf[i + 1..24]);
+    out!write("\n");
+}
+
+entry fn main(out: Console) -> i32 {
+    show(out, 2 + 3 * 4);
+    show(out, (2 + 3) * 4);
+    show(out, 17 / 5);
+    show(out, 17 % 5);
+    show(out, 0 - 17 / 5);
+    show(out, 1 << 10);
+    show(out, 255 >> 4);
+    show(out, 6 & 3);
+    show(out, 6 | 3);
+    show(out, 6 ^ 3);
+    let a: u8 = 200;
+    let b: u8 = 100;
+    show(out, (a + b) as i64);       // wraps in u8, and says so
+    if 3 < 4 && 5 >= 5 { out!write("comparisons hold\n"); }
+    if 3 > 4 || 1 == 1 { out!write("or holds\n"); }
+    return 0;
+}

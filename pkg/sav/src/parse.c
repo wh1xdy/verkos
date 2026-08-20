@@ -1,0 +1,595 @@
+/* The sav parser: source to a tree.
+ *
+ * Recursive descent, one token of lookahead, and no preprocessor — a sav file
+ * means what it says without a second language deciding which half of it is
+ * real. Structs must be declared before they are used; that is a rule and not
+ * an accident, because a compiler that accepts a name it has not seen must
+ * either guess its size or make two passes over everything.
+ */
+#include "sav.h"
+
+typedef struct {
+    Lexer lx;
+    Unit *unit;
+} P;
+
+static Type *parse_type(P *p);
+static Expr *parse_expr(P *p);
+static Stmt *parse_stmt(P *p);
+
+/* The text of a clause, lifted straight out of the source between two token
+ * positions. A contract that fails names itself in the message; quoting the
+ * source is the only way for that name to stay true when the clause changes. */
+static char *src_span(int l1, int c1, int l2, int c2) {
+    const char *p = src_text;
+    int line = 1, col = 1;
+    const char *start = NULL, *end = NULL;
+    for (;;) {
+        if (line == l1 && col == c1) start = p;
+        if (line == l2 && col == c2) { end = p; break; }
+        if (!*p) { end = p; break; }
+        if (*p == '\n') { line++; col = 1; } else col++;
+        p++;
+    }
+    if (!start) return xstrndup("", 0);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\n' || end[-1] == '\t' || end[-1] == '\r')) end--;
+    return xstrndup(start, (size_t)(end - start));
+}
+
+static void expect(P *p, TokKind k) {
+    if (p->lx.tok.kind != k)
+        die_at(src_name, p->lx.tok.line, p->lx.tok.col,
+               "expected %s, found %s", tok_name(k), tok_name(p->lx.tok.kind));
+    lex_next(&p->lx);
+}
+
+static int accept(P *p, TokKind k) {
+    if (p->lx.tok.kind == k) { lex_next(&p->lx); return 1; }
+    return 0;
+}
+
+static char *expect_ident(P *p) {
+    if (p->lx.tok.kind != T_IDENT)
+        die_at(src_name, p->lx.tok.line, p->lx.tok.col,
+               "expected a name, found %s", tok_name(p->lx.tok.kind));
+    char *s = p->lx.tok.text;
+    lex_next(&p->lx);
+    return s;
+}
+
+static Expr *new_expr(P *p, ExprKind k) {
+    Expr *e = xmalloc(sizeof *e);
+    e->kind = k; e->line = p->lx.tok.line; e->col = p->lx.tok.col;
+    return e;
+}
+
+static Stmt *new_stmt(P *p, StmtKind k) {
+    Stmt *s = xmalloc(sizeof *s);
+    s->kind = k; s->line = p->lx.tok.line; s->col = p->lx.tok.col;
+    return s;
+}
+
+/* ---- types ------------------------------------------------------------- */
+static Type *find_struct(P *p, const char *name) {
+    for (int i = 0; i < p->unit->nstructs; i++)
+        if (strcmp(p->unit->structs[i]->name, name) == 0) return p->unit->structs[i];
+    return NULL;
+}
+
+static Type *parse_type(P *p) {
+    int line = p->lx.tok.line, col = p->lx.tok.col;
+    int is_dev = accept(p, T_DEV);
+    if (accept(p, T_STAR)) return ty_ptr(parse_type(p), is_dev);
+    if (is_dev)
+        die_at(src_name, line, col,
+               "`dev` describes a pointer: write `dev *u32`, the address of a register");
+    if (accept(p, T_LBRACK)) {
+        if (accept(p, T_RBRACK)) return ty_slice(parse_type(p));
+        if (p->lx.tok.kind != T_INT)
+            die_at(src_name, p->lx.tok.line, p->lx.tok.col, "an array length must be a number");
+        i64 n = p->lx.tok.ival;
+        lex_next(&p->lx);
+        expect(p, T_RBRACK);
+        return ty_array(parse_type(p), n);
+    }
+    if (p->lx.tok.kind != T_IDENT)
+        die_at(src_name, line, col, "expected a type, found %s", tok_name(p->lx.tok.kind));
+    char *name = p->lx.tok.text;
+    lex_next(&p->lx);
+    static const struct { const char *n; int bits, sign; } ints[] = {
+        {"i8",8,1},{"i16",16,1},{"i32",32,1},{"i64",64,1},
+        {"u8",8,0},{"u16",16,0},{"u32",32,0},{"u64",64,0},
+    };
+    for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++)
+        if (strcmp(name, ints[i].n) == 0) return ty_int(ints[i].bits, ints[i].sign);
+    if (strcmp(name, "bool") == 0) return ty_bool();
+    if (strcmp(name, "void") == 0) return ty_void();
+    CapDef *c = cap_by_name(name);
+    if (c) return ty_cap(c);
+    Type *s = find_struct(p, name);
+    if (s) return s;
+    die_at(src_name, line, col, "there is no type called `%s`", name);
+    return NULL;
+}
+
+/* ---- expressions ------------------------------------------------------- */
+static Expr *parse_primary(P *p) {
+    Token t = p->lx.tok;
+    switch (t.kind) {
+    case T_INT: {
+        Expr *e = new_expr(p, E_INT); e->ival = t.ival;
+        lex_next(&p->lx); return e;
+    }
+    case T_TRUE: case T_FALSE: {
+        Expr *e = new_expr(p, E_BOOL); e->ival = (t.kind == T_TRUE);
+        lex_next(&p->lx); return e;
+    }
+    case T_STR: {
+        Expr *e = new_expr(p, E_STR); e->str = t.text; e->slen = t.len;
+        lex_next(&p->lx); return e;
+    }
+    case T_SIZE: {
+        Expr *e = new_expr(p, E_SIZE);
+        lex_next(&p->lx);
+        expect(p, T_LPAREN);
+        e->type = parse_type(p);
+        expect(p, T_RPAREN);
+        return e;
+    }
+    case T_LPAREN: {
+        lex_next(&p->lx);
+        Expr *e = parse_expr(p);
+        expect(p, T_RPAREN);
+        return e;
+    }
+    case T_IDENT: {
+        char *name = t.text;
+        Expr *e = new_expr(p, E_VAR);
+        lex_next(&p->lx);
+        if (p->lx.tok.kind == T_LPAREN) {
+            lex_next(&p->lx);
+            e->kind = E_CALL; e->name = name;
+            Expr **args = NULL; int n = 0;
+            if (p->lx.tok.kind != T_RPAREN) {
+                for (;;) {
+                    args = realloc(args, sizeof(Expr *) * (size_t)(n + 1));
+                    args[n++] = parse_expr(p);
+                    if (!accept(p, T_COMMA)) break;
+                }
+            }
+            expect(p, T_RPAREN);
+            e->args = args; e->nargs = n;
+            return e;
+        }
+        e->name = name;
+        return e;
+    }
+    default:
+        die_at(src_name, t.line, t.col, "expected a value, found %s", tok_name(t.kind));
+        return NULL;
+    }
+}
+
+static Expr *parse_postfix(P *p) {
+    Expr *e = parse_primary(p);
+    for (;;) {
+        /* `out!write(...)`. A call that reaches the world is marked where it
+         * happens, not only in the signature that permitted it: `grep -n '!'`
+         * over a sav program lists every line that touches anything outside
+         * the process. A capability's methods can be called no other way. */
+        if (p->lx.tok.kind == T_BANG) {
+            lex_next(&p->lx);
+            char *name = expect_ident(p);
+            expect(p, T_LPAREN);
+            Expr *m = xmalloc(sizeof *m);
+            m->kind = E_METHOD; m->line = e->line; m->col = e->col;
+            m->a = e; m->name = name;
+            Expr **args = NULL; int n = 0;
+            if (p->lx.tok.kind != T_RPAREN) {
+                for (;;) {
+                    args = realloc(args, sizeof(Expr *) * (size_t)(n + 1));
+                    args[n++] = parse_expr(p);
+                    if (!accept(p, T_COMMA)) break;
+                }
+            }
+            expect(p, T_RPAREN);
+            m->args = args; m->nargs = n;
+            e = m;
+            continue;
+        }
+        /* `uart@`. A device access does not look like memory, because it is
+         * not: it happens exactly once, at exactly the declared width, in the
+         * order written. */
+        if (p->lx.tok.kind == T_AT) {
+            Expr *d = new_expr(p, E_DEREF);
+            lex_next(&p->lx);
+            d->a = e; d->op = T_AT;
+            d->line = e->line; d->col = e->col;
+            e = d;
+            continue;
+        }
+        if (p->lx.tok.kind == T_DOT) {
+            lex_next(&p->lx);
+            int nline = p->lx.tok.line, ncol = p->lx.tok.col;
+            char *name = expect_ident(p);
+            /* `x.name(...)` is never a call in sav: the only methods are a
+             * capability's, and those are called with `!` so that a line which
+             * reaches the world can be told from one that does not. */
+            if (p->lx.tok.kind == T_LPAREN)
+                die_at(src_name, nline, ncol,
+                       "the only methods in sav are a capability's, and they are called with "
+                       "`!`: write `%s!%s(...)`",
+                       e->kind == E_VAR ? e->name : "x", name);
+            Expr *f = xmalloc(sizeof *f);
+            f->kind = E_FIELD; f->line = e->line; f->col = e->col;
+            f->a = e; f->name = name;
+            e = f;
+            continue;
+        }
+        if (p->lx.tok.kind == T_LBRACK) {
+            lex_next(&p->lx);
+            Expr *i = parse_expr(p);
+            if (accept(p, T_DOTDOT)) {          /* a slice of it */
+                Expr *hi = (p->lx.tok.kind == T_RBRACK) ? NULL : parse_expr(p);
+                expect(p, T_RBRACK);
+                Expr *s = xmalloc(sizeof *s);
+                s->kind = E_SLICE; s->line = e->line; s->col = e->col;
+                s->a = e; s->b = i; s->c = hi;
+                e = s;
+                continue;
+            }
+            expect(p, T_RBRACK);
+            Expr *ix = xmalloc(sizeof *ix);
+            ix->kind = E_INDEX; ix->line = e->line; ix->col = e->col;
+            ix->a = e; ix->b = i;
+            e = ix;
+            continue;
+        }
+        return e;
+    }
+}
+
+static Expr *parse_unary(P *p) {
+    Token t = p->lx.tok;
+    if (t.kind == T_MINUS || t.kind == T_BANG || t.kind == T_TILDE) {
+        Expr *e = new_expr(p, E_UNARY);
+        e->op = t.kind;
+        lex_next(&p->lx);
+        e->a = parse_unary(p);
+        return e;
+    }
+    if (t.kind == T_AMP) {
+        Expr *e = new_expr(p, E_ADDR);
+        lex_next(&p->lx);
+        e->a = parse_unary(p);
+        return e;
+    }
+    if (t.kind == T_STAR) {
+        Expr *e = new_expr(p, E_DEREF);
+        lex_next(&p->lx);
+        e->a = parse_unary(p);
+        return e;
+    }
+    Expr *e = parse_postfix(p);
+    while (p->lx.tok.kind == T_AS) {
+        Expr *c = xmalloc(sizeof *c);
+        c->kind = E_CAST; c->line = e->line; c->col = e->col;
+        lex_next(&p->lx);
+        c->a = e; c->type = parse_type(p);
+        e = c;
+    }
+    return e;
+}
+
+static int prec_of(TokKind k) {
+    switch (k) {
+    case T_STAR: case T_SLASH: case T_PERCENT: return 10;
+    case T_PLUS: case T_MINUS: return 9;
+    case T_SHL: case T_SHR: return 8;
+    case T_LT: case T_LE: case T_GT: case T_GE: return 7;
+    case T_EQEQ: case T_NE: return 6;
+    case T_AMP: return 5;
+    case T_CARET: return 4;
+    case T_PIPE: return 3;
+    case T_ANDAND: return 2;
+    case T_OROR: return 1;
+    default: return 0;
+    }
+}
+
+static Expr *parse_binary(P *p, int min_prec) {
+    Expr *lhs = parse_unary(p);
+    for (;;) {
+        int prec = prec_of(p->lx.tok.kind);
+        if (prec == 0 || prec < min_prec) return lhs;
+        int op = p->lx.tok.kind;
+        int line = p->lx.tok.line, col = p->lx.tok.col;
+        lex_next(&p->lx);
+        Expr *rhs = parse_binary(p, prec + 1);
+        Expr *e = xmalloc(sizeof *e);
+        e->kind = E_BINARY; e->op = op; e->a = lhs; e->b = rhs;
+        e->line = line; e->col = col;
+        lhs = e;
+    }
+}
+
+static Expr *parse_expr(P *p) {
+    Expr *lhs = parse_binary(p, 1);
+    if (p->lx.tok.kind == T_ASSIGN || p->lx.tok.kind == T_PLUSEQ || p->lx.tok.kind == T_MINUSEQ) {
+        int op = p->lx.tok.kind;
+        int line = p->lx.tok.line, col = p->lx.tok.col;
+        lex_next(&p->lx);
+        Expr *rhs = parse_expr(p);
+        if (op != T_ASSIGN) {
+            /* a += b is a = a + b, expanded here so the checker and the code
+             * generator only ever see one shape. */
+            Expr *sum = xmalloc(sizeof *sum);
+            sum->kind = E_BINARY;
+            sum->op = (op == T_PLUSEQ) ? T_PLUS : T_MINUS;
+            sum->a = lhs; sum->b = rhs; sum->line = line; sum->col = col;
+            rhs = sum;
+        }
+        Expr *e = xmalloc(sizeof *e);
+        e->kind = E_ASSIGN; e->a = lhs; e->b = rhs; e->line = line; e->col = col;
+        return e;
+    }
+    return lhs;
+}
+
+/* ---- statements -------------------------------------------------------- */
+static Stmt *parse_block(P *p) {
+    Stmt *s = new_stmt(p, S_BLOCK);
+    expect(p, T_LBRACE);
+    Stmt **list = NULL; int n = 0;
+    while (p->lx.tok.kind != T_RBRACE) {
+        if (p->lx.tok.kind == T_EOF)
+            die_at(src_name, s->line, s->col, "this block is never closed");
+        list = realloc(list, sizeof(Stmt *) * (size_t)(n + 1));
+        list[n++] = parse_stmt(p);
+    }
+    expect(p, T_RBRACE);
+    s->stmts = list; s->nstmts = n;
+    return s;
+}
+
+static Stmt *parse_stmt(P *p) {
+    switch (p->lx.tok.kind) {
+    case T_LBRACE: return parse_block(p);
+    case T_LET: case T_VAR: {
+        Stmt *s = new_stmt(p, S_LET);
+        s->is_var = (p->lx.tok.kind == T_VAR);
+        lex_next(&p->lx);
+        s->name = expect_ident(p);
+        if (accept(p, T_COLON)) s->type = parse_type(p);
+        if (accept(p, T_ASSIGN)) s->init = parse_expr(p);
+        else if (!s->type)
+            die_at(src_name, s->line, s->col,
+                   "`%s %s` says neither a type nor a value, so nothing here knows what it is",
+                   s->is_var ? "var" : "let", s->name);
+        expect(p, T_SEMI);
+        return s;
+    }
+    case T_IF: {
+        Stmt *s = new_stmt(p, S_IF);
+        lex_next(&p->lx);
+        s->cond = parse_expr(p);
+        s->then_s = parse_block(p);
+        if (accept(p, T_ELSE))
+            s->else_s = (p->lx.tok.kind == T_IF) ? parse_stmt(p) : parse_block(p);
+        return s;
+    }
+    case T_WHILE: {
+        Stmt *s = new_stmt(p, S_WHILE);
+        lex_next(&p->lx);
+        s->cond = parse_expr(p);
+        s->body = parse_block(p);
+        return s;
+    }
+    case T_FOR: {
+        Stmt *s = new_stmt(p, S_FOR);
+        lex_next(&p->lx);
+        s->name = expect_ident(p);
+        expect(p, T_IN);
+        s->lo = parse_binary(p, 1);
+        expect(p, T_DOTDOT);
+        s->hi = parse_binary(p, 1);
+        s->body = parse_block(p);
+        return s;
+    }
+    case T_RETURN: {
+        Stmt *s = new_stmt(p, S_RETURN);
+        lex_next(&p->lx);
+        if (p->lx.tok.kind != T_SEMI) s->expr = parse_expr(p);
+        expect(p, T_SEMI);
+        return s;
+    }
+    case T_BREAK: { Stmt *s = new_stmt(p, S_BREAK); lex_next(&p->lx); expect(p, T_SEMI); return s; }
+    case T_CONTINUE: { Stmt *s = new_stmt(p, S_CONTINUE); lex_next(&p->lx); expect(p, T_SEMI); return s; }
+    case T_ASSERT: {
+        Stmt *s = new_stmt(p, S_ASSERT);
+        int l1 = p->lx.tok.line, c1;
+        lex_next(&p->lx);
+        c1 = p->lx.tok.col; l1 = p->lx.tok.line;
+        s->cond = parse_expr(p);
+        s->name = src_span(l1, c1, p->lx.tok.line, p->lx.tok.col);
+        expect(p, T_SEMI);
+        return s;
+    }
+    default: {
+        Stmt *s = new_stmt(p, S_EXPR);
+        s->expr = parse_expr(p);
+        expect(p, T_SEMI);
+        return s;
+    }
+    }
+}
+
+/* ---- declarations ------------------------------------------------------ */
+static void parse_struct(P *p) {
+    lex_next(&p->lx);
+    Type *t = xmalloc(sizeof *t);
+    t->kind = TY_STRUCT;
+    t->name = expect_ident(p);
+    expect(p, T_LBRACE);
+    Field *fields = NULL; int n = 0, off = 0, align = 1;
+    while (p->lx.tok.kind != T_RBRACE) {
+        char *fname = expect_ident(p);
+        expect(p, T_COLON);
+        Type *ft = parse_type(p);
+        if (ft->align > align) align = ft->align;
+        off = (off + ft->align - 1) & ~(ft->align - 1);
+        fields = realloc(fields, sizeof(Field) * (size_t)(n + 1));
+        fields[n].name = fname; fields[n].type = ft; fields[n].offset = off;
+        n++; off += ft->size;
+        if (!accept(p, T_COMMA)) break;
+    }
+    expect(p, T_RBRACE);
+    t->fields = fields; t->nfields = n;
+    t->align = align;
+    t->size = (off + align - 1) & ~(align - 1);
+    p->unit->structs = realloc(p->unit->structs, sizeof(Type *) * (size_t)(p->unit->nstructs + 1));
+    p->unit->structs[p->unit->nstructs++] = t;
+}
+
+static void add_global(P *p, Sym *s) {
+    s->next = p->unit->globals;
+    p->unit->globals = s;
+}
+
+static void parse_fn(P *p, int is_entry) {
+    Fn *f = xmalloc(sizeof *f);
+    f->line = p->lx.tok.line; f->col = p->lx.tok.col;
+    lex_next(&p->lx);                      /* fn */
+    f->name = expect_ident(p);
+    f->is_entry = is_entry;
+    expect(p, T_LPAREN);
+    Sym *tail = NULL;
+    while (p->lx.tok.kind != T_RPAREN) {
+        Sym *s = xmalloc(sizeof *s);
+        s->kind = SYM_PARAM;
+        s->name = expect_ident(p);
+        expect(p, T_COLON);
+        s->type = parse_type(p);
+        if (tail) tail->next = s; else f->params = s;
+        tail = s;
+        f->nparams++;
+        if (!accept(p, T_COMMA)) break;
+    }
+    expect(p, T_RPAREN);
+    f->ret = ty_void();
+    if (accept(p, T_ARROW)) {
+        /* `-> i64` or `-> n: i64`. Naming the result is what makes a promise
+         * about it possible to write: `gives n >= 1` talks about a name, the
+         * way every other expression in the language does. */
+        if (p->lx.tok.kind == T_IDENT && lex_peek(&p->lx)->kind == T_COLON) {
+            f->ret_name = p->lx.tok.text;
+            lex_next(&p->lx);
+            lex_next(&p->lx);
+        }
+        f->ret = parse_type(p);
+    }
+
+    for (;;) {
+        if (p->lx.tok.kind == T_NEEDS || p->lx.tok.kind == T_GIVES) {
+            int is_req = (p->lx.tok.kind == T_NEEDS);
+            lex_next(&p->lx);
+            for (;;) {
+                int l1 = p->lx.tok.line, c1 = p->lx.tok.col;
+                Expr *e = parse_expr(p);
+                char *text = src_span(l1, c1, p->lx.tok.line, p->lx.tok.col);
+                Contract c = { e, l1, c1, text };
+                if (is_req) {
+                    f->req = realloc(f->req, sizeof(Contract) * (size_t)(f->nreq + 1));
+                    f->req[f->nreq++] = c;
+                } else {
+                    f->ens = realloc(f->ens, sizeof(Contract) * (size_t)(f->nens + 1));
+                    f->ens[f->nens++] = c;
+                }
+                if (!accept(p, T_COMMA)) break;
+            }
+            continue;
+        }
+        break;
+    }
+
+    f->body = parse_block(p);
+
+    Fn **tp = &p->unit->fns;
+    while (*tp) tp = &(*tp)->next;
+    *tp = f;
+    if (is_entry) {
+        if (p->unit->entry)
+            die_at(src_name, f->line, f->col,
+                   "there is already an `entry fn` (%s); a program starts in one place",
+                   p->unit->entry->name);
+        p->unit->entry = f;
+    }
+}
+
+Unit *parse_unit(const char *text) {
+    P p;
+    memset(&p, 0, sizeof p);
+    p.unit = xmalloc(sizeof(Unit));
+    lex_init(&p.lx, text);
+
+    while (p.lx.tok.kind != T_EOF) {
+        switch (p.lx.tok.kind) {
+        case T_STRUCT: parse_struct(&p); break;
+        case T_FN: parse_fn(&p, 0); break;
+        case T_ENTRY:
+            lex_next(&p.lx);
+            if (p.lx.tok.kind != T_FN)
+                die_at(src_name, p.lx.tok.line, p.lx.tok.col, "`entry` belongs in front of `fn`");
+            parse_fn(&p, 1);
+            break;
+        case T_CONST: {
+            Sym *s = xmalloc(sizeof *s);
+            s->kind = SYM_CONST;
+            s->line = p.lx.tok.line; s->col = p.lx.tok.col;
+            lex_next(&p.lx);
+            s->name = expect_ident(&p);
+            expect(&p, T_COLON);
+            s->type = parse_type(&p);
+            expect(&p, T_ASSIGN);
+            if (p.lx.tok.kind != T_INT && p.lx.tok.kind != T_TRUE && p.lx.tok.kind != T_FALSE)
+                die_at(src_name, p.lx.tok.line, p.lx.tok.col,
+                       "a const is a number known while compiling");
+            s->cval = (p.lx.tok.kind == T_INT) ? p.lx.tok.ival : (p.lx.tok.kind == T_TRUE);
+            lex_next(&p.lx);
+            expect(&p, T_SEMI);
+            add_global(&p, s);
+            break;
+        }
+        case T_VAR: {
+            Sym *s = xmalloc(sizeof *s);
+            s->kind = SYM_GLOBAL;
+            int line = p.lx.tok.line, col = p.lx.tok.col;
+            s->line = line; s->col = col;
+            lex_next(&p.lx);
+            s->name = expect_ident(&p);
+            expect(&p, T_COLON);
+            s->type = parse_type(&p);
+            /* Rule 4: a global's initial value may not contain an address.
+             * A table of absolute pointers in .data is what stopped resolving
+             * when this project's kernel moved to the high half; sav has no
+             * way to write one. Globals start as zero and are filled in by
+             * code, where an address is formed PC-relative. */
+            if (p.lx.tok.kind == T_ASSIGN)
+                die_at(src_name, line, col,
+                       "a global starts as zero in sav; assign to `%s` in code instead", s->name);
+            expect(&p, T_SEMI);
+            add_global(&p, s);
+            break;
+        }
+        case T_USE:
+            die_at(src_name, p.lx.tok.line, p.lx.tok.col,
+                   "sav has no modules yet; pass every file to savc on one command line");
+            break;
+        default:
+            die_at(src_name, p.lx.tok.line, p.lx.tok.col,
+                   "expected a declaration (fn, entry fn, struct, const, var), found %s",
+                   tok_name(p.lx.tok.kind));
+        }
+    }
+    return p.unit;
+}

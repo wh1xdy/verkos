@@ -1,0 +1,4 @@
+entry fn main(out: Console) -> i32 {
+    out!write("hello from sav\n");
+    return 0;
+}

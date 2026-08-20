@@ -1,0 +1,2 @@
+before
+tests/run/contract_fail.sav:6: requirement broken: v >= 0

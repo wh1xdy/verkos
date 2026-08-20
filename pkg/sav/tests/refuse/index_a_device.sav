@@ -1,0 +1,7 @@
+// expect: a device pointer is not indexed
+entry fn main(out: Console) -> i32 {
+    let uart: dev *u32 = 0x9000000 as dev *u32;
+    let x: u32 = uart[1];
+    out!write("x");
+    return 0;
+}

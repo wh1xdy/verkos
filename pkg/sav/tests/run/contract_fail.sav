@@ -1,0 +1,17 @@
+// status: 70
+// A requirement that the caller breaks. The program says which clause broke,
+// names the file and line, and stops: a broken promise that let the program
+// continue would be a claim that does not depend on what it claims.
+fn half(v: i64) -> h: i64
+    needs v >= 0
+    gives h * 2 <= v
+{
+    return v / 2;
+}
+
+entry fn main(out: Console) -> i32 {
+    out!write("before\n");
+    let x: i64 = half(0 - 4);
+    out!write("after\n");
+    return 0;
+}

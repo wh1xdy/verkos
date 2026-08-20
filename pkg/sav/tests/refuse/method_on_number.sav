@@ -1,0 +1,6 @@
+// expect: `!` calls a capability's method
+entry fn main(out: Console) -> i32 {
+    let n: i64 = 5;
+    n!write("x");
+    return 0;
+}

@@ -121,12 +121,14 @@ static void initrd_program(void *a) {
         kprintf("  [kernel] no initrd; /init comes off the disk, %u bytes\n", ff.size);
     }
 
-    if (elf_load(img, len, &entry) != 0) {
+    sav_manifest_t manifest;
+    if (elf_load(img, len, &entry, &manifest) != 0) {
         kprintf("  [kernel] nothing I can run; the initrd contains:\n");
         if (boot.initrd_end > boot.initrd_start)
             cpio_list(boot.initrd_start, boot.initrd_end - boot.initrd_start);
         return;
     }
+    thread_current()->sav = manifest;      /* the first program is held to it too */
     if (from_disk)
         for (unsigned p = 0; p < disk_pages; p++) free_page(from_disk + p * PAGE_SIZE);
     unsigned char *stack = alloc_page();

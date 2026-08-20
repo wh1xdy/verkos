@@ -1,0 +1,4 @@
+// expect: decided before the program runs
+const LIMIT: i64 = 10;
+fn f(a: i64) -> n: i64 needs LIMIT > 0 gives n == a { return a; }
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }
