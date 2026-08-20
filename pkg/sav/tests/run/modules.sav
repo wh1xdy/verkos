@@ -1,0 +1,16 @@
+// Two paths to the same file: say.sav already uses num.sav, and this program
+// uses both. A file parsed twice would make every function in it a duplicate,
+// so `use` loads each once however many times it is named.
+use "../../lib/num.sav";
+use "../../lib/say.sav";
+
+entry fn main(out: Console) -> i32 {
+    var buf: [24]u8;
+    out!write(num_into(7, buf[0..24]));
+    out!write("\n");
+    say_num(out, 8);
+    out!write("\n");
+    say_hex(out, 255);
+    out!write("\n");
+    return 0;
+}

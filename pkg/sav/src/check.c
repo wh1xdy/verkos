@@ -549,6 +549,9 @@ static void check_stmt(C *c, Stmt *s) {
 
 /* ---- functions --------------------------------------------------------- */
 static void check_fn(C *c, Fn *f) {
+    /* Diagnostics from here on name the file this function is in, which is not
+     * the file savc was invoked on as soon as one file `use`s another. */
+    if (f->file) { src_name = f->file; src_text = f->text; }
     c->fn = f;
     c->frame = 0;
     push_scope(c);

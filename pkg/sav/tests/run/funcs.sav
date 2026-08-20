@@ -1,3 +1,10 @@
+use "../../lib/say.sav";
+
+fn say_line_num(out: Console, v: i64) {
+    say_num(out, v);
+    out!write("\n");
+}
+
 fn fib(n: i64) -> f: i64
     needs n >= 0
     gives f >= 0
@@ -12,22 +19,8 @@ fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> total: i64
     return a + b + c + d + e + f;
 }
 
-fn show(out: Console, v: i64) {
-    var buf: [24]u8;
-    var i: i64 = 23;
-    var x: i64 = v;
-    if x == 0 { buf[i] = '0'; i = i - 1; }
-    while x > 0 {
-        buf[i] = ('0' as u8) + ((x % 10) as u8);
-        x = x / 10;
-        i = i - 1;
-    }
-    out!write(buf[i + 1..24]);
-    out!write("\n");
-}
-
 entry fn main(out: Console) -> i32 {
-    show(out, fib(20));
-    show(out, sum6(1, 2, 3, 4, 5, 6));
+    say_line_num(out, fib(20));
+    say_line_num(out, sum6(1, 2, 3, 4, 5, 6));
     return 0;
 }

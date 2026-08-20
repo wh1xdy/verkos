@@ -1,3 +1,10 @@
+use "../../lib/say.sav";
+
+fn say_line_num(out: Console, v: i64) {
+    say_num(out, v);
+    out!write("\n");
+}
+
 // Structs, pointers into them, and a field that is a slice.
 struct Point { x: i64, y: i64 }
 struct Line { from: Point, to: Point, name: []u8 }
@@ -6,21 +13,6 @@ fn dx(l: *Line) -> d: i64
     gives d == l.to.x - l.from.x
 {
     return l.to.x - l.from.x;
-}
-
-fn show(out: Console, v: i64) {
-    var buf: [24]u8;
-    var i: i64 = 23;
-    var x: i64 = v;
-    if x < 0 { out!write("-"); x = 0 - x; }
-    if x == 0 { buf[i] = '0'; i = i - 1; }
-    while x > 0 {
-        buf[i] = ('0' as u8) + ((x % 10) as u8);
-        x = x / 10;
-        i = i - 1;
-    }
-    out!write(buf[i + 1..24]);
-    out!write("\n");
 }
 
 entry fn main(out: Console) -> i32 {
@@ -33,13 +25,13 @@ entry fn main(out: Console) -> i32 {
 
     out!write(l.name);
     out!write("\n");
-    show(out, dx(&l));
-    show(out, l.to.y - l.from.y);
-    show(out, size(Point));
-    show(out, size(Line));
+    say_line_num(out, dx(&l));
+    say_line_num(out, l.to.y - l.from.y);
+    say_line_num(out, size(Point));
+    say_line_num(out, size(Line));
 
     let p: *Point = &l.to;
     p.x = 100;
-    show(out, l.to.x);
+    say_line_num(out, l.to.x);
     return 0;
 }

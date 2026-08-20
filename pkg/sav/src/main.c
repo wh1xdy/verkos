@@ -12,22 +12,9 @@
 int opt_contracts = 1;
 int opt_verbose = 0;
 
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "savc: cannot read %s\n", path); exit(2); }
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = xmalloc((size_t)n + 1);
-    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fprintf(stderr, "savc: short read on %s\n", path); exit(2); }
-    buf[n] = 0;
-    fclose(f);
-    return buf;
-}
-
 static void usage(void) {
     fprintf(stderr,
-        "usage: savc FILE.sav [-o OUT] [--no-contracts] [--manifest] [-v]\n"
+        "usage: savc FILE.sav... [-o OUT] [--no-contracts] [--manifest] [-v]\n"
         "\n"
         "  -o OUT          where to write the executable (default a.out)\n"
         "  --no-contracts  do not compile requires/ensures into checks. The\n"
@@ -44,7 +31,8 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *in = NULL, *out = "a.out";
+    const char *in[16]; int nin = 0;
+    const char *out = "a.out";
     int show_manifest = 0;
     long omit_call = -1;
 
@@ -55,18 +43,15 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-v") == 0) opt_verbose = 1;
         else if (strcmp(argv[i], "--omit-call") == 0 && i + 1 < argc) omit_call = atol(argv[++i]);
         else if (argv[i][0] == '-') usage();
-        else if (!in) in = argv[i];
-        else {
-            fprintf(stderr, "savc: one file at a time for now (%s and %s)\n", in, argv[i]);
-            exit(2);
-        }
+        else if (nin < 16) in[nin++] = argv[i];
+        else { fprintf(stderr, "savc: too many files\n"); exit(2); }
     }
-    if (!in) usage();
+    if (!nin) usage();
 
-    src_name = in;
-    src_text = read_file(in);
-
-    Unit *u = parse_unit(src_text);
+    /* Several files on one command line, and `use` inside them: either way
+     * every file is parsed once and they share one set of names. */
+    Unit *u = parse_unit(in[0]);
+    for (int i = 1; i < nin; i++) parse_into(u, in[i]);
     check_unit(u);
 
     Image img;

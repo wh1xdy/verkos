@@ -922,6 +922,7 @@ if [ -f pkg/sav/Makefile ]; then
             case "$line" in
                 PASS\ *) ok "${line#PASS }" ;;
                 FAIL\ *) bad "${line#FAIL }" ;;
+                SKIP\ *) printf '  \033[33mskip\033[0m  %s\n' "${line#SKIP }" ;;
                 *) [ -n "$line" ] && printf '      %s\n' "$line" ;;
             esac
         done < <(sh pkg/sav/tests/run.sh 2>/dev/null)

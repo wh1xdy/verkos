@@ -1,0 +1,5 @@
+// expect: decided before the program runs
+use "../../lib/num.sav";
+
+fn wrapper(v: i64) -> n: i64 gives 1 == 1 { return v; }
+entry fn main(out: Console) -> i32 { out!write("x"); return wrapper(1) as i32; }

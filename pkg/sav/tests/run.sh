@@ -22,6 +22,9 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 p() { echo "PASS $*"; pass=$((pass+1)); }
 f() { echo "FAIL $*"; fail=$((fail+1)); }
+# A check that could not run says so. Silence would be indistinguishable from
+# having passed, which is the failure this repository keeps finding in itself.
+s() { echo "SKIP $*"; }
 
 # Can this host run what savc writes? The compiler is a host program and its
 # output is aarch64 Linux, which is the same machine only inside the build
@@ -131,11 +134,20 @@ entry fn main(out: Console) -> i32 {
 }
 EOF
 if command -v objdump >/dev/null 2>&1 && "$SAVC" "$T/dev.sav" -o "$T/dev" >/dev/null 2>&1; then
-    n=$(objdump -d "$T/dev" 2>/dev/null | grep -cE '\sstr\s+w[0-9]+, \[x[0-9]+\]')
-    if [ "$n" -eq 2 ]; then
-        p "two device writes stay two 32-bit stores, neither merged nor widened"
+    # An objdump built for another architecture prints nothing it understands,
+    # and a grep over nothing counts zero — which would fail this check for a
+    # reason that has nothing to do with the compiler. Ask first whether it
+    # disassembled anything at all.
+    total=$(objdump -d "$T/dev" 2>/dev/null | grep -cE '^ *4[0-9a-f]+:')
+    if [ "$total" -lt 10 ]; then
+        s "the device-store check: this objdump does not disassemble aarch64"
     else
-        f "device writes came out as $n 32-bit stores, expected 2"
+        n=$(objdump -d "$T/dev" 2>/dev/null | grep -cE '\sstr\s+w[0-9]+, \[x[0-9]+\]')
+        if [ "$n" -eq 2 ]; then
+            p "two device writes stay two 32-bit stores, neither merged nor widened"
+        else
+            f "device writes came out as $n 32-bit stores, expected 2"
+        fi
     fi
 fi
 

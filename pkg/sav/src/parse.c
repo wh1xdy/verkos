@@ -8,10 +8,17 @@
  */
 #include "sav.h"
 
+typedef struct Loaded { char *path; struct Loaded *next; } Loaded;
+
 typedef struct {
     Lexer lx;
     Unit *unit;
+    const char *file;      /* the file being parsed right now */
+    const char *text;
+    Loaded *loaded;        /* every file already parsed, by path */
 } P;
+
+static void parse_path(P *p, const char *path, int line, int col);
 
 static Type *parse_type(P *p);
 static Expr *parse_expr(P *p);
@@ -459,6 +466,7 @@ static void add_global(P *p, Sym *s) {
 static void parse_fn(P *p, int is_entry) {
     Fn *f = xmalloc(sizeof *f);
     f->line = p->lx.tok.line; f->col = p->lx.tok.col;
+    f->file = p->file; f->text = p->text;
     lex_next(&p->lx);                      /* fn */
     f->name = expect_ident(p);
     f->is_entry = is_entry;
@@ -526,70 +534,153 @@ static void parse_fn(P *p, int is_entry) {
     }
 }
 
-Unit *parse_unit(const char *text) {
-    P p;
-    memset(&p, 0, sizeof p);
-    p.unit = xmalloc(sizeof(Unit));
-    lex_init(&p.lx, text);
-
-    while (p.lx.tok.kind != T_EOF) {
-        switch (p.lx.tok.kind) {
-        case T_STRUCT: parse_struct(&p); break;
-        case T_FN: parse_fn(&p, 0); break;
+/* The declarations in one file. Called once per file; `use` recurses. */
+static void parse_decls(P *p) {
+    while (p->lx.tok.kind != T_EOF) {
+        switch (p->lx.tok.kind) {
+        case T_STRUCT: parse_struct(p); break;
+        case T_FN: parse_fn(p, 0); break;
         case T_ENTRY:
-            lex_next(&p.lx);
-            if (p.lx.tok.kind != T_FN)
-                die_at(src_name, p.lx.tok.line, p.lx.tok.col, "`entry` belongs in front of `fn`");
-            parse_fn(&p, 1);
+            lex_next(&p->lx);
+            if (p->lx.tok.kind != T_FN)
+                die_at(src_name, p->lx.tok.line, p->lx.tok.col, "`entry` belongs in front of `fn`");
+            parse_fn(p, 1);
             break;
         case T_CONST: {
             Sym *s = xmalloc(sizeof *s);
             s->kind = SYM_CONST;
-            s->line = p.lx.tok.line; s->col = p.lx.tok.col;
-            lex_next(&p.lx);
-            s->name = expect_ident(&p);
-            expect(&p, T_COLON);
-            s->type = parse_type(&p);
-            expect(&p, T_ASSIGN);
-            if (p.lx.tok.kind != T_INT && p.lx.tok.kind != T_TRUE && p.lx.tok.kind != T_FALSE)
-                die_at(src_name, p.lx.tok.line, p.lx.tok.col,
+            s->line = p->lx.tok.line; s->col = p->lx.tok.col;
+            lex_next(&p->lx);
+            s->name = expect_ident(p);
+            expect(p, T_COLON);
+            s->type = parse_type(p);
+            expect(p, T_ASSIGN);
+            if (p->lx.tok.kind != T_INT && p->lx.tok.kind != T_TRUE && p->lx.tok.kind != T_FALSE)
+                die_at(src_name, p->lx.tok.line, p->lx.tok.col,
                        "a const is a number known while compiling");
-            s->cval = (p.lx.tok.kind == T_INT) ? p.lx.tok.ival : (p.lx.tok.kind == T_TRUE);
-            lex_next(&p.lx);
-            expect(&p, T_SEMI);
-            add_global(&p, s);
+            s->cval = (p->lx.tok.kind == T_INT) ? p->lx.tok.ival : (p->lx.tok.kind == T_TRUE);
+            lex_next(&p->lx);
+            expect(p, T_SEMI);
+            add_global(p, s);
             break;
         }
         case T_VAR: {
             Sym *s = xmalloc(sizeof *s);
             s->kind = SYM_GLOBAL;
-            int line = p.lx.tok.line, col = p.lx.tok.col;
+            int line = p->lx.tok.line, col = p->lx.tok.col;
             s->line = line; s->col = col;
-            lex_next(&p.lx);
-            s->name = expect_ident(&p);
-            expect(&p, T_COLON);
-            s->type = parse_type(&p);
+            lex_next(&p->lx);
+            s->name = expect_ident(p);
+            expect(p, T_COLON);
+            s->type = parse_type(p);
             /* Rule 4: a global's initial value may not contain an address.
              * A table of absolute pointers in .data is what stopped resolving
              * when this project's kernel moved to the high half; sav has no
              * way to write one. Globals start as zero and are filled in by
              * code, where an address is formed PC-relative. */
-            if (p.lx.tok.kind == T_ASSIGN)
+            if (p->lx.tok.kind == T_ASSIGN)
                 die_at(src_name, line, col,
                        "a global starts as zero in sav; assign to `%s` in code instead", s->name);
-            expect(&p, T_SEMI);
-            add_global(&p, s);
+            expect(p, T_SEMI);
+            add_global(p, s);
             break;
         }
-        case T_USE:
-            die_at(src_name, p.lx.tok.line, p.lx.tok.col,
-                   "sav has no modules yet; pass every file to savc on one command line");
+        case T_USE: {
+            int line = p->lx.tok.line, col = p->lx.tok.col;
+            lex_next(&p->lx);
+            if (p->lx.tok.kind != T_STR)
+                die_at(src_name, line, col, "`use` names a file: `use \"num.sav\";`");
+            char *what = p->lx.tok.text;
+            lex_next(&p->lx);
+            expect(p, T_SEMI);
+            parse_path(p, what, line, col);
             break;
+        }
         default:
-            die_at(src_name, p.lx.tok.line, p.lx.tok.col,
-                   "expected a declaration (fn, entry fn, struct, const, var), found %s",
-                   tok_name(p.lx.tok.kind));
+            die_at(src_name, p->lx.tok.line, p->lx.tok.col,
+                   "expected a declaration (fn, entry fn, struct, const, var, use), found %s",
+                   tok_name(p->lx.tok.kind));
         }
     }
-    return p.unit;
+}
+
+static char *read_whole_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = xmalloc((size_t)n + 1);
+    if (n && fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); return NULL; }
+    buf[n] = 0;
+    fclose(f);
+    return buf;
+}
+
+/* `use "num.sav"` names a file beside the one that says it, not beside the
+ * directory savc happens to have been run from. A program that compiled from
+ * one directory and not from another would be a build that depends on where
+ * you stood. */
+static char *resolve_beside(const char *including, const char *what) {
+    if (what[0] == '/') return xstrndup(what, strlen(what));
+    const char *slash = strrchr(including, '/');
+    if (!slash) return xstrndup(what, strlen(what));
+    size_t dir = (size_t)(slash - including) + 1;
+    char *out = xmalloc(dir + strlen(what) + 1);
+    memcpy(out, including, dir);
+    strcpy(out + dir, what);
+    return out;
+}
+
+static void parse_path(P *p, const char *what, int line, int col) {
+    char *path = resolve_beside(p->file ? p->file : "", what);
+
+    /* Once per file, however many times it is named: a diamond of `use` is an
+     * ordinary shape and not an error, and parsing a file twice would make
+     * every function in it a duplicate. */
+    for (Loaded *l = p->loaded; l; l = l->next)
+        if (strcmp(l->path, path) == 0) return;
+
+    char *text = read_whole_file(path);
+    if (!text) die_at(src_name, line, col, "there is no file `%s`", path);
+
+    Loaded *l = xmalloc(sizeof *l);
+    l->path = path; l->next = p->loaded;
+    p->loaded = l;
+
+    /* Everything that says which file we are in, saved and restored around the
+     * one we are about to read. */
+    Lexer saved_lx = p->lx;
+    const char *saved_file = p->file, *saved_text = p->text;
+    const char *saved_name = src_name, *saved_src = src_text;
+
+    p->file = path; p->text = text;
+    src_name = path; src_text = text;
+    lex_init(&p->lx, text);
+    parse_decls(p);
+
+    p->lx = saved_lx;
+    p->file = saved_file; p->text = saved_text;
+    src_name = saved_name; src_text = saved_src;
+}
+
+void parse_into(Unit *u, const char *path) {
+    P p;
+    memset(&p, 0, sizeof p);
+    p.unit = u;
+    char *text = read_whole_file(path);
+    if (!text) { fprintf(stderr, "savc: cannot read %s\n", path); exit(2); }
+    Loaded *l = xmalloc(sizeof *l);
+    l->path = xstrndup(path, strlen(path)); l->next = NULL;
+    p.loaded = l;
+    p.file = l->path; p.text = text;
+    src_name = l->path; src_text = text;
+    lex_init(&p.lx, text);
+    parse_decls(&p);
+}
+
+Unit *parse_unit(const char *path) {
+    Unit *u = xmalloc(sizeof(Unit));
+    parse_into(u, path);
+    return u;
 }

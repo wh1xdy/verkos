@@ -1,3 +1,5 @@
+use "../lib/say.sav";
+
 // savhello — a program written in sav, compiled by savc, run by stam.
 //
 // Nothing between this file and the machine belongs to anyone else: savc
@@ -17,22 +19,6 @@ fn digits(v: i64) -> n: i64
         count = count + 1;
     }
     return count;
-}
-
-fn say_num(out: Console, v: i64) {
-    var buf: [24]u8;
-    var i: i64 = 23;
-    var x: i64 = v;
-    if x == 0 {
-        buf[i] = '0';
-        i = i - 1;
-    }
-    while x > 0 {
-        buf[i] = ('0' as u8) + ((x % 10) as u8);
-        x = x / 10;
-        i = i - 1;
-    }
-    out!write(buf[i + 1..24]);
 }
 
 entry fn main(out: Console, args: Args, me: Proc) -> i32 {

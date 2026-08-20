@@ -1,0 +1,22 @@
+// Writing to a console that was handed in.
+//
+// Every function here takes the capability as its first argument, so that a
+// library cannot quietly acquire the authority to print: `say_num(out, 42)`
+// says on its own line where the permission came from.
+use "num.sav";
+
+fn say_num(out: Console, v: i64) {
+    var buf: [24]u8;
+    out!write(num_into(v, buf[0..24]));
+}
+
+fn say_hex(out: Console, v: u64) {
+    var buf: [24]u8;
+    out!write("0x");
+    out!write(hex_into(v, buf[0..24]));
+}
+
+fn say_line(out: Console, s: []u8) {
+    out!write(s);
+    out!write("\n");
+}

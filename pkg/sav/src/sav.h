@@ -227,6 +227,11 @@ typedef struct Contract {
 typedef struct Fn {
     char *name;
     int line, col;
+    /* Which file this came from, and its bytes. A diagnostic from the checker
+     * or the code generator names the file the function is in, which is not
+     * the file savc was invoked on as soon as `use` exists. */
+    const char *file;
+    const char *text;
     Sym *params; int nparams;
     Type *ret;
     char *ret_name;       /* the returned value's name: `-> n: i64`. A `gives`
@@ -249,7 +254,10 @@ typedef struct Unit {
     Fn *entry;
 } Unit;
 
-Unit *parse_unit(const char *text);
+/* Parse `path`, and everything it pulls in with `use`. Every file is parsed
+ * once, however many times it is named. */
+Unit *parse_unit(const char *path);
+void parse_into(Unit *u, const char *path);
 
 /* ---- checking ---------------------------------------------------------- */
 void check_unit(Unit *u);

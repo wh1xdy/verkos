@@ -698,6 +698,9 @@ static void gen_cstr(G *g) {
 
 /* ---- a function -------------------------------------------------------- */
 static void gen_fn(G *g, Fn *f, int label) {
+    /* The message a broken contract prints is built here, and it names a file
+     * and a line: they must be the ones the clause was written in. */
+    if (f->file) { src_name = f->file; src_text = f->text; }
     g->fn = f;
     place(g, label);
     emit(g, a_stp_pre(X29, X30, SP, -16));

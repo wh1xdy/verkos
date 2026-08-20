@@ -1,0 +1,4 @@
+// expect: there is no file
+use "no-such-library.sav";
+
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }

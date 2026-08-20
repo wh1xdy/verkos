@@ -1,0 +1,58 @@
+// Numbers as text.
+//
+// Every program that prints anything numeric needs this, and no kernel
+// provides it: there is no libc under a sav program. It is written once here
+// and pulled in with `use "../lib/num.sav";`.
+//
+// It touches nothing: no capability is passed in, so nothing in this file can
+// reach the world. The caller owns the buffer and the writing.
+
+// The digits of `v`, written into the end of `buf`, and the slice of `buf`
+// that holds them. Signed: a negative number gets its minus.
+fn num_into(v: i64, buf: []u8) -> s: []u8
+    needs buf.len >= 21
+    gives s.len >= 1
+    gives s.len <= buf.len
+{
+    var i: i64 = buf.len;
+    var x: i64 = v;
+    var neg: bool = false;
+    if x < 0 { neg = true; }
+
+    if x == 0 {
+        i = i - 1;
+        buf[i] = '0';
+    }
+    while x != 0 {
+        var d: i64 = x % 10;
+        if d < 0 { d = 0 - d; }
+        i = i - 1;
+        buf[i] = ('0' as u8) + (d as u8);
+        x = x / 10;
+    }
+    if neg {
+        i = i - 1;
+        buf[i] = '-';
+    }
+    return buf[i..buf.len];
+}
+
+// The same in hexadecimal, for addresses and registers.
+fn hex_into(v: u64, buf: []u8) -> s: []u8
+    needs buf.len >= 16
+    gives s.len >= 1
+{
+    let digits: []u8 = "0123456789abcdef";
+    var i: i64 = buf.len;
+    var x: u64 = v;
+    if x == 0 {
+        i = i - 1;
+        buf[i] = '0';
+    }
+    while x != 0 {
+        i = i - 1;
+        buf[i] = digits[(x & 15) as i64];
+        x = x >> 4;
+    }
+    return buf[i..buf.len];
+}
