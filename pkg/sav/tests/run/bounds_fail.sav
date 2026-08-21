@@ -1,0 +1,15 @@
+// status: 70
+// An index worked out while the program runs, and outside the buffer. The
+// message says which index and which length, because a range failure that
+// could not say either would send the reader back to the source to guess.
+use "../../lib/say.sav";
+
+entry fn main(out: Console, args: Args) -> i32 {
+    var buf: [8]u8;
+    for i in 0..8 { buf[i] = ('a' as u8) + (i as u8); }
+    let n: i64 = args!count();
+    out!write("before\n");
+    let c: u8 = buf[n + 9];
+    out!write("never reached\n");
+    return 0;
+}

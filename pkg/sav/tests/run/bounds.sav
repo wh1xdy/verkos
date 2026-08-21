@@ -1,0 +1,26 @@
+// Indexing that is in range, at both ends, and the one place a length is
+// asserted instead of carried.
+use "../../lib/say.sav";
+
+entry fn main(out: Console, args: Args) -> i32 {
+    var buf: [8]u8;
+    for i in 0..8 { buf[i] = ('a' as u8) + (i as u8); }
+
+    let n: i64 = args!count();            // 1 when nothing was passed
+    say_num(out, buf[0] as i64);
+    out!write("\n");
+    say_num(out, buf[7] as i64);
+    out!write("\n");
+    say_num(out, buf[n * 7] as i64);      // 7, worked out while running
+    out!write("\n");
+
+    out!write(buf[0..8]);
+    out!write("\n");
+    out!write(buf[8..8]);                 // empty, and legal: the end is the end
+    out!write("|\n");
+
+    let p: *u8 = &buf[0];
+    out!write(p[0..4]);                   // a pointer plus a length, said once
+    out!write("\n");
+    return 0;
+}

@@ -1,0 +1,7 @@
+// expect: can be seen from here
+entry fn main(out: Console) -> i32 {
+    var buf: [8]u8;
+    buf[8] = 65;
+    out!write(buf[0..8]);
+    return 0;
+}

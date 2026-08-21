@@ -1,0 +1,7 @@
+// expect: say how many
+entry fn main(out: Console) -> i32 {
+    var buf: [8]u8;
+    let p: *u8 = &buf[0];
+    out!write(p[0..]);
+    return 0;
+}

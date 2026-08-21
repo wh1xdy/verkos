@@ -1,0 +1,10 @@
+// status: 70
+use "../../lib/say.sav";
+
+entry fn main(out: Console, args: Args) -> i32 {
+    var buf: [8]u8;
+    let n: i64 = args!count() + 8;      // 9
+    out!write("before\n");
+    out!write(buf[0..n]);
+    return 0;
+}

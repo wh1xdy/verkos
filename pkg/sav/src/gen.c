@@ -35,9 +35,9 @@ typedef struct {
     Fn *fn;
     int brk_lab, cont_lab;
     /* runtime pieces the compiler writes itself */
-    int lbl_fail, lbl_argget, lbl_cstr;
-    int need_argget, need_cstr;
-    i64 bss_sp, bss_cstr, bss_size;
+    int lbl_fail, lbl_argget, lbl_cstr, lbl_num, lbl_write2, lbl_range;
+    int need_argget, need_cstr, need_range;
+    i64 bss_sp, bss_cstr, bss_numbuf, bss_save, bss_size;
     /* one label per user function */
     int *fn_lab; int nfn;
 } G;
@@ -217,6 +217,35 @@ static void pop_pair(G *g, int r1, int r2) { emit(g, a_ldp_post(r1, r2, SP, 16))
 static void push_pair_fwd(G *g) { push_pair(g); }
 static void pop_pair_fwd(G *g, int r1, int r2) { pop_pair(g, r1, r2); }
 
+/* The failure half of a range check: x2 is the value that was wrong, x3 the
+ * bound it was checked against. Split out because the passing path must not
+ * disturb a register, and the failing one may disturb every one of them. */
+static void gen_range_fail(G *g, int line, const char *what,
+                           const char *label1, const char *label2) {
+    g->need_range = 1;
+    char msg[256];
+    int n = snprintf(msg, sizeof msg, "%s:%d: %s", src_name, line, what);
+    i64 off = add_rodata(g, msg, (size_t)n);
+    i64 l1 = add_rodata(g, label1, strlen(label1));
+    i64 l2 = add_rodata(g, label2, strlen(label2));
+    emit_addr(g, X4, SEC_RODATA, l1); emit_imm(g, X5, strlen(label1));
+    emit_addr(g, X6, SEC_RODATA, l2); emit_imm(g, X7, strlen(label2));
+    emit_addr(g, X0, SEC_RODATA, off);
+    emit_imm(g, X1, (u64)n);
+    emit_call(g, g->lbl_range);
+}
+
+/* x2 against x1, unsigned — which is one comparison for both ends, because a
+ * negative index is a very large unsigned one and fails the same test. */
+static void gen_bounds_check(G *g, int line, const char *what) {
+    int ok = newlab(g);
+    emit(g, a_subs(XZR, X2, X1));
+    emit_bcond(g, CC_LO, ok);
+    emit(g, a_mov(X3, X1));
+    gen_range_fail(g, line, what, "index ", "length ");
+    place(g, ok);
+}
+
 /* ---- addresses of lvalues ---------------------------------------------- */
 static void gen_addr(G *g, Expr *e) {
     switch (e->kind) {
@@ -247,6 +276,11 @@ static void gen_addr(G *g, Expr *e) {
         gen_expr(g, e->b);                                     /* index */
         emit(g, a_mov(X2, X0));
         pop_pair(g, X0, X1);
+        /* An array's length is known here and nowhere else at run time; a
+         * slice carries its own. Either way the check happens before the
+         * multiply, on the index the source wrote. */
+        if (at->kind == TY_ARRAY) emit_imm(g, X1, (u64)at->nelem);
+        gen_bounds_check(g, e->line, "index out of range");
         int esz = at->elem->size;
         if (esz != 1) { emit_imm(g, X17, (u64)esz); emit(g, a_mul(X2, X2, X17)); }
         emit(g, a_add(X0, X0, X2));
@@ -468,6 +502,24 @@ static void gen_expr(G *g, Expr *e) {
         emit(g, a_mov(X9, X0));                /* high */
         pop_pair(g, X10, X17);                 /* low  */
         pop_pair(g, X0, X1);                   /* base pointer, length */
+        /* A slice of a pointer is the one place a length is asserted rather
+         * than carried, and there is nothing to check it against. Everywhere
+         * else, both ends are checked. */
+        if (at->kind != TY_PTR) {
+            int ok1 = newlab(g), ok2 = newlab(g);
+            emit(g, a_subs(XZR, X10, X9));
+            emit_bcond(g, CC_LS, ok1);
+            emit(g, a_mov(X2, X10));
+            emit(g, a_mov(X3, X9));
+            gen_range_fail(g, e->line, "a slice that starts after it ends", "start ", "end ");
+            place(g, ok1);
+            emit(g, a_subs(XZR, X9, X1));
+            emit_bcond(g, CC_LS, ok2);
+            emit(g, a_mov(X2, X9));
+            emit(g, a_mov(X3, X1));
+            gen_range_fail(g, e->line, "a slice that runs past the end", "end ", "length ");
+            place(g, ok2);
+        }
         int esz = at->elem->size;
         if (esz != 1) { emit_imm(g, X17, (u64)esz); emit(g, a_mul(X11, X10, X17)); }
         else emit(g, a_mov(X11, X10));
@@ -696,6 +748,131 @@ static void gen_cstr(G *g) {
     emit(g, a_ret());
 }
 
+/* x0 = bytes, x1 = length -> write(2, ...). Every message this compiler's own
+ * code prints goes out through here, so there is one place that names fd 2. */
+static void gen_write2(G *g) {
+    place(g, g->lbl_write2);
+    emit(g, a_mov(X2, X1));
+    emit(g, a_mov(X1, X0));
+    emit_imm(g, X0, 2);
+    emit_imm(g, X8, 64);
+    emit(g, a_svc0());
+    emit(g, a_ret());
+}
+
+/* x0 = a signed number -> x0 = bytes, x1 = length, written backwards into a
+ * scratch buffer. A range failure that could not say which index and which
+ * length would be a report that does not depend on what it reports. */
+static void gen_num(G *g) {
+    place(g, g->lbl_num);
+    int loop = newlab(g), after = newlab(g), zero = newlab(g), nosign = newlab(g);
+    emit_addr(g, X16, SEC_BSS, g->bss_numbuf);
+    emit_imm(g, X2, 32);              /* write position, from the end */
+    emit_imm(g, X3, 0);               /* was it negative */
+    emit(g, a_mov(X4, X0));
+    emit_imm(g, X5, 0);
+    emit(g, a_subs(XZR, X4, X5));
+    emit_bcond(g, CC_GE, nosign);
+    emit(g, a_neg(X4, X4));
+    emit_imm(g, X3, 1);
+    place(g, nosign);
+    fix_here(g, FX_B19 + 200, zero, 0, 0);
+    emit(g, a_cbz(X4, 0));
+    emit_imm(g, X6, 10);
+    place(g, loop);
+    fix_here(g, FX_B19 + 200, after, 0, 0);
+    emit(g, a_cbz(X4, 0));
+    emit(g, a_udiv(X5, X4, X6));
+    emit(g, a_msub(X7, X5, X6, X4));         /* remainder */
+    emit(g, a_add_imm(X7, X7, 48, 0));       /* '0' */
+    emit(g, a_sub_imm(X2, X2, 1, 0));
+    emit(g, a_add(X17, X16, X2));
+    emit(g, a_str_off(X7, X17, 0, 1));
+    emit(g, a_mov(X4, X5));
+    emit_branch(g, loop);
+    place(g, zero);
+    emit(g, a_sub_imm(X2, X2, 1, 0));
+    emit(g, a_add(X17, X16, X2));
+    emit_imm(g, X7, 48);
+    emit(g, a_str_off(X7, X17, 0, 1));
+    place(g, after);
+    fix_here(g, FX_B19 + 200, newlab(g), 0, 0);   /* placeholder, patched below */
+    {   /* if it was negative, a minus goes in front */
+        int done = g->nlab - 1;
+        g->fix[g->nfix - 1].label = done;
+        emit(g, a_cbz(X3, 0));
+        emit(g, a_sub_imm(X2, X2, 1, 0));
+        emit(g, a_add(X17, X16, X2));
+        emit_imm(g, X7, 45);
+        emit(g, a_str_off(X7, X17, 0, 1));
+        place(g, done);
+    }
+    emit(g, a_add(X0, X16, X2));
+    emit_imm(g, X1, 32);
+    emit(g, a_sub(X1, X1, X2));
+    emit(g, a_ret());
+}
+
+/* The one place a range failure is reported.
+ *
+ *   x0, x1  the message
+ *   x2, x3  the two numbers
+ *   x4, x5  what the first number is called
+ *   x6, x7  what the second is called
+ *
+ * The labels come from the caller because "index" and "length" are the right
+ * words for an index and the wrong ones for the two ends of a slice, and a
+ * message that names the wrong thing is worse than one that names nothing.
+ * It never returns, so it may use x30 freely.
+ */
+static void gen_range(G *g) {
+    place(g, g->lbl_range);
+    i64 o_open = add_rodata(g, " (", 2);
+    i64 o_comma = add_rodata(g, ", ", 2);
+    i64 o_end = add_rodata(g, ")\n", 2);
+
+    emit_addr(g, X16, SEC_BSS, g->bss_save);
+    emit(g, a_str_off(X2, X16, 0, 8));
+    emit(g, a_str_off(X3, X16, 8, 8));
+    emit(g, a_str_off(X4, X16, 16, 8));
+    emit(g, a_str_off(X5, X16, 24, 8));
+    emit(g, a_str_off(X6, X16, 32, 8));
+    emit(g, a_str_off(X7, X16, 40, 8));
+    emit_call(g, g->lbl_write2);                        /* the message */
+
+    emit_addr(g, X0, SEC_RODATA, o_open); emit_imm(g, X1, 2);
+    emit_call(g, g->lbl_write2);
+
+    emit_addr(g, X16, SEC_BSS, g->bss_save);            /* the first label */
+    emit(g, a_ldr_off(X0, X16, 16, 8, 0));
+    emit(g, a_ldr_off(X1, X16, 24, 8, 0));
+    emit_call(g, g->lbl_write2);
+    emit_addr(g, X16, SEC_BSS, g->bss_save);            /* and its number */
+    emit(g, a_ldr_off(X0, X16, 0, 8, 0));
+    emit_call(g, g->lbl_num);
+    emit_call(g, g->lbl_write2);
+
+    emit_addr(g, X0, SEC_RODATA, o_comma); emit_imm(g, X1, 2);
+    emit_call(g, g->lbl_write2);
+
+    emit_addr(g, X16, SEC_BSS, g->bss_save);            /* the second label */
+    emit(g, a_ldr_off(X0, X16, 32, 8, 0));
+    emit(g, a_ldr_off(X1, X16, 40, 8, 0));
+    emit_call(g, g->lbl_write2);
+    emit_addr(g, X16, SEC_BSS, g->bss_save);            /* and its number */
+    emit(g, a_ldr_off(X0, X16, 8, 8, 0));
+    emit_call(g, g->lbl_num);
+    emit_call(g, g->lbl_write2);
+
+    emit_addr(g, X0, SEC_RODATA, o_end); emit_imm(g, X1, 2);
+    emit_call(g, g->lbl_write2);
+
+    emit_imm(g, X0, 70);
+    emit_imm(g, X8, 93);
+    emit(g, a_svc0());
+    emit(g, a_b(0));
+}
+
 /* ---- a function -------------------------------------------------------- */
 static void gen_fn(G *g, Fn *f, int label) {
     /* The message a broken contract prints is built here, and it names a file
@@ -767,11 +944,16 @@ void gen_unit(Unit *u, Image *img) {
     }
     bss = (bss + 7) & ~7ll; g.bss_sp = bss; bss += 8;
     bss = (bss + 7) & ~7ll; g.bss_cstr = bss; bss += 256;
+    bss = (bss + 7) & ~7ll; g.bss_numbuf = bss; bss += 32;
+    bss = (bss + 7) & ~7ll; g.bss_save = bss; bss += 16;
     g.bss_size = bss;
 
     g.lbl_fail = newlab(&g);
     g.lbl_argget = newlab(&g);
     g.lbl_cstr = newlab(&g);
+    g.lbl_num = newlab(&g);
+    g.lbl_write2 = newlab(&g);
+    g.lbl_range = newlab(&g);
 
     int nfn = 0;
     for (Fn *f = u->fns; f; f = f->next) nfn++;
@@ -793,6 +975,7 @@ void gen_unit(Unit *u, Image *img) {
     gen_fail(&g);
     if (g.need_argget) gen_argget(&g);
     if (g.need_cstr) gen_cstr(&g);
+    if (g.need_range) { gen_write2(&g); gen_num(&g); gen_range(&g); }
 
     /* rodata goes after the code, in the same segment: it is read, never
      * written, and one segment is one thing to get right */

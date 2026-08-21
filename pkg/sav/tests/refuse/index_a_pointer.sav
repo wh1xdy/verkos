@@ -1,0 +1,8 @@
+// expect: Make a slice first
+entry fn main(out: Console) -> i32 {
+    var v: i64;
+    let p: *i64 = &v;
+    let x: i64 = p[0];
+    out!write("x");
+    return 0;
+}

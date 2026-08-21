@@ -101,6 +101,7 @@ static Fn *find_fn(Unit *u, const char *name) {
 
 static Expr *check_expr(C *c, Expr *e);
 static void check_stmt(C *c, Stmt *s);
+static int const_value(Expr *e, i64 *out);
 
 /* An integer literal takes the type of what it is used with; everything else
  * needs a cast. There are no silent widenings in sav, because the ones in C
@@ -241,11 +242,26 @@ static Expr *check_expr(C *c, Expr *e) {
             die_at(src_name, e->line, e->col, "an index is a number, this is %s", ty_str(e->b->type));
         if (e->a->type->kind == TY_PTR && e->a->type->is_dev)
             die_at(src_name, e->line, e->col,
-                   "a device pointer is not indexed: write `(p + %s)@`, so that the access is "
-                   "visible where it happens", "i");
+                   "a device pointer is not indexed: write `(p + i)@`, so that the access is "
+                   "visible where it happens");
+        /* A bare pointer has no length, so an index into one cannot be
+         * checked. sav has slices for exactly this: `p[0..n]` is where the
+         * length is said, once and visibly, and everything after it is
+         * checked. */
+        if (e->a->type->kind == TY_PTR)
+            die_at(src_name, e->line, e->col,
+                   "a pointer does not know how many there are, so this index cannot be checked. "
+                   "Make a slice first: `p[0..n]`");
         if (e->a->type->kind == TY_ARRAY || e->a->type->kind == TY_SLICE) e->type = e->a->type->elem;
-        else if (e->a->type->kind == TY_PTR) e->type = e->a->type->elem;
         else die_at(src_name, e->line, e->col, "%s cannot be indexed", ty_str(e->a->type));
+        /* An index the compiler can work out, into a length it already knows,
+         * is decided here rather than left to fail when it runs. */
+        i64 k;
+        if (e->a->type->kind == TY_ARRAY && const_value(e->b, &k) &&
+            (k < 0 || k >= e->a->type->nelem))
+            die_at(src_name, e->line, e->col,
+                   "%lld is outside a %s, and that can be seen from here rather than found "
+                   "when it runs", (long long)k, ty_str(e->a->type));
         e->is_lvalue = 1;
         break;
     }
@@ -287,8 +303,20 @@ static Expr *check_expr(C *c, Expr *e) {
         e->b = check_expr(c, e->b);
         if (e->c) e->c = check_expr(c, e->c);
         Type *t = e->a->type;
-        if (t->kind != TY_ARRAY && t->kind != TY_SLICE)
-            die_at(src_name, e->line, e->col, "only an array or a slice can be sliced, this is %s", ty_str(t));
+        if (t->kind == TY_PTR && t->is_dev)
+            die_at(src_name, e->line, e->col,
+                   "a device pointer cannot become a slice: every access to a register is `@`, "
+                   "one at a time, where it is written");
+        if (t->kind != TY_ARRAY && t->kind != TY_SLICE && t->kind != TY_PTR)
+            die_at(src_name, e->line, e->col,
+                   "only an array, a slice or a pointer can be sliced, this is %s", ty_str(t));
+        /* `a[2..]` runs to a length the value carries. A pointer carries none,
+         * so the end has to be written down — this is the one place in sav
+         * where a length is asserted rather than checked, and it should be
+         * impossible to do by accident. */
+        if (t->kind == TY_PTR && !e->c)
+            die_at(src_name, e->line, e->col,
+                   "a pointer has no end to run to: say how many, as `p[0..n]`");
         e->type = ty_slice(t->elem);
         break;
     }
