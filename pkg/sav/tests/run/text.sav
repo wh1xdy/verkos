@@ -1,0 +1,12 @@
+use "../../lib/text.sav";
+use "../../lib/say.sav";
+
+entry fn main(out: Console) -> i32 {
+    var buf: [32]u8;
+    out!write(upper_into("hello, sav", buf[0..32]));
+    out!write("\n");
+    say_num(out, lower_case('Q') as i64);
+    out!write("\n");
+    if is_space(' ') && !is_space('x') { out!write("spaces are spaces\n"); }
+    return 0;
+}

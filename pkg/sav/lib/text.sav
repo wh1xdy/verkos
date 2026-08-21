@@ -1,0 +1,36 @@
+// Bytes as text.
+//
+// Pure: nothing here takes a capability, so nothing here can reach the world.
+// A caller passes bytes in and gets bytes back.
+
+fn upper_case(c: u8) -> u: u8
+    gives u <= c
+{
+    if c >= ('a' as u8) && c <= ('z' as u8) { return c - 32; }
+    return c;
+}
+
+fn lower_case(c: u8) -> l: u8
+    gives l >= c
+{
+    if c >= ('A' as u8) && c <= ('Z' as u8) { return c + 32; }
+    return c;
+}
+
+fn is_space(c: u8) -> yes: bool
+    gives yes == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// Copies `from` into `into` with every letter capitalised, and returns the
+// part of `into` that was written.
+fn upper_into(from: []u8, into: []u8) -> s: []u8
+    needs into.len >= from.len
+    gives s.len == from.len
+{
+    for i in 0..from.len {
+        into[i] = upper_case(from[i]);
+    }
+    return into[0..from.len];
+}

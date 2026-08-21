@@ -1539,6 +1539,12 @@ PYEOF
                           "grep -aq '6 \* 7 = 42, and 12345 has 5 digits' $SL"
                     check "the sav program reached its end, contracts and all" \
                           "grep -aq 'sav program finished' $SL"
+                    # A pipe whose right-hand side is written in sav. The left
+                    # is `hello`, which is C, and the shell does not know or
+                    # care: the marker is hello's own argv line, capitalised by
+                    # a program savc built.
+                    check "a sav program is the right-hand side of a pipe" \
+                          "grep -aq 'ARGV\[1\] = \"SAV-PIPELINE\"' $SL"
                     # The kernel read the capability manifest out of the note in
                     # the executable. This line comes from the loader, not from
                     # the program, so it says the kernel found it — not that the

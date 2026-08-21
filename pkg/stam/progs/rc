@@ -24,6 +24,7 @@ rm /gone.txt
 rm /adir
 ls /
 savhello written-in-sav
+hello sav-pipeline | savupper
 savliar
 udpecho
 tcpserve

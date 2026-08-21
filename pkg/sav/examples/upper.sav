@@ -1,0 +1,27 @@
+// upper — reads standard input and writes it back in capitals.
+//
+// The right-hand side of a pipe, written in sav. The same program exists in C
+// in pkg/stam/progs, and stam cannot tell them apart: it loads an ELF, the
+// program reads fd 0 and writes fd 1, and the shell puts it after a `|`.
+//
+// What it may do is in its signature. Console is read and write and nothing
+// else, so this program cannot open a file, cannot make a socket and cannot
+// start another process — and the note savc writes into the executable says
+// exactly that, which is what stam enforces.
+use "../lib/text.sav";
+
+entry fn main(io: Console) -> i32 {
+    var buf: [512]u8;
+    var n: i64 = io!read(buf[0..512]);
+    while n > 0 {
+        for i in 0..n {
+            buf[i] = upper_case(buf[i]);
+        }
+        io!write(buf[0..n]);
+        n = io!read(buf[0..512]);
+    }
+    // A read that failed is not the end of the input, and the two must not
+    // look the same to whoever started this.
+    if n < 0 { return 1; }
+    return 0;
+}

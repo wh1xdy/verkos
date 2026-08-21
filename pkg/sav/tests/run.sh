@@ -53,6 +53,10 @@ for src in tests/run/*.sav; do
     want_status=$(sed -n 's|^// status: ||p' "$src" | head -1)
     [ -n "$want_status" ] || want_status=0
     args=$(sed -n 's|^// args: ||p' "$src" | head -1)
+    # Standard input, from the file itself. Programs are always run with their
+    # input redirected, so one that reads waits for a file that has ended
+    # rather than for a terminal that never will.
+    sed -n 's|^// stdin: ||p' "$src" | head -1 > "$T/in"
 
     if ! "$SAVC" "$src" -o "$T/PROG" >"$T/log" 2>&1; then
         f "$name does not compile: $(head -1 "$T/log")"
@@ -62,7 +66,7 @@ for src in tests/run/*.sav; do
     [ "$CAN_RUN" = 1 ] || continue
 
     # shellcheck disable=SC2086
-    ( cd "$T" && ./PROG $args ) >"$T/got" 2>&1
+    ( cd "$T" && ./PROG $args ) <"$T/in" >"$T/got" 2>&1
     got_status=$?
     if [ "$got_status" != "$want_status" ]; then
         f "$name exits $got_status, expected $want_status"

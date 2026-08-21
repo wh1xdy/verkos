@@ -225,6 +225,13 @@ progs/savhello.elf: ../sav/examples/savhello.sav savc-for-this-host
 progs/savliar.elf: ../sav/examples/savhello.sav savc-for-this-host
 	$(SAVC) $< -o $@ --omit-call 64
 
+# The right-hand side of a pipe, written in sav rather than in C. `upper` in
+# progs/ does the same job and is the same shape to this kernel: an ELF that
+# reads fd 0 and writes fd 1. Its manifest carries read as well as write, which
+# is the whole difference between it and savhello.
+progs/savupper.elf: ../sav/examples/upper.sav savc-for-this-host
+	$(SAVC) $< -o $@
+
 # The initrd as every Linux initramfs is: a newc cpio archive, written by
 # VerkOS' own vcpio. Names have no leading slash, which is the convention;
 # stam accepts either when a program asks.
@@ -237,7 +244,7 @@ progs/vsh.elf: progs/vsh.c
 # to synchronise with. The commands are in progs/rc, in the repository, where
 # they can be read.
 progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
-       progs/savhello.elf progs/savliar.elf \
+       progs/savhello.elf progs/savliar.elf progs/savupper.elf \
                           progs/forky.elf progs/twice.elf progs/badptr.elf \
                           progs/catch.elf progs/ls.elf progs/mkdir.elf \
                           progs/rm.elf progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf progs/rc
@@ -261,6 +268,7 @@ progs/initrd-script.cpio: progs/vsh.elf progs/hello.elf progs/upper.elf \
 	@cp progs/tcpserve.elf progs/scriptroot/tcpserve
 	@cp progs/savhello.elf progs/scriptroot/savhello
 	@cp progs/savliar.elf progs/scriptroot/savliar
+	@cp progs/savupper.elf progs/scriptroot/savupper
 	@cp progs/rc progs/scriptroot/rc
 	( cd progs/scriptroot && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
@@ -292,7 +300,7 @@ progs/initrd.cpio: progs/init.elf progs/hello.elf progs/forky.elf progs/badptr.e
 	( cd progs/root && find . -type f | sed 's|^\./||' | /tmp/vcpio-host -o ) > $@
 
 progs: progs/hello.elf progs/twice.elf progs/forky.elf progs/init.elf progs/vsh.elf \
-       progs/savhello.elf progs/savliar.elf \
+       progs/savhello.elf progs/savliar.elf progs/savupper.elf \
        progs/badptr.elf progs/upper.elf progs/spin.elf progs/sigtest.elf \
        progs/udpecho.elf progs/tcpget.elf progs/tcpserve.elf \
        progs/initrd.cpio progs/initrd-shell.cpio progs/initrd-script.cpio
