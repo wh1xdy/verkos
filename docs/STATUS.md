@@ -35,8 +35,9 @@ They are separate systems that share tools:
 - **`sav`** is our own language, and `savc` our own compiler for it, since
   2026-08-20. It writes an aarch64 ELF with no assembler, linker or libc in
   between, and the executables it produces carry a capability manifest that
-  stam reads and enforces (D-109). Nothing in the distribution is built with it
-  yet; it compiles programs stam runs.
+  stam reads and enforces (D-109). It has modules, checked indexing and tagged
+  unions with an exhaustive `match` (D-110). Nothing in the distribution is
+  built with it yet; it compiles programs stam runs.
 
 ---
 
@@ -87,6 +88,9 @@ Nothing below is inference. Each was checked by running a system.
 | **The programs** | eight compiled and run in the container and compared byte for byte — narrow arithmetic that wraps, recursion, structs, slices, `for`/`while`, argv, and a broken contract that stops the program with 70 |
 | **The binary itself** | the manifest holds exactly the calls the code makes, `readelf -r` finds no relocations, the note is a real `PT_NOTE`, and two writes to adjacent device registers come out as two 32-bit stores |
 | **The manifest, enforced** | `savliar` is the same program with `write` left out of its note on purpose. stam refuses the call, names it, and the shell reports 159 — SIGSYS. Without a binary that lies, an enforced manifest and a decorative one look identical |
+| **A pipe, half in sav** | `hello sav-pipeline \| savupper`: the left side is C, the right side is `upper` rewritten in sav, and the shell does not know the difference. The check is hello's own argv line, capitalised (D-110) |
+| **Indexing, checked** | every index against its length and both ends of every slice, with the failing number and its bound named; a constant index outside an array is refused while compiling (D-110) |
+| **Tagged unions** | `enum` with payloads, `match` that must cover every case, and an `else` that can never run refused as the dead branch it is (D-110) |
 
 ---
 

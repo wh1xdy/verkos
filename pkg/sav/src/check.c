@@ -157,6 +157,14 @@ static Expr *check_expr(C *c, Expr *e) {
             want(e->args[i], p->type, "this argument");
         }
         e->fn = f; e->type = f->ret;
+        if (f->ret->kind == TY_STRUCT || f->ret->kind == TY_ENUM || f->ret->kind == TY_ARRAY) {
+            /* The caller owns the space a returned aggregate is written into.
+             * A value built in the callee's frame stops existing at the moment
+             * it returns, and a compiler that handed its address back would be
+             * handing back a promise about memory nobody owns. */
+            c->frame += (f->ret->size + 7) & ~7;
+            e->temp_off = c->frame;
+        }
         break;
     }
     case E_METHOD: {
@@ -378,6 +386,33 @@ static Expr *check_expr(C *c, Expr *e) {
         break;
     }
     case E_LEN: e->type = ty_int(64, 1); break;
+    case E_VARIANT: {
+        Type *t = e->type;                       /* the enum, from the parser */
+        Variant *v = NULL;
+        for (int i = 0; i < t->nvariants; i++)
+            if (strcmp(t->variants[i].name, e->name) == 0) { v = &t->variants[i]; break; }
+        if (!v) {
+            fprintf(stderr, "%s:%d:%d: %s has no case `%s`. It has:",
+                    src_name, e->line, e->col, t->name, e->name);
+            for (int i = 0; i < t->nvariants; i++) fprintf(stderr, " %s", t->variants[i].name);
+            fprintf(stderr, "\n");
+            exit(1);
+        }
+        if (e->nargs != v->nfields)
+            die_at(src_name, e->line, e->col, "`%s.%s` carries %d value%s, given %d",
+                   t->name, v->name, v->nfields, v->nfields == 1 ? "" : "s", e->nargs);
+        for (int i = 0; i < e->nargs; i++) {
+            e->args[i] = check_expr(c, e->args[i]);
+            want(e->args[i], v->fields[i].type, "this value");
+        }
+        e->variant = v;
+        /* Somewhere to build it. An enum is as large as its largest case, and
+         * a value of one has to exist somewhere before its address can be
+         * taken. */
+        c->frame += (t->size + 7) & ~7;
+        e->temp_off = c->frame;
+        break;
+    }
     }
     return e;
 }
@@ -558,6 +593,73 @@ static void check_stmt(C *c, Stmt *s) {
             die_at(src_name, s->line, s->col, "`%s` is only meaningful inside a loop",
                    s->kind == S_BREAK ? "break" : "continue");
         break;
+    case S_MATCH: {
+        s->expr = check_expr(c, s->expr);
+        if (s->expr->type->kind != TY_ENUM)
+            die_at(src_name, s->line, s->col,
+                   "`match` chooses between the cases of an enum, and this is %s",
+                   ty_str(s->expr->type));
+        Type *t = s->expr->type;
+        c->frame += 8;
+        s->subject_off = c->frame;
+
+        int *seen = xmalloc(sizeof(int) * (size_t)t->nvariants);
+        int has_else = 0;
+        for (int i = 0; i < s->narms; i++) {
+            MatchArm *a = &s->arms[i];
+            if (has_else)
+                die_at(src_name, a->line, a->col,
+                       "this arm comes after `else`, which has already taken everything left");
+            if (a->is_else) { has_else = 1; continue; }
+            Variant *v = NULL;
+            for (int k = 0; k < t->nvariants; k++)
+                if (strcmp(t->variants[k].name, a->name) == 0) { v = &t->variants[k]; break; }
+            if (!v) {
+                fprintf(stderr, "%s:%d:%d: %s has no case `%s`. It has:",
+                        src_name, a->line, a->col, t->name, a->name);
+                for (int k = 0; k < t->nvariants; k++) fprintf(stderr, " %s", t->variants[k].name);
+                fprintf(stderr, "\n");
+                exit(1);
+            }
+            if (seen[v->index])
+                die_at(src_name, a->line, a->col,
+                       "`%s` is already taken by an earlier arm, so this one can never run", a->name);
+            seen[v->index] = 1;
+            a->variant = v; a->index = v->index;
+            if (a->nbinds && a->nbinds != v->nfields)
+                die_at(src_name, a->line, a->col,
+                       "`%s` carries %d value%s; name all of them or none",
+                       v->name, v->nfields, v->nfields == 1 ? "" : "s");
+            push_scope(c);
+            a->bind_syms = xmalloc(sizeof(Sym *) * (size_t)(a->nbinds ? a->nbinds : 1));
+            for (int b = 0; b < a->nbinds; b++)
+                a->bind_syms[b] = declare(c, a->binds[b], v->fields[b].type,
+                                          SYM_LOCAL, a->line, a->col);
+            check_stmt(c, a->body);
+            pop_scope(c);
+        }
+        for (int i = 0; i < s->narms; i++)
+            if (s->arms[i].is_else) { push_scope(c); check_stmt(c, s->arms[i].body); pop_scope(c); }
+
+        int missing = 0;
+        for (int k = 0; k < t->nvariants; k++) if (!seen[k]) missing++;
+        if (missing && !has_else) {
+            fprintf(stderr, "%s:%d:%d: this match does not say what to do with:",
+                    src_name, s->line, s->col);
+            for (int k = 0; k < t->nvariants; k++)
+                if (!seen[k]) fprintf(stderr, " %s", t->variants[k].name);
+            fprintf(stderr, "\n        note: add the arm, or an `else` that says it "
+                            "deliberately does nothing\n");
+            exit(1);
+        }
+        /* An `else` with nothing left for it is dead code that reads as a
+         * safety net — a branch that says the same thing whether or not it
+         * could ever run, which is the shape this language exists to refuse. */
+        if (!missing && has_else)
+            die_at(src_name, s->line, s->col,
+                   "every case of %s is already taken, so this `else` can never run", t->name);
+        break;
+    }
     case S_ASSERT: {
         s->cond = check_expr(c, s->cond);
         want(s->cond, ty_bool(), "an `assert`");
@@ -576,6 +678,10 @@ static void check_stmt(C *c, Stmt *s) {
 }
 
 /* ---- functions --------------------------------------------------------- */
+static int is_aggregate_ret(Type *t) {
+    return t->kind == TY_STRUCT || t->kind == TY_ENUM || t->kind == TY_ARRAY;
+}
+
 static void check_fn(C *c, Fn *f) {
     /* Diagnostics from here on name the file this function is in, which is not
      * the file savc was invoked on as soon as one file `use`s another. */
@@ -588,7 +694,7 @@ static void check_fn(C *c, Fn *f) {
     for (Sym *p = f->params; p; p = p->next) {
         if (p->type->kind == TY_VOID)
             die_at(src_name, f->line, f->col, "a parameter cannot be void");
-        if (p->type->kind == TY_STRUCT || p->type->kind == TY_ARRAY)
+        if (p->type->kind == TY_STRUCT || p->type->kind == TY_ARRAY)  /* an enum may: see below */
             die_at(src_name, f->line, f->col,
                    "`%s` is %s: pass `*%s` instead. sav copies a struct only where you write "
                    "the copy, so that a large argument is visible as one", p->name,
@@ -611,6 +717,12 @@ static void check_fn(C *c, Fn *f) {
     /* The returned value gets its slot before the clauses are checked, because
      * a `gives` clause reads it by name and the name must already mean
      * somewhere. */
+    if (is_aggregate_ret(f->ret) && f->nens)
+        die_at(src_name, f->ens[0].line, f->ens[0].col,
+               "there is nothing sav can yet say about a %s in a clause — no test on it exists "
+               "to write — so a `gives` here could only be vacuous, and vacuous claims do not "
+               "compile. Promise about what a `match` on it finds instead", ty_str(f->ret));
+    if (is_aggregate_ret(f->ret)) { c->frame += 8; f->sret_off = c->frame; }
     if (f->nens) {
         if (f->ret->kind != TY_VOID && !f->ret_name)
             die_at(src_name, f->ens[0].line, f->ens[0].col,

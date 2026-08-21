@@ -5212,3 +5212,105 @@ express the compiler. No floating point, no unions, no enums, no struct
 arguments by value, and no x86_64 — savc emits aarch64 and only aarch64.
 
 `kvist` is reserved for something later, and is deliberately not used here.
+
+---
+
+## D-110 — sav grows: modules, checked indexing, a program that changed language, and tagged unions
+
+D-109 left a language that could compile one file, could not check an index,
+and had nothing to build a library out of. This is the four things that
+followed, in the order they were built, each verified by running it.
+
+### `use`, and a library
+
+`use "num.sav"` reads a file **beside the one that says it**, once however many
+times it is named. Resolving beside the including file rather than beside the
+working directory is the whole point: a program that compiled from one
+directory and not from another would be a build that depends on where you
+stood. A diamond of `use` is an ordinary shape and not an error.
+
+Everything shares one set of names — there are no namespaces, and saying so is
+better than pretending the question was settled. Diagnostics now name the file
+the function is in, which was not the same thing as the file savc was invoked
+on the moment a second file existed; the file and its text travel on the `Fn`,
+and the checker and the code generator set them per function.
+
+`lib/num.sav`, `lib/text.sav` and `lib/say.sav` are the library. The first two
+take no capability at all, so nothing in them can reach the world; `say.sav`
+takes a `Console` as an argument, which is what makes `say_num(out, 42)` say on
+its own line where the permission came from.
+
+**What proved it:** every test program that printed a number carried its own
+copy of the routine, and now none of them do. The expected output did not
+change. That is the check — not that the files compile, but that removing the
+duplication changed nothing about what the programs print.
+
+### Every index is checked
+
+One unsigned comparison per index, which catches a negative index as the very
+large unsigned number it is, and both ends of every slice. What fails names the
+file, the line, and the two numbers with the words that fit them: an index
+against a length, a start against an end, an end against a length. The compiler
+grew a decimal printer of its own to do that, because a range failure that
+could not name the index would send the reader back to the source to guess.
+
+Two things moved earlier than run time. A constant index into an array of known
+length is refused while compiling. And a bare pointer cannot be indexed at all:
+it does not know how many there are, so `p[0..n]` is where the count is said —
+the one place in the language where a length is asserted rather than checked,
+and now impossible to reach by accident.
+
+There is no flag to turn this off. sav has no optimiser, so the argument for an
+escape hatch is an argument about a cost nothing here is paying.
+
+### A program that already had a test changed language
+
+`upper` reads standard input and writes it back in capitals. It exists in C in
+`pkg/stam/progs` and now in sav in `pkg/sav/examples`, and stam cannot tell
+them apart: it loads an ELF, the program reads fd 0 and writes fd 1, and vsh
+puts it after a `|`. The boot script runs `hello sav-pipeline | savupper` and
+the check is hello's own argv line, capitalised by a program savc built.
+
+Its manifest carries `read` as well as `write` — the only difference between it
+and savhello, and it comes from the same place: the capability its entry point
+asks for.
+
+### Enums, and a match that must be exhaustive
+
+A value is eight bytes of tag and then the payload of whichever case it holds.
+That makes it as large as its largest case and passable by value, which is what
+makes the feature worth having; a case may carry numbers, pointers and slices,
+and to carry a struct it carries a pointer to one, so that the size of one case
+cannot decide the size of every value of the type.
+
+`match` must cover every case or end with `else`, and — this is the sav-shaped
+half — an `else` when every case is already taken **does not compile**. That
+arm can never run, and a branch that can never run reads as a safety net while
+catching nothing: the same defect as a report that does not depend on what it
+reports, in control flow rather than in prose. An arm after `else`, a case
+matched twice, and half the payload named are all errors for the same reason:
+a reader would have to work out which one of them was the truth.
+
+Two mistakes were made here and both are worth recording, because both would
+have been invisible in a test that only checked the happy path:
+
+- An enum returned by value was built in the callee's frame and its address
+  handed back — a pointer into memory that stopped existing at `ret`. It is now
+  built in space the **caller** owns, whose address arrives in x8, which is
+  what AAPCS does and, more to the point, the only thing that works.
+- Saving that x8 in the prologue was written as `mov x0, x8` followed by a
+  store, which clobbered the first argument of every function that both takes
+  one and returns an aggregate. It presented as a tag full of stack addresses.
+  The fix is to store x8 straight to the frame and never touch x0 through x7.
+
+A `gives` clause about a returned enum is refused: there is nothing in the
+language that can yet be said about one — no test on a tag exists to write — so
+such a clause could only be vacuous, and vacuous claims do not compile. That is
+a limit admitted rather than a hole left open.
+
+### What is still not done
+
+No namespaces. No floating point. No struct arguments by value. No
+self-hosting: savc is written in C, and sav cannot yet express savc. aarch64
+only, so nothing in the distribution is built with it — sav compiles programs
+stam runs, and that is the whole of its reach today.

@@ -76,7 +76,7 @@ typedef enum {
     /* keywords */
     T_FN, T_ENTRY, T_STRUCT, T_CONST, T_VAR, T_LET, T_IF, T_ELSE, T_WHILE,
     T_FOR, T_IN, T_RETURN, T_BREAK, T_CONTINUE, T_NEEDS, T_GIVES,
-    T_ASSERT, T_AS, T_DEV, T_TRUE, T_FALSE, T_SIZE, T_USE
+    T_ASSERT, T_AS, T_DEV, T_TRUE, T_FALSE, T_SIZE, T_USE, T_ENUM, T_MATCH
 } TokKind;
 
 typedef struct Token {
@@ -101,10 +101,19 @@ Token *lex_peek(Lexer *lx);
 const char *tok_name(TokKind k);
 
 /* ---- types ------------------------------------------------------------- */
-typedef enum { TY_VOID, TY_BOOL, TY_INT, TY_PTR, TY_SLICE, TY_ARRAY, TY_STRUCT, TY_CAP } TypeKind;
+typedef enum { TY_VOID, TY_BOOL, TY_INT, TY_PTR, TY_SLICE, TY_ARRAY, TY_STRUCT, TY_ENUM, TY_CAP } TypeKind;
 
 typedef struct Type Type;
 typedef struct Field { char *name; Type *type; int offset; } Field;
+
+/* One case of an enum: its name, the number stored in the tag, and what it
+ * carries. Offsets are from the start of the value, so the tag's eight bytes
+ * are already counted in them. */
+typedef struct Variant {
+    char *name;
+    int index;
+    Field *fields; int nfields;
+} Variant;
 
 struct Type {
     TypeKind kind;
@@ -118,6 +127,8 @@ struct Type {
     /* TY_STRUCT */
     char *name;
     Field *fields; int nfields;
+    /* TY_ENUM */
+    Variant *variants; int nvariants;
     /* TY_CAP */
     int cap_id;
 };
@@ -162,7 +173,7 @@ Type *ty_cap(CapDef *d);
 typedef enum {
     E_INT, E_BOOL, E_STR, E_VAR, E_CALL, E_METHOD, E_UNARY, E_BINARY,
     E_INDEX, E_FIELD, E_CAST, E_ASSIGN, E_SLICE, E_ADDR, E_DEREF,
-    E_SIZE, E_LEN
+    E_SIZE, E_LEN, E_VARIANT
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -183,11 +194,27 @@ struct Expr {
     Expr *a, *b, *c;
     Expr **args; int nargs;
     Field *field;           /* E_FIELD after resolution */
+    Variant *variant;       /* E_VARIANT after resolution */
+    int temp_off;           /* E_VARIANT: the frame slot it is built in */
     int is_lvalue;
 };
 
 /* ---- statements -------------------------------------------------------- */
-typedef enum { S_LET, S_EXPR, S_IF, S_WHILE, S_FOR, S_RETURN, S_BLOCK, S_BREAK, S_CONTINUE, S_ASSERT } StmtKind;
+typedef enum { S_LET, S_EXPR, S_IF, S_WHILE, S_FOR, S_RETURN, S_BLOCK, S_BREAK,
+               S_CONTINUE, S_ASSERT, S_MATCH } StmtKind;
+
+/* One arm of a match. `is_else` is the arm that takes whatever is left, and
+ * it is an error when there is nothing left for it to take. */
+typedef struct MatchArm {
+    char *name;             /* the variant, or null for `else` */
+    int is_else;
+    int index;              /* resolved variant number */
+    Variant *variant;
+    char **binds; int nbinds;
+    struct Sym **bind_syms;
+    struct Stmt *body;
+    int line, col;
+} MatchArm;
 
 typedef struct Stmt Stmt;
 struct Stmt {
@@ -202,6 +229,9 @@ struct Stmt {
     Expr *lo, *hi;
     /* S_BLOCK */
     Stmt **stmts; int nstmts;
+    /* S_MATCH */
+    MatchArm *arms; int narms;
+    int subject_off;        /* the frame slot holding the address matched on */
 };
 
 /* ---- symbols ----------------------------------------------------------- */
@@ -242,6 +272,7 @@ typedef struct Fn {
     Stmt *body;
     int is_entry;
     int frame_size;
+    int sret_off;         /* where the caller's space for an aggregate result is kept */
     int result_off;       /* where `result` sits while an ensures clause reads it */
     int code_off;         /* filled in by codegen */
     struct Fn *next;

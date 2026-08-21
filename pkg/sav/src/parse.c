@@ -219,9 +219,31 @@ static Expr *parse_postfix(P *p) {
             lex_next(&p->lx);
             int nline = p->lx.tok.line, ncol = p->lx.tok.col;
             char *name = expect_ident(p);
-            /* `x.name(...)` is never a call in sav: the only methods are a
-             * capability's, and those are called with `!` so that a line which
-             * reaches the world can be told from one that does not. */
+            /* `Reply.Ok(5)` builds a case of an enum. It is the one thing
+             * that looks like a method call and is not one — and it is told
+             * apart by the receiver being the name of a type. */
+            if (e->kind == E_VAR && e->name) {
+                Type *en = find_struct(p, e->name);
+                if (en && en->kind == TY_ENUM) {
+                    Expr *v = xmalloc(sizeof *v);
+                    v->kind = E_VARIANT; v->line = e->line; v->col = e->col;
+                    v->type = en; v->name = name;
+                    if (accept(p, T_LPAREN)) {
+                        Expr **args = NULL; int na = 0;
+                        if (p->lx.tok.kind != T_RPAREN) {
+                            for (;;) {
+                                args = realloc(args, sizeof(Expr *) * (size_t)(na + 1));
+                                args[na++] = parse_expr(p);
+                                if (!accept(p, T_COMMA)) break;
+                            }
+                        }
+                        expect(p, T_RPAREN);
+                        v->args = args; v->nargs = na;
+                    }
+                    e = v;
+                    continue;
+                }
+            }
             if (p->lx.tok.kind == T_LPAREN)
                 die_at(src_name, nline, ncol,
                        "the only methods in sav are a capability's, and they are called with "
@@ -412,6 +434,38 @@ static Stmt *parse_stmt(P *p) {
     }
     case T_BREAK: { Stmt *s = new_stmt(p, S_BREAK); lex_next(&p->lx); expect(p, T_SEMI); return s; }
     case T_CONTINUE: { Stmt *s = new_stmt(p, S_CONTINUE); lex_next(&p->lx); expect(p, T_SEMI); return s; }
+    case T_MATCH: {
+        Stmt *s = new_stmt(p, S_MATCH);
+        lex_next(&p->lx);
+        s->expr = parse_expr(p);
+        expect(p, T_LBRACE);
+        MatchArm *arms = NULL; int n = 0;
+        while (p->lx.tok.kind != T_RBRACE) {
+            MatchArm a;
+            memset(&a, 0, sizeof a);
+            a.line = p->lx.tok.line; a.col = p->lx.tok.col;
+            if (accept(p, T_ELSE)) a.is_else = 1;
+            else {
+                a.name = expect_ident(p);
+                if (accept(p, T_LPAREN)) {
+                    while (p->lx.tok.kind != T_RPAREN) {
+                        a.binds = realloc(a.binds, sizeof(char *) * (size_t)(a.nbinds + 1));
+                        a.binds[a.nbinds++] = expect_ident(p);
+                        if (!accept(p, T_COMMA)) break;
+                    }
+                    expect(p, T_RPAREN);
+                }
+            }
+            expect(p, T_ARROW);
+            a.body = parse_stmt(p);
+            arms = realloc(arms, sizeof(MatchArm) * (size_t)(n + 1));
+            arms[n++] = a;
+        }
+        expect(p, T_RBRACE);
+        if (!n) die_at(src_name, s->line, s->col, "a match with no arms decides nothing");
+        s->arms = arms; s->narms = n;
+        return s;
+    }
     case T_ASSERT: {
         Stmt *s = new_stmt(p, S_ASSERT);
         int l1 = p->lx.tok.line, c1;
@@ -454,6 +508,59 @@ static void parse_struct(P *p) {
     t->fields = fields; t->nfields = n;
     t->align = align;
     t->size = (off + align - 1) & ~(align - 1);
+    p->unit->structs = realloc(p->unit->structs, sizeof(Type *) * (size_t)(p->unit->nstructs + 1));
+    p->unit->structs[p->unit->nstructs++] = t;
+}
+
+/* An enum is a tag and, after it, whatever the chosen case carries. The tag
+ * is eight bytes so that every payload after it is aligned without thought,
+ * and the value is as large as its largest case — which is why a `match` can
+ * read the payload straight out of the value rather than through a pointer. */
+static void parse_enum(P *p) {
+    lex_next(&p->lx);
+    Type *t = xmalloc(sizeof *t);
+    t->kind = TY_ENUM;
+    t->name = expect_ident(p);
+    expect(p, T_LBRACE);
+    Variant *vs = NULL; int n = 0, biggest = 8;
+    while (p->lx.tok.kind != T_RBRACE) {
+        Variant v;
+        memset(&v, 0, sizeof v);
+        v.name = expect_ident(p);
+        v.index = n;
+        int off = 8;
+        if (accept(p, T_LPAREN)) {
+            while (p->lx.tok.kind != T_RPAREN) {
+                char *fname = expect_ident(p);
+                expect(p, T_COLON);
+                Type *ft = parse_type(p);
+                if (ft->kind == TY_ENUM || ft->kind == TY_STRUCT)
+                    die_at(src_name, p->lx.tok.line, p->lx.tok.col,
+                           "a case carries numbers, pointers and slices; for %s carry a pointer "
+                           "to it, so that the size of one case cannot decide the size of every "
+                           "value of this type", ty_str(ft));
+                off = (off + ft->align - 1) & ~(ft->align - 1);
+                v.fields = realloc(v.fields, sizeof(Field) * (size_t)(v.nfields + 1));
+                v.fields[v.nfields].name = fname;
+                v.fields[v.nfields].type = ft;
+                v.fields[v.nfields].offset = off;
+                v.nfields++;
+                off += ft->size;
+                if (!accept(p, T_COMMA)) break;
+            }
+            expect(p, T_RPAREN);
+        }
+        if (off > biggest) biggest = off;
+        vs = realloc(vs, sizeof(Variant) * (size_t)(n + 1));
+        vs[n++] = v;
+        if (!accept(p, T_COMMA)) break;
+    }
+    expect(p, T_RBRACE);
+    if (!n) die_at(src_name, p->lx.tok.line, p->lx.tok.col,
+                   "an enum with no cases is a type with no values");
+    t->variants = vs; t->nvariants = n;
+    t->align = 8;
+    t->size = (biggest + 7) & ~7;
     p->unit->structs = realloc(p->unit->structs, sizeof(Type *) * (size_t)(p->unit->nstructs + 1));
     p->unit->structs[p->unit->nstructs++] = t;
 }
@@ -539,6 +646,7 @@ static void parse_decls(P *p) {
     while (p->lx.tok.kind != T_EOF) {
         switch (p->lx.tok.kind) {
         case T_STRUCT: parse_struct(p); break;
+        case T_ENUM: parse_enum(p); break;
         case T_FN: parse_fn(p, 0); break;
         case T_ENTRY:
             lex_next(&p->lx);

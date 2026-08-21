@@ -1,0 +1,4 @@
+// expect: could only be vacuous
+enum R { A, B, }
+fn make() -> r: R gives true { return R.A; }
+entry fn main(out: Console) -> i32 { out!write("x"); return 0; }

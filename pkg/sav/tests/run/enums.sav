@@ -1,0 +1,61 @@
+// Tagged unions, and a match that must say what to do with every case.
+use "../../lib/say.sav";
+
+enum Reply {
+    Ok(n: i64),
+    Failed(code: i64, why: []u8),
+    Nothing,
+}
+
+fn parse(v: i64) -> r: Reply {
+    if v > 0 { return Reply.Ok(v * 2); }
+    if v == 0 { return Reply.Nothing; }
+    return Reply.Failed(v, "a number below zero");
+}
+
+// An enum travels by value: the caller's copy is the callee's, and neither can
+// reach into the other.
+fn report(out: Console, r: Reply) {
+    match r {
+        Ok(n) -> {
+            out!write("ok ");
+            say_num(out, n);
+            out!write("\n");
+        }
+        Failed(code, why) -> {
+            out!write("failed ");
+            say_num(out, code);
+            out!write(": ");
+            out!write(why);
+            out!write("\n");
+        }
+        Nothing -> { out!write("nothing\n"); }
+    }
+}
+
+// An arm may ignore what a case carries, and `else` may take the rest — but
+// only while there is a rest for it to take.
+fn short(out: Console, r: Reply) {
+    match r {
+        Ok -> { out!write("something\n"); }
+        else -> { out!write("not a number\n"); }
+    }
+}
+
+entry fn main(out: Console) -> i32 {
+    report(out, parse(21));
+    report(out, parse(0));
+    report(out, parse(0 - 7));
+
+    short(out, parse(1));
+    short(out, parse(0));
+
+    var here: Reply;
+    here = Reply.Ok(5);
+    match here {
+        Ok(n) -> { say_num(out, n); out!write("\n"); }
+        Failed(code, why) -> { out!write("unreachable\n"); }
+        Nothing -> { out!write("unreachable\n"); }
+    }
+    return 0;
+}

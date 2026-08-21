@@ -127,8 +127,12 @@ static int type_load_size(Type *t) {
 /* Load the value at [rbase, off] into x0 (and x1 for a slice). A struct or an
  * array is not loaded: its address is the value, and a copy only happens
  * where the source says copy. */
+static int is_aggregate(Type *t) {
+    return t->kind == TY_STRUCT || t->kind == TY_ARRAY || t->kind == TY_ENUM;
+}
+
 static void load_value(G *g, int rbase, i64 off, Type *t) {
-    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY) {
+    if (is_aggregate(t)) {
         if (off == 0) { emit(g, a_mov(X0, rbase)); return; }
         emit_imm(g, X17, (u64)off);
         emit(g, a_add(X0, rbase, X17));
@@ -151,7 +155,7 @@ static void store_value(G *g, int rbase, i64 off, Type *t) {
         emit(g, a_str_off(X1, rbase, off + 8, 8));
         return;
     }
-    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY) {
+    if (is_aggregate(t)) {
         /* x0 holds the address of the source; copy size bytes, eight at a
          * time and then one at a time. */
         int n = t->size, i = 0;
@@ -182,7 +186,7 @@ static void frame_load(G *g, int off, Type *t) {
 }
 static void frame_store(G *g, int off, Type *t) {
     if (off <= 240) { store_value(g, X29, -(i64)off, t); return; }
-    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY) {
+    if (is_aggregate(t)) {
         push_pair_fwd(g);
         local_addr(g, X9, off);
         pop_pair_fwd(g, X0, X1);
@@ -191,6 +195,17 @@ static void frame_store(G *g, int off, Type *t) {
     }
     push_pair_fwd(g);
     local_addr(g, X9, off);
+    pop_pair_fwd(g, X0, X1);
+    store_value(g, X9, 0, t);
+}
+
+/* x0 (and x1) into one field of a value that lives in a frame slot. The
+ * address is recomputed rather than held in a register, because whatever
+ * produced the value was free to use every register there is. */
+static void frame_store_field(G *g, int slot_off, int field_off, Type *t) {
+    push_pair_fwd(g);
+    local_addr(g, X9, slot_off);
+    if (field_off) { emit_imm(g, X17, (u64)field_off); emit(g, a_add(X9, X9, X17)); }
     pop_pair_fwd(g, X0, X1);
     store_value(g, X9, 0, t);
 }
@@ -395,7 +410,7 @@ static void gen_expr(G *g, Expr *e) {
             emit_addr(g, X16, SEC_BSS, s->offset);
             load_value(g, X16, 0, e->type);
         } else {
-            if (e->type->kind == TY_STRUCT || e->type->kind == TY_ARRAY) local_addr(g, X0, s->offset);
+            if (is_aggregate(e->type)) local_addr(g, X0, s->offset);
             else frame_load(g, s->offset, e->type);
         }
         return;
@@ -412,6 +427,11 @@ static void gen_expr(G *g, Expr *e) {
             int second = (plist[i]->type->kind == TY_SLICE) ? reg + 1 : X17;
             pop_pair(g, reg, second);
         }
+        /* An aggregate comes back in space the caller owns: x8 holds its
+         * address, which is what AAPCS does and, more to the point, the only
+         * thing that works — a value built in the callee's frame is gone the
+         * instant the callee returns. */
+        if (is_aggregate(e->fn->ret)) local_addr(g, X8, e->temp_off);
         emit_call(g, e->fn->code_off);      /* code_off holds the callee's label */
         return;
     }
@@ -527,6 +547,20 @@ static void gen_expr(G *g, Expr *e) {
         emit(g, a_sub(X1, X9, X10));
         return;
     }
+    case E_VARIANT: {
+        /* The tag first, then whatever the case carries, into the slot the
+         * checker set aside. The value of the expression is its address, the
+         * same as a struct's. */
+        emit_imm(g, X0, (u64)e->variant->index);
+        frame_store_field(g, e->temp_off, 0, ty_int(64, 1));
+        for (int i = 0; i < e->nargs; i++) {
+            gen_expr(g, e->args[i]);
+            frame_store_field(g, e->temp_off, e->variant->fields[i].offset,
+                              e->variant->fields[i].type);
+        }
+        local_addr(g, X0, e->temp_off);
+        return;
+    }
     case E_ADDR: gen_addr(g, e->a); return;
     case E_DEREF:
         gen_expr(g, e->a);
@@ -582,6 +616,21 @@ static void gen_ensures(G *g) {
 
 /* ---- statements -------------------------------------------------------- */
 static void gen_return(G *g, Stmt *s) {
+    if (s->expr && is_aggregate(g->fn->ret)) {
+        /* x0 is the address of the value the body built; copy it into the
+         * caller's space and hand that address back. */
+        gen_expr(g, s->expr);
+        push_pair(g);
+        frame_load(g, g->fn->sret_off, ty_ptr(ty_int(8, 0), 0));
+        emit(g, a_mov(X9, X0));
+        pop_pair(g, X0, X1);
+        store_value(g, X9, 0, g->fn->ret);
+        emit(g, a_mov(X0, X9));
+        emit(g, a_mov_sp(SP, X29));
+        emit(g, a_ldp_post(X29, X30, SP, 16));
+        emit(g, a_ret());
+        return;
+    }
     if (s->expr) {
         gen_expr(g, s->expr);
         if (g->fn->nens) {
@@ -605,7 +654,7 @@ static void gen_stmt(G *g, Stmt *s) {
     case S_LET:
         if (s->init) {
             gen_expr(g, s->init);
-            if (s->type->kind == TY_STRUCT || s->type->kind == TY_ARRAY) {
+            if (is_aggregate(s->type)) {
                 push_pair(g);
                 local_addr(g, X9, s->sym->offset);
                 pop_pair(g, X0, X1);
@@ -660,6 +709,43 @@ static void gen_stmt(G *g, Stmt *s) {
         emit_branch(g, top);
         place(g, out);
         g->brk_lab = ob; g->cont_lab = oc;
+        return;
+    }
+    case S_MATCH: {
+        /* The value is matched by its address: nothing is copied, and an arm
+         * reads the payload out of the value itself. */
+        gen_expr(g, s->expr);
+        frame_store_field(g, s->subject_off, 0, ty_ptr(ty_int(8, 0), 0));
+
+        int end = newlab(g);
+        int *arm_lab = xmalloc(sizeof(int) * (size_t)s->narms);
+        for (int i = 0; i < s->narms; i++) arm_lab[i] = newlab(g);
+
+        frame_load(g, s->subject_off, ty_ptr(ty_int(8, 0), 0));
+        emit(g, a_ldr_off(X1, X0, 0, 8, 0));            /* the tag */
+        int else_arm = -1;
+        for (int i = 0; i < s->narms; i++) {
+            if (s->arms[i].is_else) { else_arm = i; continue; }
+            emit_imm(g, X2, (u64)s->arms[i].index);
+            emit(g, a_subs(XZR, X1, X2));
+            emit_bcond(g, CC_EQ, arm_lab[i]);
+        }
+        emit_branch(g, else_arm >= 0 ? arm_lab[else_arm] : end);
+
+        for (int i = 0; i < s->narms; i++) {
+            place(g, arm_lab[i]);
+            MatchArm *a = &s->arms[i];
+            if (!a->is_else) {
+                for (int b = 0; b < a->nbinds; b++) {
+                    frame_load(g, s->subject_off, ty_ptr(ty_int(8, 0), 0));
+                    load_value(g, X0, a->variant->fields[b].offset, a->variant->fields[b].type);
+                    frame_store(g, a->bind_syms[b]->offset, a->variant->fields[b].type);
+                }
+            }
+            gen_stmt(g, a->body);
+            emit_branch(g, end);
+        }
+        place(g, end);
         return;
     }
     case S_RETURN: gen_return(g, s); return;
@@ -883,6 +969,14 @@ static void gen_fn(G *g, Fn *f, int label) {
     emit(g, a_stp_pre(X29, X30, SP, -16));
     emit(g, a_mov_sp(X29, SP));
     if (f->frame_size) emit_sub_sp(g, f->frame_size);
+    /* Where the caller wants an aggregate result put, kept before anything
+     * else runs — and written straight from x8, because x0 through x7 hold
+     * the arguments and a save that clobbered one of them would break every
+     * function that returns a value and takes one. */
+    if (is_aggregate(f->ret)) {
+        if (f->sret_off <= 240) emit(g, a_str_off(X8, X29, -(i64)f->sret_off, 8));
+        else { local_addr(g, X16, f->sret_off); emit(g, a_str_off(X8, X16, 0, 8)); }
+    }
 
     /* parameters arrive in registers and are written to the frame at once, so
      * that everything below has one place to look for them */

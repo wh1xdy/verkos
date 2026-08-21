@@ -61,7 +61,7 @@ static struct { const char *word; TokKind kind; } keywords[] = {
     {"break", T_BREAK}, {"continue", T_CONTINUE}, {"needs", T_NEEDS},
     {"gives", T_GIVES}, {"assert", T_ASSERT}, {"as", T_AS}, {"dev", T_DEV},
     {"true", T_TRUE}, {"false", T_FALSE}, {"size", T_SIZE},
-    {"use", T_USE},
+    {"use", T_USE}, {"enum", T_ENUM}, {"match", T_MATCH},
 };
 
 const char *tok_name(TokKind k) {

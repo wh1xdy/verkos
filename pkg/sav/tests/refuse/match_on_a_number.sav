@@ -1,0 +1,8 @@
+// expect: chooses between the cases of an enum
+entry fn main(out: Console) -> i32 {
+    let n: i64 = 3;
+    match n {
+        A -> { out!write("a"); }
+    }
+    return 0;
+}

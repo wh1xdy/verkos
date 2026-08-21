@@ -1,0 +1,12 @@
+// expect: comes after `else`
+enum R { A, B, C, }
+entry fn main(out: Console) -> i32 {
+    var r: R;
+    r = R.A;
+    match r {
+        A -> { out!write("a"); }
+        else -> { out!write("rest"); }
+        B -> { out!write("b"); }
+    }
+    return 0;
+}

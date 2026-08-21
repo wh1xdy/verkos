@@ -1,0 +1,12 @@
+// expect: already taken by an earlier arm
+enum R { A, B, }
+entry fn main(out: Console) -> i32 {
+    var r: R;
+    r = R.A;
+    match r {
+        A -> { out!write("a"); }
+        A -> { out!write("again"); }
+        B -> { out!write("b"); }
+    }
+    return 0;
+}

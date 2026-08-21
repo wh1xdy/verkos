@@ -1,0 +1,12 @@
+// expect: can never run
+enum R { A, B, }
+entry fn main(out: Console) -> i32 {
+    var r: R;
+    r = R.A;
+    match r {
+        A -> { out!write("a"); }
+        B -> { out!write("b"); }
+        else -> { out!write("never"); }
+    }
+    return 0;
+}

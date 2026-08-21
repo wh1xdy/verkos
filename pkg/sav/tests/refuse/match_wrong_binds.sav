@@ -1,0 +1,11 @@
+// expect: name all of them or none
+enum R { A(x: i64, y: i64), B, }
+entry fn main(out: Console) -> i32 {
+    var r: R;
+    r = R.B;
+    match r {
+        A(x) -> { out!write("a"); }
+        B -> { out!write("b"); }
+    }
+    return 0;
+}

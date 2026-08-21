@@ -1,0 +1,11 @@
+// expect: does not say what to do with
+enum R { A, B, C, }
+entry fn main(out: Console) -> i32 {
+    var r: R;
+    r = R.A;
+    match r {
+        A -> { out!write("a"); }
+        C -> { out!write("c"); }
+    }
+    return 0;
+}

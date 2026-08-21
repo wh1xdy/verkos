@@ -2,7 +2,7 @@
 
     make                       # builds savc for this host
     ./savc examples/savhello.sav -o savhello --manifest
-    sh tests/run.sh            # the suite: 13 refusals, 8 programs, 5 checks on the binary
+    sh tests/run.sh            # the suite: refusals, programs run and compared, and the binary itself
 
 `savc` turns one `.sav` file into one aarch64 ELF executable. Nothing else is
 involved: no preprocessor, no assembler, no linker, no libc, no relocations.
@@ -21,6 +21,8 @@ have cost this project the most time:
 4. `dev *T` is reached only through `uart@`: one access, the declared width,
    where it is written. And no address savc emits ever needs relocating.
 
+    lib/           num.sav, text.sav, say.sav — what there is of a library
+    examples/      savhello.sav, upper.sav — programs stam runs
     src/lex.c      tokens, and the diagnostics everything else uses
     src/types.c    types, and the capability table — the one list of calls
     src/parse.c    source to a tree

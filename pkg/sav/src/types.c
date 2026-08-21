@@ -60,7 +60,7 @@ int ty_same(Type *a, Type *b) {
     case TY_PTR:   return a->is_dev == b->is_dev && ty_same(a->elem, b->elem);
     case TY_SLICE: return ty_same(a->elem, b->elem);
     case TY_ARRAY: return a->nelem == b->nelem && ty_same(a->elem, b->elem);
-    case TY_STRUCT: return strcmp(a->name, b->name) == 0;
+    case TY_STRUCT: case TY_ENUM: return strcmp(a->name, b->name) == 0;
     case TY_CAP:   return a->cap_id == b->cap_id;
     default: return 1;
     }
@@ -77,7 +77,7 @@ const char *ty_str(Type *t) {
     case TY_PTR:  snprintf(b, 128, "%s*%s", t->is_dev ? "dev " : "", ty_str(t->elem)); break;
     case TY_SLICE: snprintf(b, 128, "[]%s", ty_str(t->elem)); break;
     case TY_ARRAY: snprintf(b, 128, "[%lld]%s", (long long)t->nelem, ty_str(t->elem)); break;
-    case TY_STRUCT: snprintf(b, 128, "%s", t->name); break;
+    case TY_STRUCT: case TY_ENUM: snprintf(b, 128, "%s", t->name); break;
     case TY_CAP:  snprintf(b, 128, "%s", cap_defs[t->cap_id].name); break;
     }
     return b;
