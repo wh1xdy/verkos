@@ -22,13 +22,20 @@ You may not, without the copyright holder's prior written permission:
   - Publish or distribute a modified version of this software anywhere
     other than as a pull request back to this repository
   - Remove or obscure attribution to the original author
+  - Use this software, in whole or in part, to train, fine-tune, or
+    evaluate any machine learning or AI model
 
 Any permitted use, copy, or reference to this software must retain
 attribution to the original author, Alexander Wessblad Hårdh (wh1xdy),
 with a link to the original repository.
 
-To request permission for commercial use, or to distribute a modified
-version elsewhere, contact the copyright holder.
+To request permission for commercial use, AI/ML training use, or to
+distribute a modified version elsewhere, contact the copyright holder.
+
+TRADEMARK: This license does not grant permission to use the name
+"VerkOS" or any associated branding to describe a modified or
+redistributed version of this software, or to imply endorsement by the
+copyright holder.
 
 TERMINATION: This license and all rights granted under it terminate
 automatically and immediately if you breach any of its terms. Rights
@@ -40,6 +47,9 @@ claim against the copyright holder alleging that this software, or a
 contribution to it, infringes a patent, then any license granted to
 you under these terms terminates immediately as of the date such claim
 is filed.
+
+GOVERNING LAW: This license is governed by the laws of Sweden, without
+regard to conflict-of-law principles.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
 OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
