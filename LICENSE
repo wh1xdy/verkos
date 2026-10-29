@@ -1,29 +1,58 @@
-MIT License
+Copyright (c) 2026 Alexander Wessblad Hårdh (wh1xdy)
 
-Copyright (c) 2026 VerkOS contributors
+This applies to VerkOS's own original code: the `stam` kernel, the `sav`
+language and its compiler `savc`, build scripts, and documentation in
+this repository. It does not apply to the upstream free-software
+components VerkOS builds (GCC, glibc, the Linux kernel, systemd, GNU
+coreutils, and others) — each of those keeps its own license (GPL, LGPL,
+and others); see the note at the end of this file.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+You are free to:
+  - Read, study, and learn from the source code
+  - Clone or fork the repository for your own private, non-commercial use
+  - Build and run the software for your own private, non-commercial use
+  - Submit contributions (pull requests) back to this repository
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Contributions submitted via pull request are welcome. By submitting one,
+you agree it may be included in this project under these same terms,
+and you keep attribution for your own contribution.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+You may not, without the copyright holder's prior written permission:
+  - Use this software, in whole or in part, for commercial purposes
+  - Publish or distribute a modified version of this software anywhere
+    other than as a pull request back to this repository
+  - Remove or obscure attribution to the original author
+
+Any permitted use, copy, or reference to this software must retain
+attribution to the original author, Alexander Wessblad Hårdh (wh1xdy),
+with a link to the original repository.
+
+To request permission for commercial use, or to distribute a modified
+version elsewhere, contact the copyright holder.
+
+TERMINATION: This license and all rights granted under it terminate
+automatically and immediately if you breach any of its terms. Rights
+are not reinstated until the copyright holder grants them again in
+writing.
+
+PATENTS: If you (or an entity you control) bring a patent infringement
+claim against the copyright holder alleging that this software, or a
+contribution to it, infringes a patent, then any license granted to
+you under these terms terminates immediately as of the date such claim
+is filed.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ---
 
-NOTE: The VerkOS build scripts and documentation in this repository are licensed
-under the MIT License above. VerkOS *builds* upstream free software (GCC, glibc,
-the Linux kernel, systemd, GNU coreutils, and others); each of those components
-is distributed under its own license (GPL, LGPL, and others). Building or
-distributing a VerkOS system means complying with those upstream licenses too.
+NOTE: The VerkOS build scripts and documentation in this repository are
+licensed under the terms above. VerkOS *builds* upstream free software
+(GCC, glibc, the Linux kernel, systemd, GNU coreutils, and others); each
+of those components is distributed under its own license (GPL, LGPL,
+and others). Building or distributing a VerkOS system means complying
+with those upstream licenses too.
